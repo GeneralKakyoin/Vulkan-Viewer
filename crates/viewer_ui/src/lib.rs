@@ -68,22 +68,22 @@ impl UiSystem {
                 .default_pos(egui::pos2(16.0, 48.0))
                 .resizable(false)
                 .show(ctx, |ui| {
-                ui.label("First vertical slice is alive.");
-                ui.separator();
-                ui.label(format!(
-                    "Surface: {}x{}",
-                    surface_size.width, surface_size.height
-                ));
-                ui.separator();
-                ui.label(format!(
-                    "Camera pos: x={:.2} y={:.2} z={:.2}",
-                    camera.position[0], camera.position[1], camera.position[2]
-                ));
-                ui.label(format!(
-                    "Camera yaw/pitch: {:.2} / {:.2} rad",
-                    camera.yaw, camera.pitch
-                ));
-            });
+                    ui.label("First vertical slice is alive.");
+                    ui.separator();
+                    ui.label(format!(
+                        "Surface: {}x{}",
+                        surface_size.width, surface_size.height
+                    ));
+                    ui.separator();
+                    ui.label(format!(
+                        "Camera pos: x={:.2} y={:.2} z={:.2}",
+                        camera.position[0], camera.position[1], camera.position[2]
+                    ));
+                    ui.label(format!(
+                        "Camera yaw/pitch: {:.2} / {:.2} rad",
+                        camera.yaw, camera.pitch
+                    ));
+                });
         });
 
         self.egui_state

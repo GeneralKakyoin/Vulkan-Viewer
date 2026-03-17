@@ -455,8 +455,10 @@ impl RenderBackend {
 
                         render_pass.set_pipeline(&self.scene_pipeline);
                         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                        render_pass
-                            .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.set_index_buffer(
+                            mesh.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
                         render_pass.set_bind_group(
                             1,
                             &self.object_bind_group,
@@ -540,8 +542,11 @@ impl RenderBackend {
             flat[9], flat[10], flat[11], flat[12], flat[13], flat[14], flat[15], color[0],
             color[1], color[2], 1.0,
         ];
-        self.queue
-            .write_buffer(&self.object_buffer, byte_offset, bytemuck::bytes_of(&object_uniform));
+        self.queue.write_buffer(
+            &self.object_buffer,
+            byte_offset,
+            bytemuck::bytes_of(&object_uniform),
+        );
     }
 }
 
@@ -590,8 +595,8 @@ fn model_matrix(transform: Transform) -> [[f32; 4]; 4] {
 
 fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
     [
-        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0],
-        m[2][1], m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
+        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
+        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
     ]
 }
 
@@ -614,7 +619,12 @@ fn look_to_rh(eye: [f32; 3], direction: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4]
         [side[0], camera_up[0], -forward[0], 0.0],
         [side[1], camera_up[1], -forward[1], 0.0],
         [side[2], camera_up[2], -forward[2], 0.0],
-        [-dot(side, eye), -dot(camera_up, eye), dot(forward, eye), 1.0],
+        [
+            -dot(side, eye),
+            -dot(camera_up, eye),
+            dot(forward, eye),
+            1.0,
+        ],
     ]
 }
 
@@ -622,10 +632,8 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0; 4]; 4];
     for c in 0..4 {
         for r in 0..4 {
-            out[c][r] = a[0][r] * b[c][0]
-                + a[1][r] * b[c][1]
-                + a[2][r] * b[c][2]
-                + a[3][r] * b[c][3];
+            out[c][r] =
+                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
         }
     }
     out
