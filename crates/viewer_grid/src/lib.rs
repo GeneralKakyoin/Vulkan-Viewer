@@ -38,6 +38,12 @@ pub struct GridLoginRequestParams {
     pub agree_to_tos: bool,
     pub read_critical: bool,
     pub token: Option<String>,
+    pub channel: String,
+    pub version: String,
+    pub platform: String,
+    pub platform_version: String,
+    pub host_id: String,
+    pub machine_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -58,6 +64,9 @@ pub struct GridLoginResponse {
     pub region_y: Option<u32>,
     pub seed_capability: Option<String>,
     pub start_location: Option<String>,
+    pub look_at: Option<String>,
+    pub home: Option<String>,
+    pub motd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +78,9 @@ pub struct SessionBootstrap {
     pub first_sim: FirstSimulator,
     pub seed_capability: String,
     pub start_location: Option<String>,
+    pub look_at: Option<String>,
+    pub home: Option<String>,
+    pub motd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +134,25 @@ pub enum GridAdapterError {
     MissingField(&'static str),
 }
 
+const SECOND_LIFE_CLIENT_CHANNEL: &str = "rust-viewer";
+const SECOND_LIFE_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SECOND_LIFE_PLATFORM: &str = std::env::consts::OS;
+const SECOND_LIFE_PLATFORM_VERSION: &str = env!("CARGO_PKG_VERSION");
+const SECOND_LIFE_HOST_ID: &str = "rust-viewer-host";
+const SECOND_LIFE_MACHINE_HASH: &str = "rust-viewer-machine-hash";
+const SECOND_LIFE_LOGIN_OPTIONS: &[&str] = &[
+    "inventory-root",
+    "inventory-skeleton",
+    "buddy-list",
+    "event_categories",
+    "classified_categories",
+    "max-agent-groups",
+    "map-server-url",
+    "voice-config",
+    "login-flags",
+    "event_queue",
+];
+
 /// Grid boundary for login shaping and response interpretation.
 /// Transport/session mechanics remain in viewer_net.
 pub trait GridLoginAdapter {
@@ -157,19 +188,17 @@ impl GridLoginAdapter for SecondLifeAdapter {
                 agree_to_tos: intent.agree_to_tos,
                 read_critical: intent.read_critical,
                 token: intent.mfa_token.clone(),
+                channel: String::from(SECOND_LIFE_CLIENT_CHANNEL),
+                version: String::from(SECOND_LIFE_CLIENT_VERSION),
+                platform: String::from(SECOND_LIFE_PLATFORM),
+                platform_version: String::from(SECOND_LIFE_PLATFORM_VERSION),
+                host_id: String::from(SECOND_LIFE_HOST_ID),
+                machine_hash: String::from(SECOND_LIFE_MACHINE_HASH),
             },
-            // Minimal option set based on research note; expand later per adapter policy.
-            options: vec![
-                String::from("inventory-root"),
-                String::from("inventory-skeleton"),
-                String::from("buddy-list"),
-                String::from("event_categories"),
-                String::from("classified_categories"),
-                String::from("max-agent-groups"),
-                String::from("map-server-url"),
-                String::from("voice-config"),
-                String::from("login-flags"),
-            ],
+            options: SECOND_LIFE_LOGIN_OPTIONS
+                .iter()
+                .map(|item| item.to_string())
+                .collect(),
         }
     }
 
@@ -246,6 +275,9 @@ fn extract_bootstrap(response: &GridLoginResponse) -> Result<SessionBootstrap, G
             .clone()
             .ok_or(GridAdapterError::MissingField("seed_capability"))?,
         start_location: response.start_location.clone(),
+        look_at: response.look_at.clone(),
+        home: response.home.clone(),
+        motd: response.motd.clone(),
     })
 }
 
@@ -266,5 +298,49 @@ fn classify_failure(response: &GridLoginResponse) -> GridLoginError {
         class,
         reason,
         message: response.message.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_intent() -> LoginIntent {
+        LoginIntent {
+            username: String::from("test.user"),
+            password: String::from("secret"),
+            start_location: StartLocationIntent::Saved(StartLocation::Last),
+            agree_to_tos: true,
+            read_critical: true,
+            mfa_token: None,
+        }
+    }
+
+    #[test]
+    fn secondlife_request_populates_metadata() {
+        let request = SecondLifeAdapter.shape_login_request(&make_intent());
+        assert_eq!(request.params.channel, SECOND_LIFE_CLIENT_CHANNEL);
+        assert_eq!(request.params.version, SECOND_LIFE_CLIENT_VERSION);
+        assert_eq!(request.params.platform, SECOND_LIFE_PLATFORM);
+        assert_eq!(
+            request.params.platform_version,
+            SECOND_LIFE_PLATFORM_VERSION
+        );
+        assert_eq!(request.params.host_id, SECOND_LIFE_HOST_ID);
+        assert_eq!(request.params.machine_hash, SECOND_LIFE_MACHINE_HASH);
+    }
+
+    #[test]
+    fn secondlife_request_honors_uri_start() {
+        let mut intent = make_intent();
+        intent.start_location = StartLocationIntent::Uri(String::from("uri://some.where"));
+        let request = SecondLifeAdapter.shape_login_request(&intent);
+        assert_eq!(request.params.start, "uri://some.where");
+    }
+
+    #[test]
+    fn secondlife_request_options_include_event_queue() {
+        let request = SecondLifeAdapter.shape_login_request(&make_intent());
+        assert!(request.options.iter().any(|opt| opt == "event_queue"));
     }
 }
