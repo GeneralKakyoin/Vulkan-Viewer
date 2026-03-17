@@ -7,6 +7,10 @@ authors.workspace = true
 
 [dependencies]
 egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+wgpu.workspace = true
+winit.workspace = true
 tracing.workspace = true
 
 viewer_core = { path = "../viewer_core" }

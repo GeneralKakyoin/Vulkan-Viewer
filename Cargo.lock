@@ -2999,17 +2999,12 @@ name = "viewer_app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "egui",
- "egui-wgpu",
- "egui-winit",
- "pollster",
  "tracing",
  "tracing-subscriber",
  "viewer_core",
  "viewer_platform",
  "viewer_render",
  "viewer_ui",
- "wgpu",
  "winit",
 ]
 
@@ -3067,6 +3062,7 @@ name = "viewer_render"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pollster",
  "tracing",
  "viewer_core",
  "wgpu",
@@ -3078,8 +3074,12 @@ name = "viewer_ui"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "egui-wgpu",
+ "egui-winit",
  "tracing",
  "viewer_core",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]
