@@ -19,6 +19,27 @@ pub trait LoginCodec {
     fn decode_response(&self, body: &[u8]) -> Result<GridLoginResponse, CodecError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginWireFormat {
+    Json,
+    Llsd,
+}
+
+impl Default for LoginWireFormat {
+    fn default() -> Self {
+        LoginWireFormat::Json
+    }
+}
+
+impl LoginWireFormat {
+    fn codec(&self) -> Box<dyn LoginCodec> {
+        match self {
+            LoginWireFormat::Json => Box::new(JsonLoginCodec),
+            LoginWireFormat::Llsd => Box::new(LlsdLoginCodec),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonLoginCodec;
 
@@ -51,6 +72,7 @@ impl LoginCodec for JsonLoginCodec {
 pub struct ConnectionConfig {
     pub endpoint: String,
     pub connect_timeout: Duration,
+    pub wire_format: LoginWireFormat,
 }
 
 impl Default for ConnectionConfig {
@@ -58,6 +80,7 @@ impl Default for ConnectionConfig {
         Self {
             endpoint: String::from("https://example.invalid"),
             connect_timeout: Duration::from_secs(10),
+            wire_format: LoginWireFormat::Json,
         }
     }
 }
@@ -461,7 +484,7 @@ impl Connection {
         let mut endpoint = self.config.endpoint.clone();
         let mut http_method = Method::POST;
         let mut redirects = 0;
-        let codec = JsonLoginCodec;
+        let codec = self.config.wire_format.codec();
         let mut trace = LoginTrace {
             initial_request: trace_request(&request),
             redirect_steps: Vec::new(),
@@ -479,7 +502,7 @@ impl Connection {
 
         loop {
             let response = self
-                .http_transport_login(&request, &endpoint, http_method.clone(), &codec)
+                .http_transport_login(&request, &endpoint, http_method.clone(), codec.as_ref())
                 .await?;
             trace.final_response = trace_response(&response);
             let result = adapter.interpret_login_response(&response)?;
@@ -700,7 +723,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use viewer_grid::{GridLoginResult, SecondLifeAdapter, StartLocation, StartLocationIntent};
-    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_intent(agree_to_tos: bool) -> LoginIntent {
@@ -746,6 +769,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -791,6 +815,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -845,6 +870,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -881,6 +907,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -926,6 +953,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -980,6 +1008,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -1030,6 +1059,7 @@ mod tests {
         let mut connection = Connection::new(ConnectionConfig {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
+            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 
@@ -1100,5 +1130,90 @@ mod tests {
         assert_eq!(decoded.agent_id.as_deref(), Some("abcdef"));
         assert_eq!(decoded.session_id.as_deref(), Some("12345"));
         assert_eq!(decoded.circuit_code, Some(4242));
+    }
+
+    #[tokio::test]
+    async fn login_with_json_format_uses_json_codec() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "0000",
+                "session_id": "1111",
+                "secure_session_id": "2222",
+                "circuit_code": 1,
+                "sim_ip": "127.0.0.1",
+                "sim_port": 1234,
+                "region_x": 10,
+                "region_y": 10,
+                "seed_capability": "https://seed"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        let adapter = SecondLifeAdapter;
+
+        connection.connect().await.expect("connect should succeed");
+        let result = connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login succeeds");
+
+        match result {
+            GridLoginResult::Success(_) => {}
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_with_llsd_format_uses_llsd_codec() {
+        let server = MockServer::start().await;
+        let response = r#"<llsd><map>
+            <key>login</key><boolean>true</boolean>
+            <key>reason</key><string>connect</string>
+            <key>agent_id</key><string>abc</string>
+            <key>session_id</key><string>def</string>
+            <key>secure_session_id</key><string>ghi</string>
+            <key>circuit_code</key><integer>1</integer>
+            <key>sim_ip</key><string>127.0.0.1</string>
+            <key>sim_port</key><integer>123</integer>
+            <key>region_x</key><integer>1</integer>
+            <key>region_y</key><integer>1</integer>
+            <key>seed_capability</key><string>https://seed</string>
+        </map></llsd>"#;
+
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .and(header("content-type", "application/llsd+xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(response))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            wire_format: LoginWireFormat::Llsd,
+            ..Default::default()
+        });
+        let adapter = SecondLifeAdapter;
+
+        connection.connect().await.expect("connect should succeed");
+        let result = connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login succeeds");
+
+        match result {
+            GridLoginResult::Success(_) => {}
+            other => panic!("expected success, got {other:?}"),
+        }
     }
 }
