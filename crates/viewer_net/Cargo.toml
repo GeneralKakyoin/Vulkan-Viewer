@@ -10,5 +10,11 @@ tokio.workspace = true
 serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
 
 viewer_core = { path = "../viewer_core" }
+viewer_grid = { path = "../viewer_grid" }
+
+[dev-dependencies]
+wiremock = "0.6"

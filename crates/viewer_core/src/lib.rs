@@ -5,6 +5,70 @@ pub struct Camera {
     pub pitch: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum MeshKind {
+    AxisMarker,
+    GroundPlane,
+    Cube,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Transform {
+    pub position: [f32; 3],
+    pub scale: [f32; 3],
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RenderableInstance {
+    pub mesh: MeshKind,
+    pub transform: Transform,
+    pub color: [f32; 3],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Scene {
+    pub instances: Vec<RenderableInstance>,
+}
+
+impl Scene {
+    pub fn prototype() -> Self {
+        Self {
+            instances: vec![
+                RenderableInstance {
+                    mesh: MeshKind::AxisMarker,
+                    transform: Transform::default(),
+                    color: [1.0, 1.0, 1.0],
+                },
+                RenderableInstance {
+                    mesh: MeshKind::GroundPlane,
+                    transform: Transform {
+                        position: [3.0, 0.0, 0.0],
+                        scale: [8.0, 1.0, 8.0],
+                    },
+                    color: [0.22, 0.24, 0.28],
+                },
+                RenderableInstance {
+                    mesh: MeshKind::Cube,
+                    transform: Transform {
+                        position: [3.0, 0.5, 0.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    color: [0.85, 0.35, 0.25],
+                },
+            ],
+        }
+    }
+}
+
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -19,7 +83,7 @@ impl Camera {
     pub fn move_local(&mut self, forward: f32, right: f32, up: f32) {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let forward_vec = [cos_yaw, 0.0, sin_yaw];
-        let right_vec = [-sin_yaw, 0.0, cos_yaw];
+        let right_vec = [sin_yaw, 0.0, -cos_yaw];
 
         self.position[0] += forward_vec[0] * forward + right_vec[0] * right;
         self.position[1] += up;

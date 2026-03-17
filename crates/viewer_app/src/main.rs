@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing_subscriber::FmtSubscriber;
-use viewer_core::Camera;
+use viewer_core::{Camera, Scene};
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
 use winit::{
@@ -34,6 +34,7 @@ struct AppState {
     renderer: RenderBackend,
     ui: UiSystem,
     camera: Camera,
+    scene: Scene,
     input: InputState,
     last_frame_time: Instant,
 }
@@ -74,6 +75,7 @@ impl ViewerApp {
             renderer,
             ui,
             camera: Camera::default(),
+            scene: Scene::prototype(),
             input: InputState::default(),
             last_frame_time: Instant::now(),
         })
@@ -100,6 +102,7 @@ impl AppState {
 
         self.renderer.render_frame(
             &camera,
+            &self.scene,
             |device, queue, encoder, target_view, surface_size| {
                 ui.render(
                     &window,
@@ -169,7 +172,7 @@ impl InputState {
             let dx = (position.x - last.x) as f32;
             let dy = (position.y - last.y) as f32;
 
-            self.pending_look_delta[0] += dx * sensitivity;
+            self.pending_look_delta[0] += -dx * sensitivity;
             self.pending_look_delta[1] += -dy * sensitivity;
         }
 

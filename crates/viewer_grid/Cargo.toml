@@ -10,4 +10,3 @@ serde.workspace = true
 thiserror.workspace = true
 
 viewer_core = { path = "../viewer_core" }
-viewer_net = { path = "../viewer_net" }

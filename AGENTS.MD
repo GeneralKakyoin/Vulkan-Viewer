@@ -23,10 +23,20 @@ Prefer these unless an ADR says otherwise:
 - serde
 - tracing
 
+Firestorm code is for reference only.
+
+Agents must:
+- NOT copy Firestorm code directly
+- NOT replicate its architecture
+- extract behavior, not implementation
+- design clean Rust equivalents
+
 Do not introduce:
 - full Bevy engine
 - Vulkan-only architecture
 - large framework dependencies without a documented reason
+
+
 
 ## Core architecture rules
 Keep boundaries strict:
