@@ -1,5 +1,6 @@
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
+use viewer_core::Camera;
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, StoreOp, TextureFormat, TextureView,
@@ -50,6 +51,7 @@ impl UiSystem {
         encoder: &mut CommandEncoder,
         target_view: &TextureView,
         surface_size: PhysicalSize<u32>,
+        camera: &Camera,
     ) {
         if surface_size.width == 0 || surface_size.height == 0 {
             return;
@@ -62,12 +64,24 @@ impl UiSystem {
                 ui.heading("SL Viewer Rewrite");
             });
 
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::Window::new("Debug")
+                .default_pos(egui::pos2(16.0, 48.0))
+                .resizable(false)
+                .show(ctx, |ui| {
                 ui.label("First vertical slice is alive.");
                 ui.separator();
                 ui.label(format!(
                     "Surface: {}x{}",
                     surface_size.width, surface_size.height
+                ));
+                ui.separator();
+                ui.label(format!(
+                    "Camera pos: x={:.2} y={:.2} z={:.2}",
+                    camera.position[0], camera.position[1], camera.position[2]
+                ));
+                ui.label(format!(
+                    "Camera yaw/pitch: {:.2} / {:.2} rad",
+                    camera.yaw, camera.pitch
                 ));
             });
         });

@@ -3062,6 +3062,7 @@ name = "viewer_render"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "pollster",
  "tracing",
  "viewer_core",

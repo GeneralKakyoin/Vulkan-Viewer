@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing_subscriber::FmtSubscriber;
+use viewer_core::Camera;
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
-    event::WindowEvent,
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowAttributes},
 };
 
@@ -30,6 +33,22 @@ struct AppState {
     window: Arc<Window>,
     renderer: RenderBackend,
     ui: UiSystem,
+    camera: Camera,
+    input: InputState,
+    last_frame_time: Instant,
+}
+
+#[derive(Default)]
+struct InputState {
+    move_forward: bool,
+    move_backward: bool,
+    move_left: bool,
+    move_right: bool,
+    move_up: bool,
+    move_down: bool,
+    mouse_look_active: bool,
+    pending_look_delta: [f32; 2],
+    last_cursor_pos: Option<PhysicalPosition<f64>>,
 }
 
 impl ViewerApp {
@@ -54,6 +73,9 @@ impl ViewerApp {
             window,
             renderer,
             ui,
+            camera: Camera::default(),
+            input: InputState::default(),
+            last_frame_time: Instant::now(),
         })
     }
 }
@@ -64,13 +86,109 @@ impl AppState {
     }
 
     fn redraw(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let dt_seconds = (now - self.last_frame_time).as_secs_f32().min(0.1);
+        self.last_frame_time = now;
+
+        let [look_x, look_y] = self.input.take_look_delta();
+        self.camera.add_look_delta(look_x, look_y);
+        self.input.update_camera(&mut self.camera, dt_seconds);
+
         let window = self.window.clone();
         let ui = &mut self.ui;
+        let camera = self.camera;
 
-        self.renderer
-            .render_frame(|device, queue, encoder, target_view, surface_size| {
-                ui.render(&window, device, queue, encoder, target_view, surface_size);
-            })
+        self.renderer.render_frame(
+            &camera,
+            |device, queue, encoder, target_view, surface_size| {
+                ui.render(
+                    &window,
+                    device,
+                    queue,
+                    encoder,
+                    target_view,
+                    surface_size,
+                    &camera,
+                );
+            },
+        )
+    }
+
+    fn handle_input_event(&mut self, event: &WindowEvent) {
+        match event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.input.handle_key_event(event);
+            }
+            WindowEvent::MouseInput { button, state, .. } => {
+                self.input.handle_mouse_button(*button, *state);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.input.handle_cursor_moved(*position);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl InputState {
+    fn handle_key_event(&mut self, event: &KeyEvent) {
+        let pressed = event.state == ElementState::Pressed;
+
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return;
+        };
+
+        match code {
+            KeyCode::KeyW => self.move_forward = pressed,
+            KeyCode::KeyS => self.move_backward = pressed,
+            KeyCode::KeyA => self.move_left = pressed,
+            KeyCode::KeyD => self.move_right = pressed,
+            KeyCode::KeyE => self.move_up = pressed,
+            KeyCode::KeyQ => self.move_down = pressed,
+            _ => {}
+        }
+    }
+
+    fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+        if button != MouseButton::Right {
+            return;
+        }
+
+        self.mouse_look_active = state == ElementState::Pressed;
+        self.last_cursor_pos = None;
+    }
+
+    fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        if !self.mouse_look_active {
+            self.last_cursor_pos = Some(position);
+            return;
+        }
+
+        if let Some(last) = self.last_cursor_pos {
+            let sensitivity = 0.0025;
+            let dx = (position.x - last.x) as f32;
+            let dy = (position.y - last.y) as f32;
+
+            self.pending_look_delta[0] += dx * sensitivity;
+            self.pending_look_delta[1] += -dy * sensitivity;
+        }
+
+        self.last_cursor_pos = Some(position);
+    }
+
+    fn take_look_delta(&mut self) -> [f32; 2] {
+        let delta = self.pending_look_delta;
+        self.pending_look_delta = [0.0, 0.0];
+        delta
+    }
+
+    fn update_camera(&self, camera: &mut Camera, dt_seconds: f32) {
+        let forward =
+            ((self.move_forward as i8 - self.move_backward as i8) as f32) * 3.5 * dt_seconds;
+        let right = ((self.move_right as i8 - self.move_left as i8) as f32) * 3.5 * dt_seconds;
+        let up = ((self.move_up as i8 - self.move_down as i8) as f32) * 3.5 * dt_seconds;
+
+        camera.move_local(forward, right, up);
     }
 }
 
@@ -107,6 +225,8 @@ impl ApplicationHandler for ViewerApp {
             return;
         }
 
+        state.handle_input_event(&event);
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -114,6 +234,11 @@ impl ApplicationHandler for ViewerApp {
                 state.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => {
+                state.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::CursorMoved { .. } => {
                 state.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {

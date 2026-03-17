@@ -11,5 +11,6 @@ wgpu.workspace = true
 winit.workspace = true
 tracing.workspace = true
 pollster.workspace = true
+bytemuck.workspace = true
 
 viewer_core = { path = "../viewer_core" }
