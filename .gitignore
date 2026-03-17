@@ -1,7 +1,9 @@
 /target
 **/*.rs.bk
-Cargo.lock
+.DS_Store
 .env
+
 .vscode/*
 !.vscode/settings.json
-.DS_Store
+!.vscode/tasks.json
+!.vscode/launch.json
