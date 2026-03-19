@@ -41,6 +41,8 @@ const LLUDP_ONLINE_NOTIFICATION_LOW_ID: u16 = 322;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
+const LLUDP_CROSSED_REGION_MEDIUM_ID: u8 = 7;
+const LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID: u8 = 8;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -813,6 +815,8 @@ pub enum FirstSimulatorInboundMessageKind {
     ViewerEffect,
     CoarseLocationUpdate,
     AttachedSound,
+    CrossedRegion,
+    ConfirmEnableSimulator,
     Irrelevant,
 }
 
@@ -828,6 +832,7 @@ pub enum FirstSimulatorInboundDecodeSource {
 pub enum FirstSimulatorInboundTrafficScope {
     BootstrapRelevant,
     TransportControl,
+    RegionTransitionControl,
     LikelyBroaderTraffic,
     Unknown,
 }
@@ -867,11 +872,38 @@ pub struct FirstSimulatorPostBoundarySummary {
     pub observations: usize,
     pub bootstrap_relevant: usize,
     pub transport_control: usize,
+    pub region_transition_control: usize,
     pub likely_broader_traffic: usize,
     pub unknown: usize,
+    pub crossed_region: usize,
+    pub confirm_enable_simulator: usize,
+    pub watched_region_transition_control_not_seen: bool,
     pub kinds: Vec<FirstSimulatorInboundMessageKind>,
     pub unknown_packet_message_numbers: Vec<u32>,
     pub repeated_unknown_packet_message_numbers: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionTransitionControlKind {
+    CrossedRegion,
+    ConfirmEnableSimulator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionTransitionControlObservation {
+    pub observation_index: usize,
+    pub kind: RegionTransitionControlKind,
+    pub packet_message_number: Option<u32>,
+    pub payload_len: usize,
+    pub signal: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionTransitionControlSummary {
+    pub observations: usize,
+    pub crossed_region: usize,
+    pub confirm_enable_simulator: usize,
+    pub not_seen_in_run: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1022,6 +1054,7 @@ pub struct Connection {
     first_simulator_handshake_send_diagnostics: Vec<FirstSimulatorHandshakeSendDiagnostic>,
     first_simulator_handshake_receive_diagnostics: Vec<FirstSimulatorHandshakeReceiveDiagnostic>,
     early_simulator_traffic_observations: Vec<EarlySimulatorTrafficObservation>,
+    region_transition_control_observations: Vec<RegionTransitionControlObservation>,
     next_first_simulator_packet_id: u32,
 }
 
@@ -1036,6 +1069,7 @@ impl Connection {
             first_simulator_handshake_send_diagnostics: Vec::new(),
             first_simulator_handshake_receive_diagnostics: Vec::new(),
             early_simulator_traffic_observations: Vec::new(),
+            region_transition_control_observations: Vec::new(),
             next_first_simulator_packet_id: 1,
         }
     }
@@ -1072,6 +1106,12 @@ impl Connection {
         &self.early_simulator_traffic_observations
     }
 
+    pub fn region_transition_control_observations(
+        &self,
+    ) -> &[RegionTransitionControlObservation] {
+        &self.region_transition_control_observations
+    }
+
     pub fn summarize_early_simulator_traffic(&self) -> EarlySimulatorTrafficSummary {
         let mut summary = EarlySimulatorTrafficSummary::default();
         for observation in &self.early_simulator_traffic_observations {
@@ -1089,6 +1129,21 @@ impl Connection {
                 EarlySimulatorTrafficKind::AttachedSound => summary.attached_sound += 1,
             }
         }
+        summary
+    }
+
+    pub fn summarize_region_transition_control(&self) -> RegionTransitionControlSummary {
+        let mut summary = RegionTransitionControlSummary::default();
+        for observation in &self.region_transition_control_observations {
+            summary.observations += 1;
+            match observation.kind {
+                RegionTransitionControlKind::CrossedRegion => summary.crossed_region += 1,
+                RegionTransitionControlKind::ConfirmEnableSimulator => {
+                    summary.confirm_enable_simulator += 1
+                }
+            }
+        }
+        summary.not_seen_in_run = summary.observations == 0;
         summary
     }
 
@@ -1124,6 +1179,7 @@ impl Connection {
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
+        self.region_transition_control_observations.clear();
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -1235,6 +1291,7 @@ impl Connection {
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
+        self.region_transition_control_observations.clear();
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::Disconnected;
         Ok(())
@@ -1454,6 +1511,16 @@ impl Connection {
                     signal: classification.signal.clone(),
                 });
         }
+        if let Some(kind) = to_region_transition_control_kind(classification.kind) {
+            self.region_transition_control_observations
+                .push(RegionTransitionControlObservation {
+                    observation_index,
+                    kind,
+                    packet_message_number: classification.packet_message_number,
+                    payload_len: payload.len(),
+                    signal: classification.signal.clone(),
+                });
+        }
 
         Ok(classification)
     }
@@ -1656,8 +1723,11 @@ impl Connection {
         let mut post_movement_observations = 0usize;
         let mut post_boundary_bootstrap_relevant = 0usize;
         let mut post_boundary_transport_control = 0usize;
+        let mut post_boundary_region_transition_control = 0usize;
         let mut post_boundary_likely_broader_traffic = 0usize;
         let mut post_boundary_unknown = 0usize;
+        let mut post_boundary_crossed_region = 0usize;
+        let mut post_boundary_confirm_enable_simulator = 0usize;
         let mut post_boundary_kinds = Vec::new();
         let mut post_boundary_unknown_packet_message_numbers = Vec::new();
         for _ in 0..max_packets {
@@ -1706,6 +1776,9 @@ impl Connection {
                     FirstSimulatorInboundTrafficScope::TransportControl => {
                         post_boundary_transport_control += 1
                     }
+                    FirstSimulatorInboundTrafficScope::RegionTransitionControl => {
+                        post_boundary_region_transition_control += 1
+                    }
                     FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic => {
                         post_boundary_likely_broader_traffic += 1
                     }
@@ -1715,6 +1788,15 @@ impl Connection {
                             post_boundary_unknown_packet_message_numbers.push(number);
                         }
                     }
+                }
+                match classification.kind {
+                    FirstSimulatorInboundMessageKind::CrossedRegion => {
+                        post_boundary_crossed_region += 1
+                    }
+                    FirstSimulatorInboundMessageKind::ConfirmEnableSimulator => {
+                        post_boundary_confirm_enable_simulator += 1
+                    }
+                    _ => {}
                 }
                 post_boundary_kinds.push(classification.kind);
                 if post_movement_observations >= post_movement_tail_packets {
@@ -1729,6 +1811,9 @@ impl Connection {
                     FirstSimulatorInboundTrafficScope::TransportControl => {
                         post_boundary_transport_control += 1
                     }
+                    FirstSimulatorInboundTrafficScope::RegionTransitionControl => {
+                        post_boundary_region_transition_control += 1
+                    }
                     FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic => {
                         post_boundary_likely_broader_traffic += 1
                     }
@@ -1738,6 +1823,15 @@ impl Connection {
                             post_boundary_unknown_packet_message_numbers.push(number);
                         }
                     }
+                }
+                match classification.kind {
+                    FirstSimulatorInboundMessageKind::CrossedRegion => {
+                        post_boundary_crossed_region += 1
+                    }
+                    FirstSimulatorInboundMessageKind::ConfirmEnableSimulator => {
+                        post_boundary_confirm_enable_simulator += 1
+                    }
+                    _ => {}
                 }
                 post_boundary_kinds.push(classification.kind);
                 if post_movement_observations >= post_movement_tail_packets {
@@ -1763,8 +1857,13 @@ impl Connection {
                 observations: post_movement_observations,
                 bootstrap_relevant: post_boundary_bootstrap_relevant,
                 transport_control: post_boundary_transport_control,
+                region_transition_control: post_boundary_region_transition_control,
                 likely_broader_traffic: post_boundary_likely_broader_traffic,
                 unknown: post_boundary_unknown,
+                crossed_region: post_boundary_crossed_region,
+                confirm_enable_simulator: post_boundary_confirm_enable_simulator,
+                watched_region_transition_control_not_seen: post_boundary_region_transition_control
+                    == 0,
                 kinds: post_boundary_kinds,
                 unknown_packet_message_numbers: post_boundary_unknown_packet_message_numbers,
                 repeated_unknown_packet_message_numbers,
@@ -2050,6 +2149,7 @@ impl Connection {
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
+        self.region_transition_control_observations.clear();
         self.next_first_simulator_packet_id = 1;
     }
 
@@ -2422,6 +2522,29 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == lludp_medium_frequency_message_number(LLUDP_CROSSED_REGION_MEDIUM_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::CrossedRegion,
+                scope: FirstSimulatorInboundTrafficScope::RegionTransitionControl,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num
+            if num
+                == lludp_medium_frequency_message_number(
+                    LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID,
+                ) =>
+        {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ConfirmEnableSimulator,
+                scope: FirstSimulatorInboundTrafficScope::RegionTransitionControl,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         _ => None,
     }
 }
@@ -2447,6 +2570,20 @@ fn to_early_simulator_traffic_kind(
         }
         FirstSimulatorInboundMessageKind::AttachedSound => {
             Some(EarlySimulatorTrafficKind::AttachedSound)
+        }
+        _ => None,
+    }
+}
+
+fn to_region_transition_control_kind(
+    kind: FirstSimulatorInboundMessageKind,
+) -> Option<RegionTransitionControlKind> {
+    match kind {
+        FirstSimulatorInboundMessageKind::CrossedRegion => {
+            Some(RegionTransitionControlKind::CrossedRegion)
+        }
+        FirstSimulatorInboundMessageKind::ConfirmEnableSimulator => {
+            Some(RegionTransitionControlKind::ConfirmEnableSimulator)
         }
         _ => None,
     }
@@ -4547,6 +4684,40 @@ mod tests {
             to_early_simulator_traffic_kind(attached_sound.kind),
             Some(EarlySimulatorTrafficKind::AttachedSound)
         );
+        assert_eq!(to_region_transition_control_kind(attached_sound.kind), None);
+
+        let crossed_region =
+            classify_first_simulator_inbound_message(&make_medium_frequency_packet(7));
+        assert_eq!(crossed_region.kind, FirstSimulatorInboundMessageKind::CrossedRegion);
+        assert_eq!(
+            crossed_region.scope,
+            FirstSimulatorInboundTrafficScope::RegionTransitionControl
+        );
+        assert_eq!(crossed_region.signal, "packet:0x0000ff07");
+        assert_eq!(crossed_region.packet_message_number, Some(0x0000ff07));
+        assert_eq!(to_early_simulator_traffic_kind(crossed_region.kind), None);
+        assert_eq!(
+            to_region_transition_control_kind(crossed_region.kind),
+            Some(RegionTransitionControlKind::CrossedRegion)
+        );
+
+        let confirm_enable =
+            classify_first_simulator_inbound_message(&make_medium_frequency_packet(8));
+        assert_eq!(
+            confirm_enable.kind,
+            FirstSimulatorInboundMessageKind::ConfirmEnableSimulator
+        );
+        assert_eq!(
+            confirm_enable.scope,
+            FirstSimulatorInboundTrafficScope::RegionTransitionControl
+        );
+        assert_eq!(confirm_enable.signal, "packet:0x0000ff08");
+        assert_eq!(confirm_enable.packet_message_number, Some(0x0000ff08));
+        assert_eq!(to_early_simulator_traffic_kind(confirm_enable.kind), None);
+        assert_eq!(
+            to_region_transition_control_kind(confirm_enable.kind),
+            Some(RegionTransitionControlKind::ConfirmEnableSimulator)
+        );
 
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
@@ -5267,5 +5438,143 @@ mod tests {
         assert_eq!(early_summary.viewer_effect, 1);
         assert_eq!(early_summary.coarse_location_update, 1);
         assert_eq!(early_summary.attached_sound, 1);
+    }
+
+    #[tokio::test]
+    async fn probe_first_simulator_handshake_window_with_tail_summarizes_region_transition_and_repeated_unknowns(
+    ) {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener.local_addr().expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            let _ = listener
+                .send_to(&make_low_frequency_packet(387), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(250), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_medium_frequency_packet(7), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_medium_frequency_packet(8), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(42), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(42), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_medium_frequency_packet(17), sender)
+                .await;
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let report = connection
+            .probe_first_simulator_handshake_window_with_tail(
+                "127.0.0.1:0",
+                Duration::from_secs(1),
+                12,
+                5,
+            )
+            .await
+            .expect("probe window with tail should succeed");
+
+        assert!(!report.timed_out);
+        assert_eq!(report.agent_movement_complete_observation_index, Some(2));
+        assert_eq!(report.post_movement_observations, 5);
+
+        let summary = report
+            .post_boundary_summary
+            .expect("post-boundary summary should exist once movement complete is observed");
+        assert_eq!(summary.observations, 5);
+        assert_eq!(summary.bootstrap_relevant, 0);
+        assert_eq!(summary.transport_control, 0);
+        assert_eq!(summary.region_transition_control, 2);
+        assert_eq!(summary.likely_broader_traffic, 1);
+        assert_eq!(summary.unknown, 2);
+        assert_eq!(summary.crossed_region, 1);
+        assert_eq!(summary.confirm_enable_simulator, 1);
+        assert!(!summary.watched_region_transition_control_not_seen);
+        assert_eq!(
+            summary.kinds,
+            vec![
+                FirstSimulatorInboundMessageKind::CrossedRegion,
+                FirstSimulatorInboundMessageKind::ConfirmEnableSimulator,
+                FirstSimulatorInboundMessageKind::Irrelevant,
+                FirstSimulatorInboundMessageKind::Irrelevant,
+                FirstSimulatorInboundMessageKind::ViewerEffect,
+            ]
+        );
+        assert_eq!(
+            summary.unknown_packet_message_numbers,
+            vec![0xffff002a, 0xffff002a]
+        );
+        assert_eq!(summary.repeated_unknown_packet_message_numbers, vec![0xffff002a]);
+
+        let region_control_observations = connection.region_transition_control_observations();
+        assert_eq!(region_control_observations.len(), 2);
+        assert_eq!(
+            region_control_observations[0].kind,
+            RegionTransitionControlKind::CrossedRegion
+        );
+        assert_eq!(
+            region_control_observations[1].kind,
+            RegionTransitionControlKind::ConfirmEnableSimulator
+        );
+        let region_control_summary = connection.summarize_region_transition_control();
+        assert_eq!(region_control_summary.observations, 2);
+        assert_eq!(region_control_summary.crossed_region, 1);
+        assert_eq!(region_control_summary.confirm_enable_simulator, 1);
+        assert!(!region_control_summary.not_seen_in_run);
+
+        let early_traffic = connection.early_simulator_traffic_observations();
+        assert_eq!(early_traffic.len(), 1);
+        assert_eq!(early_traffic[0].kind, EarlySimulatorTrafficKind::ViewerEffect);
+        let early_summary = connection.summarize_early_simulator_traffic();
+        assert_eq!(early_summary.observations, 1);
+        assert_eq!(early_summary.viewer_effect, 1);
     }
 }

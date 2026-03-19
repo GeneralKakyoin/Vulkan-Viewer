@@ -147,6 +147,14 @@ Status update:
 - phase status: early simulator traffic consolidation is done enough for current scope
 - repeated unknown medium `0x0000ff0d` is now typed as `AttachedSound` (likely broader traffic)
 - post-boundary diagnostics now include repeated unknown packet-number reporting
+- region-transition control visibility diagnostics now exist with explicit `not_seen_in_run` reporting
+- message-ID typing rails are ready for:
+  - `CrossedRegion` (`0x0000ff07`)
+  - `ConfirmEnableSimulator` (`0x0000ff08`)
+- regression durability is now materially improved with deterministic fixture tests covering:
+  - boundary scope separation (`BootstrapRelevant` / `TransportControl` / `LikelyBroaderTraffic` / `RegionTransitionControl` / `Unknown`)
+  - post-boundary repeated unknown packet-number reporting
+  - region-transition summary behavior when watched IDs are observed
 - next phase: type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed, without broad world/object decoding
 
 ### T8 - First connected world slice

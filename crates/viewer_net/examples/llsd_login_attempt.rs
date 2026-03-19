@@ -263,12 +263,16 @@ async fn inspect_first_simulator_handshake_once(
             );
             if let Some(summary) = &report.post_boundary_summary {
                 println!(
-                    "Post-boundary summary: observations={}, bootstrap_relevant={}, transport_control={}, likely_broader_traffic={}, unknown={}",
+                    "Post-boundary summary: observations={}, bootstrap_relevant={}, transport_control={}, region_transition_control={}, likely_broader_traffic={}, unknown={}, crossed_region={}, confirm_enable_simulator={}, watched_region_transition_control_not_seen={}",
                     summary.observations,
                     summary.bootstrap_relevant,
                     summary.transport_control,
+                    summary.region_transition_control,
                     summary.likely_broader_traffic,
-                    summary.unknown
+                    summary.unknown,
+                    summary.crossed_region,
+                    summary.confirm_enable_simulator,
+                    summary.watched_region_transition_control_not_seen
                 );
                 if !summary.unknown_packet_message_numbers.is_empty() {
                     println!(
@@ -363,6 +367,26 @@ async fn inspect_first_simulator_handshake_once(
     for obs in early_traffic {
         println!(
             "Early traffic: observation_index={}, kind={:?}, packet_message_number={:?}, payload_len={}, signal={}",
+            obs.observation_index, obs.kind, obs.packet_message_number, obs.payload_len, obs.signal
+        );
+    }
+
+    let handoff_summary = connection.summarize_region_transition_control();
+    println!(
+        "Region-transition control summary: observations={}, crossed_region={}, confirm_enable_simulator={}, not_seen_in_run={}",
+        handoff_summary.observations,
+        handoff_summary.crossed_region,
+        handoff_summary.confirm_enable_simulator,
+        handoff_summary.not_seen_in_run
+    );
+    let handoff_observations = connection.region_transition_control_observations();
+    println!(
+        "Region-transition control observations: {}",
+        handoff_observations.len()
+    );
+    for obs in handoff_observations {
+        println!(
+            "Region-transition control: observation_index={}, kind={:?}, packet_message_number={:?}, payload_len={}, signal={}",
             obs.observation_index, obs.kind, obs.packet_message_number, obs.payload_len, obs.signal
         );
     }

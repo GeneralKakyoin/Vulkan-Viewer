@@ -2,6 +2,40 @@
 
 ## Last Completed Work
 
+- Strengthened traffic-phase durability with focused deterministic tests in `viewer_net`:
+  - added a bounded post-AMC fixture that asserts:
+    - `RegionTransitionControl` packet scope separation (`CrossedRegion`, `ConfirmEnableSimulator`)
+    - post-boundary repeated unknown packet-number reporting and repeated-ID collapse
+    - region-transition control summary/count behavior (`not_seen_in_run=false` when observed)
+    - scope-stop behavior (unmapped packet IDs remain `Unknown`, no world/object decode expansion)
+- Validation for this run:
+  - `cargo check` passed
+  - `cargo test` passed (42 tests in `viewer_net`, including new regression case)
+- Live/manual note for this run:
+  - manual live probe was not executed in this environment because required login env vars were not set
+  - this is now an external run-environment blocker rather than a local code/test blocker
+
+- Advanced bounded handoff/control visibility slice in `viewer_net`:
+  - added `RegionTransitionControl` scope for message-ID-only transport visibility
+  - added typed message recognition (no payload decode):
+    - `CrossedRegion` (`0x0000ff07`, medium 7)
+    - `ConfirmEnableSimulator` (`0x0000ff08`, medium 8)
+  - added typed broader mapping for repeated unknown:
+    - `AttachedSound` (`0x0000ff0d`, medium 13) as likely broader traffic
+- Added dedicated region-transition diagnostics:
+  - `RegionTransitionControlKind`
+  - `RegionTransitionControlObservation`
+  - `RegionTransitionControlSummary`
+  - `Connection::region_transition_control_observations()`
+  - `Connection::summarize_region_transition_control()`
+- Extended post-boundary diagnostics:
+  - now tracks repeated unknown packet numbers
+  - now reports watched region-transition control visibility status
+- Live high-tail run in this milestone:
+  - `CrossedRegion`/`ConfirmEnableSimulator` were not observed
+  - diagnostics now explicitly report this as `not_seen_in_run=true`
+  - broader traffic remains stable and typed; unknown churn reduced by `AttachedSound` mapping
+
 - Advanced bounded handoff/control visibility diagnostics:
   - repeated unknown post-AMC medium ID `0x0000ff0d` is now typed as `AttachedSound` (broader traffic)
   - this reduces unknown churn and keeps handoff/control focus clearer
@@ -381,6 +415,7 @@ This includes:
 - keep extending only this typed observation scaffold until the next phase boundary requires deliberate world/object decode design
 - next phase should stay bounded to medium handoff/control visibility only (`CrossedRegion`, `ConfirmEnableSimulator`) before any world/object-state decode planning
 - keep this boundary strict: only type those handoff/control IDs once observed repeatedly in live traces
+- this run established the diagnostics and typing rails for those IDs without forcing payload decode or broad world/object work
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

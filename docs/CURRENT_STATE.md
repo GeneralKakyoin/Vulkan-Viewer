@@ -92,6 +92,14 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `AttachedSound`
   - available via `Connection::early_simulator_traffic_observations()`
   - summary available via `Connection::summarize_early_simulator_traffic()`
+- bounded region-transition control visibility diagnostics now exist:
+  - dedicated scope: `RegionTransitionControl`
+  - run-level summary available via `Connection::summarize_region_transition_control()`
+  - post-boundary summary includes:
+    - `region_transition_control` count
+    - `crossed_region` count
+    - `confirm_enable_simulator` count
+    - `watched_region_transition_control_not_seen` flag
 - handshake-stage confirmation was tightened:
   - `AgentMovementComplete` stage advancement now requires packet-message decode evidence (not JSON/text fallback alone)
 - one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
@@ -132,7 +140,13 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - known typed packets are now explicitly separated from likely broader traffic in diagnostics
   - bounded probe report now includes post-boundary summary counters and ordered post-boundary kinds
   - post-boundary summary now also captures unknown packet message numbers when unknown traffic appears
+  - post-boundary summary now captures repeated unknown packet numbers for faster stabilization checks
   - early-traffic observations are now captured as a separate typed layer (beyond bootstrap/control)
+- deterministic regression coverage now protects the traffic-phase boundary model:
+  - fixture-backed probe-window test verifies `RegionTransitionControl` separation from broader traffic
+  - repeated unknown post-boundary packet-number reporting is now asserted (including repeated-ID collapse)
+  - region-transition summary `not_seen_in_run` vs observed-path behavior is covered
+  - scope-stop behavior remains explicit by keeping unmapped packet IDs in `Unknown` (no world/object decode expansion)
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -162,7 +176,7 @@ Current concrete blocker inside bootstrap:
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
   - early simulator traffic consolidation remains stable
   - hard stop remains: no broad object/world-state decoding in current scope
-  - next gap is narrow handoff/control visibility for region-transition-adjacent medium signals when observed repeatedly (for example `CrossedRegion`/`ConfirmEnableSimulator`)
+  - next gap is live-observation opportunity for region-transition-adjacent medium signals (for example `CrossedRegion`/`ConfirmEnableSimulator`) under longer or transition-triggering runs
 
 ---
 
@@ -189,7 +203,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**continue bounded handoff/control visibility by watching for repeated region-transition control IDs (`0x0000ff07` / `0x0000ff08`) while keeping world/object decode explicitly out of scope**
+**continue bounded region-transition control capture by observing and typing repeated `CrossedRegion` (`0x0000ff07`) / `ConfirmEnableSimulator` (`0x0000ff08`) when they appear, while keeping world/object decode explicitly out of scope**
 
 ---
 

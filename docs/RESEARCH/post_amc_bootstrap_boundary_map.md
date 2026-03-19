@@ -57,3 +57,7 @@ Do not start broad world-state decoding from this map alone.
 ## Handoff/Control Watch List (Next Phase)
 - `0x0000FF07` (`CrossedRegion`) and `0x0000FF08` (`ConfirmEnableSimulator`) are high-value region-transition control IDs to type once repeatedly observed.
 - Keep them as next-phase targets; do not pre-emptively expand payload decode beyond message-ID visibility.
+- Current status:
+  - message-ID typing rails and dedicated diagnostics now exist
+  - bounded high-tail live runs in current phase did not observe these IDs yet
+  - diagnostics now report this absence explicitly (`not_seen_in_run`) instead of leaving it implicit.

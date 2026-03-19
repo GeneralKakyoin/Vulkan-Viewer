@@ -81,6 +81,10 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
   - `CoarseLocationUpdate` = medium `6` (`0x0000FF06`) -> likely broader traffic
   - `AttachedSound` = medium `13` (`0x0000FF0D`) -> likely broader traffic
   - implication: these are not required bootstrap gates in this phase
+- Region-transition control IDs of interest (Firestorm template semantics):
+  - `CrossedRegion` = medium `7` (`0x0000FF07`)
+  - `ConfirmEnableSimulator` = medium `8` (`0x0000FF08`)
+  - current bounded runs in this phase have not observed these IDs yet; diagnostic watch remains active.
 - Practical translation for this rewrite:
   - minimal receive classifier can be protocol-aware by decoding message number first,
   - then mapping those low IDs before any heuristic text/JSON fallback.
