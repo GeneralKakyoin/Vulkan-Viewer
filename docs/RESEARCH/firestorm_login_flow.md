@@ -155,3 +155,13 @@
 - This confirms login compatibility milestones are materially complete for current scope.
 - Protocol priority has shifted from auth-envelope correction to post-login seed capability bootstrap sequencing.
 - Sensitive live values (session IDs, secure session IDs, circuit codes, full capability URLs) must remain out of continuity docs.
+
+### Capability method/shape alignment note (2026-03-19)
+- Firestorm behavior evidence for one-shot bootstrap capability probing:
+  - `SimulatorFeatures`: HTTP `GET` capability request (no body) in region bootstrap flow.
+  - `EventQueueGet`: HTTP `POST` with LLSD body containing `ack` and `done`.
+  - Adapter defaults include LLSD-oriented headers (notably `Accept: application/llsd+xml`).
+- `MapLayer` appears in the seed-capability name list, but Firestorm map flow is primarily legacy UDP (`MapBlockRequest`/`MapNameRequest`/`MapLayerRequest`) rather than an observed direct HTTP-capability fetch.
+- Practical implication for this rewrite phase:
+  - keep SimulatorFeatures/EventQueueGet as primary HTTP bootstrap inspection targets
+  - classify current MapLayer HTTP 405 as likely non-HTTP/legacy semantics for this narrow one-shot transport path

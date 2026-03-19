@@ -1,11 +1,8 @@
-model = "gpt-5.3-codex"
+model = "gpt-5.4-mini"
+reasoning_effort = "low"
 
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
 network_access = true
-
-[agents]
-max_threads = 1
-max_depth = 1

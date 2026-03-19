@@ -43,12 +43,18 @@ Real login compatibility is now proven against the live Second Life endpoint. Th
 - minimal seed capability fetch transport path implemented in `viewer_net`
 - one-shot EventQueueGet inspection path implemented in `viewer_net`
 - one-shot SimulatorFeatures inspection path implemented in `viewer_net`
+- one-shot MapLayer inspection path implemented in `viewer_net`
+- capability one-shot requests now send explicit LLSD `Accept` headers
+- MapLayer HTTP 405 is now classified explicitly as likely non-HTTP/legacy-UDP semantics in this one-shot transport path
 
 ### Research / Continuity
 - Firestorm login flow documented
 - continuity-stack docs established
 - scope model established
 - workflow discipline defined in AGENTS
+- autonomous milestone-driven execution policy clarified in AGENTS
+- repo Codex config and low-cost subagent profiles added for bounded worker/explorer use
+- skills policy now explicitly checks `.agents/skills/viewer/` first (then `.agents/skills/` fallback)
 
 ---
 
@@ -59,6 +65,8 @@ Login payload compatibility is no longer the primary blocker. The immediate bloc
 Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now reaches the service path but currently returns upstream proxy/server failure in live conditions (no event payload yet).
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
+- SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
+- MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
 
 ---
 
@@ -68,7 +76,7 @@ Current concrete blocker inside bootstrap:
 - expand capability interpretation typing in `viewer_grid` while keeping transport in `viewer_net`
 - fetch and inspect early bootstrap capability responses from live login state
 - stabilize one-shot EventQueueGet transport behavior and capture first event envelope
-- use one-shot SimulatorFeatures inspection to continue bootstrap observation while EventQueueGet is unstable
+- stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 

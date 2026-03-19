@@ -47,6 +47,7 @@ Dependencies:
 Done when:
 - capability/bootstrap traces are sanitized and useful
 - focused tests/fixtures cover current bootstrap assumptions
+- non-viable HTTP probe paths are explicitly classified (for example, MapLayer likely legacy/non-HTTP in this phase)
 
 ---
 
@@ -71,6 +72,11 @@ Done when:
 Done when:
 - minimal `EventQueueGet` polling works
 - early live events can be received and classified
+
+### Near-term blocker focus (within current bootstrap inspection)
+- stabilize one-shot `SimulatorFeatures` fetch against current live `503 Service Unavailable`
+- stabilize one-shot `EventQueueGet` against current retryable upstream/proxy failures
+- treat `MapLayer` HTTP one-shot as classified blocker (likely legacy/non-HTTP path) unless new protocol evidence emerges
 
 ### T6 - Simulator handshake preparation
 Done when:

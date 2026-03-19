@@ -30,6 +30,7 @@ async fn run() -> Result<(), String> {
     let inspect_event_queue_once = parse_bool_env("VIEWER_INSPECT_EVENT_QUEUE_ONCE", false);
     let inspect_simulator_features_once =
         parse_bool_env("VIEWER_INSPECT_SIMULATOR_FEATURES_ONCE", false);
+    let inspect_map_layer_once = parse_bool_env("VIEWER_INSPECT_MAP_LAYER_ONCE", false);
 
     let intent = LoginIntent {
         username,
@@ -83,6 +84,25 @@ async fn run() -> Result<(), String> {
                         }
                     } else {
                         println!("SimulatorFeatures capability not present in seed map");
+                    }
+                }
+                if inspect_map_layer_once {
+                    if let Some(map_layer_url) = caps.entries.get("MapLayer") {
+                        let inspection = connection
+                            .fetch_map_layer_once(map_layer_url)
+                            .await
+                            .map_err(|err| format!("map layer fetch failed: {err}"))?;
+                        println!(
+                            "MapLayer one-shot: keys={}, scalar_values={}, complex_values={}",
+                            inspection.top_level_keys.len(),
+                            inspection.scalar_values.len(),
+                            inspection.complex_value_types.len()
+                        );
+                        for key in &inspection.top_level_keys {
+                            println!("MapLayer key: {key}");
+                        }
+                    } else {
+                        println!("MapLayer capability not present in seed map");
                     }
                 }
                 if inspect_event_queue_once {

@@ -9,6 +9,35 @@ This project is a from-scratch Rust rewrite of a Second Life / OpenSim viewer. I
 
 ---
 
+## Autonomous Execution Policy
+
+For implementation sessions, agents have explicit permission to execute milestone-driven work autonomously.
+
+Agents should continue working toward the assigned bounded milestone without stopping after every narrow substep.
+
+Agents may continue autonomously until one of these stop conditions is reached:
+1. the milestone is achieved
+2. a real blocker is reached that cannot be resolved with the current repository context
+3. the next change would cross a forbidden boundary
+4. the next action would require higher-risk approval outside the configured autonomy settings
+
+### Expected behavior
+- choose the smallest sequence of steps that advances the current milestone
+- validate after meaningful changes
+- use repository skills when they apply
+- use low-cost subagents for bounded implementation or research work when runtime policy allows
+- keep the main session focused on higher-level reasoning, arbitration, boundary checks, and final integration
+- update continuity docs when project state changes materially
+- checkpoint with a commit when a meaningful milestone or sub-milestone is reached
+
+### Do not stop merely to report incremental progress
+Agents should prefer completing the current bounded milestone over pausing after each tiny fix.
+
+### Continuity reminder
+After meaningful state changes, update:
+- `docs/CURRENT_STATE.md`
+- `docs/HANDOFF.md`
+
 ## Cost-Efficient Model Policy
 
 This repository should optimize for low usage and long continuity.
@@ -379,6 +408,9 @@ Before starting medium or large work:
 3. only proceed without a skill if no existing skill fits
 
 Primary repo skills live in:
+- `.agents/skills/viewer/`
+
+If the `viewer/` skill directory is not present, use:
 - `.agents/skills/`
 
 Expected core skills:

@@ -1,6 +1,9 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use reqwest::{Method, StatusCode, header::CONTENT_TYPE};
+use reqwest::{
+    Method, StatusCode,
+    header::{ACCEPT, CONTENT_TYPE},
+};
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +18,7 @@ use viewer_grid::{
 const MAX_LOGIN_REDIRECTS: usize = 4;
 const MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS: usize = 3;
 const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
+const LLSD_XML_CONTENT_TYPE: &str = "application/llsd+xml";
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -753,6 +757,8 @@ pub struct SimulatorFeaturesInspection {
     pub complex_value_types: BTreeMap<String, String>,
 }
 
+pub type MapLayerInspection = SimulatorFeaturesInspection;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
     Disconnected,
@@ -783,6 +789,10 @@ pub enum ConnectionError {
     MissingSeedCapability,
     #[error("capability response decode error: {0}")]
     CapabilityDecode(String),
+    #[error(
+        "map layer capability currently appears non-HTTP for one-shot probing (status {status}): {body}"
+    )]
+    MapLayerLikelyLegacyUdp { status: StatusCode, body: String },
     #[error("event queue one-shot failed after {attempts_len} attempts")]
     EventQueueOneShotFailed {
         attempts_len: usize,
@@ -1018,7 +1028,8 @@ impl Connection {
             let started = Instant::now();
             let response = client
                 .post(event_queue_url)
-                .header(CONTENT_TYPE, "application/llsd+xml")
+                .header(CONTENT_TYPE, LLSD_XML_CONTENT_TYPE)
+                .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
                 .body(request_body)
                 .send()
                 .await;
@@ -1105,7 +1116,11 @@ impl Connection {
             .timeout(self.config.connect_timeout)
             .build()?;
 
-        let response = client.get(simulator_features_url).send().await?;
+        let response = client
+            .get(simulator_features_url)
+            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+            .send()
+            .await?;
         let status = response.status();
         let content_type = response
             .headers()
@@ -1115,6 +1130,47 @@ impl Connection {
         let bytes = response.bytes().await?;
 
         if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+
+        parse_simulator_features_response(&bytes, content_type.as_deref())
+    }
+
+    pub async fn fetch_map_layer_once(
+        &self,
+        map_layer_url: &str,
+    ) -> Result<MapLayerInspection, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+
+        let response = client
+            .get(map_layer_url)
+            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+            .send()
+            .await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            if status == StatusCode::METHOD_NOT_ALLOWED {
+                return Err(ConnectionError::MapLayerLikelyLegacyUdp {
+                    status,
+                    body: String::from_utf8_lossy(&bytes).to_string(),
+                });
+            }
             return Err(ConnectionError::HttpStatus {
                 status,
                 body: String::from_utf8_lossy(&bytes).to_string(),
@@ -2502,6 +2558,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/sim-features"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/llsd+xml")
@@ -2533,5 +2590,84 @@ mod tests {
             inspection.complex_value_types.get("OpenSimExtras").map(String::as_str),
             Some("map")
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_map_layer_once_reports_top_level_shape() {
+        let server = MockServer::start().await;
+        let map_layer_body = r#"<llsd><map>
+            <key>MapBlocks</key><array></array>
+            <key>MapServerVersion</key><string>1.0</string>
+            <key>Enabled</key><boolean>true</boolean>
+        </map></llsd>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/map-layer"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/llsd+xml")
+                    .set_body_string(map_layer_body),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_map_layer_once(&format!("{}/map-layer", server.uri()))
+            .await
+            .expect("map layer fetch should succeed");
+
+        assert!(inspection.top_level_keys.iter().any(|k| k == "MapBlocks"));
+        assert_eq!(
+            inspection
+                .scalar_values
+                .get("MapServerVersion")
+                .map(String::as_str),
+            Some("1.0")
+        );
+        assert_eq!(
+            inspection.complex_value_types.get("MapBlocks").map(String::as_str),
+            Some("array")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_map_layer_once_classifies_405_as_likely_legacy_udp() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/map-layer"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(ResponseTemplate::new(405).set_body_string("Method Not Allowed"))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let err = connection
+            .fetch_map_layer_once(&format!("{}/map-layer", server.uri()))
+            .await
+            .expect_err("map layer 405 should be classified");
+        match err {
+            ConnectionError::MapLayerLikelyLegacyUdp { status, body } => {
+                assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+                assert!(body.contains("Method Not Allowed"));
+            }
+            other => panic!("expected MapLayerLikelyLegacyUdp, got {other:?}"),
+        }
     }
 }
