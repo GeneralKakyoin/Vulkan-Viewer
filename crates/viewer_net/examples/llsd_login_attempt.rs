@@ -261,6 +261,19 @@ async fn inspect_first_simulator_handshake_once(
                 report.agent_movement_complete_observation_index,
                 report.post_movement_observations
             );
+            if let Some(summary) = &report.post_boundary_summary {
+                println!(
+                    "Post-boundary summary: observations={}, bootstrap_relevant={}, transport_control={}, likely_broader_traffic={}, unknown={}",
+                    summary.observations,
+                    summary.bootstrap_relevant,
+                    summary.transport_control,
+                    summary.likely_broader_traffic,
+                    summary.unknown
+                );
+                for (idx, kind) in summary.kinds.iter().enumerate() {
+                    println!("Post-boundary kind {}: {:?}", idx + 1, kind);
+                }
+            }
             for obs in &report.observations {
                 println!(
                     "Observation {}: kind={:?}, scope={:?}, source={:?}, signal={}, packet_message_number={:?}, payload_len={}",

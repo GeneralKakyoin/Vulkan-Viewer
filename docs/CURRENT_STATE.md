@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase C - Post-AgentMovementComplete bootstrap observation
+Phase D - Early simulator traffic observation slice (post-bootstrap boundary)
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -113,9 +113,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - additional early post-AMC traffic now typed as likely broader traffic:
       - `OnlineNotification` (`0xFFFF0142`, low 322)
       - `ViewerEffect` (`0x0000FF11`, medium 17)
-    - medium unknowns can still appear in this window (for example `0x0000FF06`) and remain explicitly `Unknown`
+      - `CoarseLocationUpdate` (`0x0000FF06`, medium 6)
+    - remaining medium unknowns can still appear in this window and remain explicitly `Unknown`
   - `0xfffffffb` is now typed as `PacketAck` (transport-control) instead of unmapped traffic
   - known typed packets are now explicitly separated from likely broader traffic in diagnostics
+  - bounded probe report now includes post-boundary summary counters and ordered post-boundary kinds
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -142,7 +144,8 @@ Current concrete blocker inside bootstrap:
   - first inbound progression to `AgentMovementComplete` is now observed and classified
   - immediate post-movement tail is now observable in bounded live runs
   - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
-  - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far; next gap is transition planning from bootstrap observation into a bounded broader-simulator traffic phase
+  - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
+  - current gap is selecting the first bounded non-bootstrap simulator-traffic diagnostics slice (still no broad world/object decode)
 
 ---
 
@@ -169,7 +172,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**treat bootstrap boundary as consolidated and define the first bounded post-bootstrap simulator-traffic slice (without broad world-state implementation yet)**
+**keep bootstrap boundary fixed and expand only narrow early non-bootstrap simulator traffic observation (for example medium handoff/control visibility) without broad world-state decoding**
 
 ---
 

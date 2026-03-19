@@ -39,6 +39,7 @@ const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
 const LLUDP_PACKET_ACK_LOW_ID: u16 = 0xFFFB;
 const LLUDP_ONLINE_NOTIFICATION_LOW_ID: u16 = 322;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
+const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -809,6 +810,7 @@ pub enum FirstSimulatorInboundMessageKind {
     AgentDataUpdate,
     OnlineNotification,
     ViewerEffect,
+    CoarseLocationUpdate,
     Irrelevant,
 }
 
@@ -859,11 +861,22 @@ pub struct FirstSimulatorHandshakeProbeObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorPostBoundarySummary {
+    pub observations: usize,
+    pub bootstrap_relevant: usize,
+    pub transport_control: usize,
+    pub likely_broader_traffic: usize,
+    pub unknown: usize,
+    pub kinds: Vec<FirstSimulatorInboundMessageKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorHandshakeProbeReport {
     pub observations: Vec<FirstSimulatorHandshakeProbeObservation>,
     pub timed_out: bool,
     pub agent_movement_complete_observation_index: Option<usize>,
     pub post_movement_observations: usize,
+    pub post_boundary_summary: Option<FirstSimulatorPostBoundarySummary>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1568,6 +1581,11 @@ impl Connection {
         let mut timed_out = false;
         let mut agent_movement_complete_observation_index = None;
         let mut post_movement_observations = 0usize;
+        let mut post_boundary_bootstrap_relevant = 0usize;
+        let mut post_boundary_transport_control = 0usize;
+        let mut post_boundary_likely_broader_traffic = 0usize;
+        let mut post_boundary_unknown = 0usize;
+        let mut post_boundary_kinds = Vec::new();
         for _ in 0..max_packets {
             let mut buf = vec![0u8; 2048];
             let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
@@ -1607,11 +1625,37 @@ impl Connection {
                     continue;
                 }
                 post_movement_observations += 1;
+                match classification.scope {
+                    FirstSimulatorInboundTrafficScope::BootstrapRelevant => {
+                        post_boundary_bootstrap_relevant += 1
+                    }
+                    FirstSimulatorInboundTrafficScope::TransportControl => {
+                        post_boundary_transport_control += 1
+                    }
+                    FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic => {
+                        post_boundary_likely_broader_traffic += 1
+                    }
+                    FirstSimulatorInboundTrafficScope::Unknown => post_boundary_unknown += 1,
+                }
+                post_boundary_kinds.push(classification.kind);
                 if post_movement_observations >= post_movement_tail_packets {
                     break;
                 }
             } else if agent_movement_complete_observation_index.is_some() {
                 post_movement_observations += 1;
+                match classification.scope {
+                    FirstSimulatorInboundTrafficScope::BootstrapRelevant => {
+                        post_boundary_bootstrap_relevant += 1
+                    }
+                    FirstSimulatorInboundTrafficScope::TransportControl => {
+                        post_boundary_transport_control += 1
+                    }
+                    FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic => {
+                        post_boundary_likely_broader_traffic += 1
+                    }
+                    FirstSimulatorInboundTrafficScope::Unknown => post_boundary_unknown += 1,
+                }
+                post_boundary_kinds.push(classification.kind);
                 if post_movement_observations >= post_movement_tail_packets {
                     break;
                 }
@@ -1622,11 +1666,25 @@ impl Connection {
             }
         }
 
+        let post_boundary_summary = if agent_movement_complete_observation_index.is_some() {
+            Some(FirstSimulatorPostBoundarySummary {
+                observations: post_movement_observations,
+                bootstrap_relevant: post_boundary_bootstrap_relevant,
+                transport_control: post_boundary_transport_control,
+                likely_broader_traffic: post_boundary_likely_broader_traffic,
+                unknown: post_boundary_unknown,
+                kinds: post_boundary_kinds,
+            })
+        } else {
+            None
+        };
+
         Ok(FirstSimulatorHandshakeProbeReport {
             observations,
             timed_out,
             agent_movement_complete_observation_index,
             post_movement_observations,
+            post_boundary_summary,
         })
     }
 
@@ -2243,6 +2301,17 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_medium_frequency_message_number(LLUDP_VIEWER_EFFECT_MEDIUM_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::ViewerEffect,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num
+            == lludp_medium_frequency_message_number(LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID) =>
+        {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::CoarseLocationUpdate,
                 scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
@@ -4317,12 +4386,18 @@ mod tests {
         assert_eq!(viewer_effect.signal, "packet:0x0000ff11");
         assert_eq!(viewer_effect.packet_message_number, Some(0x0000ff11));
 
-        let unknown_medium =
+        let coarse_location_update =
             classify_first_simulator_inbound_message(&make_medium_frequency_packet(6));
-        assert_eq!(unknown_medium.kind, FirstSimulatorInboundMessageKind::Irrelevant);
-        assert_eq!(unknown_medium.scope, FirstSimulatorInboundTrafficScope::Unknown);
-        assert_eq!(unknown_medium.signal, "packet:0x0000ff06:unmapped");
-        assert_eq!(unknown_medium.packet_message_number, Some(0x0000ff06));
+        assert_eq!(
+            coarse_location_update.kind,
+            FirstSimulatorInboundMessageKind::CoarseLocationUpdate
+        );
+        assert_eq!(
+            coarse_location_update.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(coarse_location_update.signal, "packet:0x0000ff06");
+        assert_eq!(coarse_location_update.packet_message_number, Some(0x0000ff06));
 
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
@@ -4821,6 +4896,15 @@ mod tests {
         assert!(!report.timed_out);
         assert_eq!(report.agent_movement_complete_observation_index, Some(2));
         assert_eq!(report.post_movement_observations, 0);
+        let summary = report
+            .post_boundary_summary
+            .expect("post-boundary summary should exist once movement complete is observed");
+        assert_eq!(summary.observations, 0);
+        assert_eq!(summary.bootstrap_relevant, 0);
+        assert_eq!(summary.transport_control, 0);
+        assert_eq!(summary.likely_broader_traffic, 0);
+        assert_eq!(summary.unknown, 0);
+        assert!(summary.kinds.is_empty());
         assert_eq!(
             report.observations[0].classification.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
@@ -4969,6 +5053,23 @@ mod tests {
         assert_eq!(
             report.observations[6].classification.scope,
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        let summary = report
+            .post_boundary_summary
+            .expect("post-boundary summary should exist once movement complete is observed");
+        assert_eq!(summary.observations, 4);
+        assert_eq!(summary.bootstrap_relevant, 0);
+        assert_eq!(summary.transport_control, 1);
+        assert_eq!(summary.likely_broader_traffic, 3);
+        assert_eq!(summary.unknown, 0);
+        assert_eq!(
+            summary.kinds,
+            vec![
+                FirstSimulatorInboundMessageKind::PacketAck,
+                FirstSimulatorInboundMessageKind::HealthMessage,
+                FirstSimulatorInboundMessageKind::OnlineNotification,
+                FirstSimulatorInboundMessageKind::ViewerEffect,
+            ]
         );
     }
 }

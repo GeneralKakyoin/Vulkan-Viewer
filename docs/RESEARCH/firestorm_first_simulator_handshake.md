@@ -78,6 +78,7 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
 - Additional post-`AgentMovementComplete` IDs now observed in bounded tails:
   - `OnlineNotification` = low `322` (`0xFFFF0142`) -> likely broader traffic
   - `ViewerEffect` = medium `17` (`0x0000FF11`) -> likely broader traffic
+  - `CoarseLocationUpdate` = medium `6` (`0x0000FF06`) -> likely broader traffic
   - implication: these are not required bootstrap gates in this phase
 - Practical translation for this rewrite:
   - minimal receive classifier can be protocol-aware by decoding message number first,

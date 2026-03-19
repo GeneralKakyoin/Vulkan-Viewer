@@ -19,7 +19,8 @@ After `AgentMovementComplete`, which inbound packets should still be treated as 
 | `HealthMessage` | `0xFFFF008A` (low 138) | `LikelyBroaderTraffic` | Simulator liveness/environment telemetry, not a bootstrap gate. |
 | `OnlineNotification` | `0xFFFF0142` (low 322) | `LikelyBroaderTraffic` | Social/world notification traffic after initial bootstrap. |
 | `ViewerEffect` | `0x0000FF11` (medium 17) | `LikelyBroaderTraffic` | Viewer effect broadcast traffic, not bootstrap sequencing. |
-| unknown medium example | `0x0000FF06` | `Unknown` | Seen in short tail; currently unmapped and treated as non-bootstrap until stronger evidence. |
+| `CoarseLocationUpdate` | `0x0000FF06` (medium 6) | `LikelyBroaderTraffic` | Coarse avatar/presence location traffic; useful for diagnostics but not bootstrap-gating in this phase. |
+| unknown medium example | varies | `Unknown` | Some medium IDs can still appear in short tails; keep explicit until repeated and justified. |
 
 ## Boundary Rule For This Phase
 Treat the bootstrap boundary as consolidated once:
@@ -30,6 +31,12 @@ Treat the bootstrap boundary as consolidated once:
    - explicitly unknown/non-bootstrap.
 
 Do not start broad world-state decoding from this map alone.
+
+## Diagnostic Preservation
+- Probe report now includes a post-boundary summary:
+  - per-scope counts
+  - ordered post-boundary kinds
+- This is intended to preserve early non-bootstrap observation evidence without repeated ad hoc manual parsing.
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.
