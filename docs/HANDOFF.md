@@ -2,6 +2,26 @@
 
 ## Last Completed Work
 
+- Added bounded policy controls for targeted live handoff/control visibility in `viewer_net`:
+  - new probe API:
+    - `Connection::probe_first_simulator_handshake_window_with_policy(...)`
+  - supports:
+    - optional post-AMC receive-timeout override
+    - optional early-stop when first `RegionTransitionControl` packet is observed
+  - existing probe APIs remain backward compatible and delegate to existing defaults
+- Updated manual example controls for targeted live runs:
+  - `VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS`
+  - `VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL`
+- Added focused regression test coverage for policy behavior:
+  - validates delayed post-AMC region-transition packet capture via timeout override
+  - validates early-stop on first region-transition signal
+- Validation for this run:
+  - `cargo check` passed
+  - `cargo test` passed (`viewer_net`: 43 tests, including new policy test)
+- Live/manual note:
+  - manual live probe not executed in this environment because required login env vars are unset
+  - blocker remains external to code/tests (`VIEWER_LOGIN_ENDPOINT`, `VIEWER_LOGIN_USERNAME`, `VIEWER_LOGIN_PASSWORD`)
+
 - Strengthened traffic-phase durability with focused deterministic tests in `viewer_net`:
   - added a bounded post-AMC fixture that asserts:
     - `RegionTransitionControl` packet scope separation (`CrossedRegion`, `ConfirmEnableSimulator`)

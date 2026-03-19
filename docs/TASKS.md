@@ -155,6 +155,10 @@ Status update:
   - boundary scope separation (`BootstrapRelevant` / `TransportControl` / `LikelyBroaderTraffic` / `RegionTransitionControl` / `Unknown`)
   - post-boundary repeated unknown packet-number reporting
   - region-transition summary behavior when watched IDs are observed
+- targeted live-observation controls now exist for region-transition visibility:
+  - optional post-AMC timeout override in bounded probe policy path
+  - optional early-stop when first region-transition control packet is observed
+  - this enables longer/sparser control-signal capture without introducing polling loops
 - next phase: type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed, without broad world/object decoding
 
 ### T8 - First connected world slice

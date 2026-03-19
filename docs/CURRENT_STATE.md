@@ -113,6 +113,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `Connection::probe_first_simulator_handshake_window_with_tail(...)`
   - default bounded-window behavior remains unchanged (`tail=0`)
   - probe report now includes first `AgentMovementComplete` index and post-movement observation count
+- policy-based bounded receive probing now exists for targeted handoff/control visibility:
+  - `Connection::probe_first_simulator_handshake_window_with_policy(...)`
+  - supports optional post-AMC timeout override (for sparse control packets)
+  - supports optional early-stop when first `RegionTransitionControl` signal is seen
+  - keeps probing bounded by packet cap and timeout controls (no polling loop)
 - outbound handshake send packets are now protocol-shaped binary LLUDP datagrams:
   - reliable LLUDP flags + packet-id header
   - low-frequency message numbers for `UseCircuitCode` (3) and `CompleteAgentMovement` (249)
@@ -147,6 +152,9 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - repeated unknown post-boundary packet-number reporting is now asserted (including repeated-ID collapse)
   - region-transition summary `not_seen_in_run` vs observed-path behavior is covered
   - scope-stop behavior remains explicit by keeping unmapped packet IDs in `Unknown` (no world/object decode expansion)
+  - policy probe behavior is covered for:
+    - post-AMC timeout override
+    - optional early-stop on first observed region-transition control packet
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -176,7 +184,7 @@ Current concrete blocker inside bootstrap:
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
   - early simulator traffic consolidation remains stable
   - hard stop remains: no broad object/world-state decoding in current scope
-  - next gap is live-observation opportunity for region-transition-adjacent medium signals (for example `CrossedRegion`/`ConfirmEnableSimulator`) under longer or transition-triggering runs
+  - next gap is live-observation opportunity for region-transition-adjacent medium signals (for example `CrossedRegion`/`ConfirmEnableSimulator`) using the new policy probe controls under longer or transition-triggering runs
 
 ---
 

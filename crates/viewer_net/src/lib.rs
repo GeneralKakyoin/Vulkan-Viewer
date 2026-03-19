@@ -1596,6 +1596,26 @@ impl Connection {
         max_packets: usize,
         post_movement_tail_packets: usize,
     ) -> Result<FirstSimulatorHandshakeProbeReport, ConnectionError> {
+        self.probe_first_simulator_handshake_window_with_policy(
+            bind,
+            wait_timeout,
+            max_packets,
+            post_movement_tail_packets,
+            None,
+            false,
+        )
+        .await
+    }
+
+    pub async fn probe_first_simulator_handshake_window_with_policy(
+        &mut self,
+        bind: &str,
+        wait_timeout: Duration,
+        max_packets: usize,
+        post_movement_tail_packets: usize,
+        post_movement_wait_timeout: Option<Duration>,
+        stop_on_region_transition_control: bool,
+    ) -> Result<FirstSimulatorHandshakeProbeReport, ConnectionError> {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
         }
@@ -1732,7 +1752,12 @@ impl Connection {
         let mut post_boundary_unknown_packet_message_numbers = Vec::new();
         for _ in 0..max_packets {
             let mut buf = vec![0u8; 2048];
-            let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
+            let recv_timeout = if agent_movement_complete_observation_index.is_some() {
+                post_movement_wait_timeout.unwrap_or(wait_timeout)
+            } else {
+                wait_timeout
+            };
+            let recv = timeout(recv_timeout, socket.recv_from(&mut buf)).await;
             let (received_len, _) = match recv {
                 Ok(Ok(parts)) => parts,
                 Ok(Err(err)) => {
@@ -1799,6 +1824,12 @@ impl Connection {
                     _ => {}
                 }
                 post_boundary_kinds.push(classification.kind);
+                if stop_on_region_transition_control
+                    && classification.scope
+                        == FirstSimulatorInboundTrafficScope::RegionTransitionControl
+                {
+                    break;
+                }
                 if post_movement_observations >= post_movement_tail_packets {
                     break;
                 }
@@ -1834,6 +1865,12 @@ impl Connection {
                     _ => {}
                 }
                 post_boundary_kinds.push(classification.kind);
+                if stop_on_region_transition_control
+                    && classification.scope
+                        == FirstSimulatorInboundTrafficScope::RegionTransitionControl
+                {
+                    break;
+                }
                 if post_movement_observations >= post_movement_tail_packets {
                     break;
                 }
@@ -5576,5 +5613,113 @@ mod tests {
         let early_summary = connection.summarize_early_simulator_traffic();
         assert_eq!(early_summary.observations, 1);
         assert_eq!(early_summary.viewer_effect, 1);
+    }
+
+    #[tokio::test]
+    async fn probe_first_simulator_handshake_window_with_policy_uses_post_movement_timeout_and_can_stop_on_region_control(
+    ) {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener.local_addr().expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            let _ = listener
+                .send_to(&make_low_frequency_packet(387), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(250), sender)
+                .await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let _ = listener
+                .send_to(&make_medium_frequency_packet(7), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_medium_frequency_packet(8), sender)
+                .await;
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let report = connection
+            .probe_first_simulator_handshake_window_with_policy(
+                "127.0.0.1:0",
+                Duration::from_millis(20),
+                10,
+                5,
+                Some(Duration::from_millis(200)),
+                true,
+            )
+            .await
+            .expect("probe window with policy should succeed");
+
+        assert!(!report.timed_out);
+        assert_eq!(
+            report
+                .observations
+                .iter()
+                .map(|obs| obs.classification.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FirstSimulatorInboundMessageKind::AgentDataUpdate,
+                FirstSimulatorInboundMessageKind::AgentMovementComplete,
+                FirstSimulatorInboundMessageKind::CrossedRegion,
+            ]
+        );
+        assert_eq!(report.agent_movement_complete_observation_index, Some(2));
+        assert_eq!(report.post_movement_observations, 1);
+
+        let summary = report
+            .post_boundary_summary
+            .expect("post-boundary summary should exist once movement complete is observed");
+        assert_eq!(summary.observations, 1);
+        assert_eq!(summary.region_transition_control, 1);
+        assert_eq!(summary.crossed_region, 1);
+        assert_eq!(summary.confirm_enable_simulator, 0);
+        assert!(!summary.watched_region_transition_control_not_seen);
+
+        let handoff_summary = connection.summarize_region_transition_control();
+        assert_eq!(handoff_summary.observations, 1);
+        assert_eq!(handoff_summary.crossed_region, 1);
+        assert_eq!(handoff_summary.confirm_enable_simulator, 0);
+        assert!(!handoff_summary.not_seen_in_run);
     }
 }

@@ -41,6 +41,10 @@ async fn run() -> Result<(), String> {
         parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS", 3) as usize;
     let first_sim_post_movement_tail_packets =
         parse_u64_env("VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS", 0) as usize;
+    let first_sim_post_movement_timeout_secs =
+        parse_optional_u64_env("VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS");
+    let first_sim_stop_on_region_control =
+        parse_bool_env("VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL", false);
 
     let intent = LoginIntent {
         username,
@@ -161,6 +165,8 @@ async fn run() -> Result<(), String> {
                         Duration::from_secs(first_sim_receive_timeout_secs),
                         first_sim_receive_max_packets,
                         first_sim_post_movement_tail_packets,
+                        first_sim_post_movement_timeout_secs.map(Duration::from_secs),
+                        first_sim_stop_on_region_control,
                     )
                     .await?;
                 }
@@ -195,6 +201,12 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn parse_optional_u64_env(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn parse_wire_format_env(name: &str, default: LoginWireFormat) -> LoginWireFormat {
@@ -236,20 +248,26 @@ async fn inspect_first_simulator_handshake_once(
     receive_timeout: Duration,
     max_packets: usize,
     post_movement_tail_packets: usize,
+    post_movement_timeout: Option<Duration>,
+    stop_on_region_control: bool,
 ) -> Result<(), String> {
     println!(
-        "First-simulator receive window attempt: bind={}, timeout_secs={}, max_packets={}, post_movement_tail_packets={}",
+        "First-simulator receive window attempt: bind={}, timeout_secs={}, max_packets={}, post_movement_tail_packets={}, post_movement_timeout_secs={:?}, stop_on_region_control={}",
         receive_bind,
         receive_timeout.as_secs(),
         max_packets,
-        post_movement_tail_packets
+        post_movement_tail_packets,
+        post_movement_timeout.map(|d| d.as_secs()),
+        stop_on_region_control
     );
     match connection
-        .probe_first_simulator_handshake_window_with_tail(
+        .probe_first_simulator_handshake_window_with_policy(
             receive_bind,
             receive_timeout,
             max_packets,
             post_movement_tail_packets,
+            post_movement_timeout,
+            stop_on_region_control,
         )
         .await
     {
