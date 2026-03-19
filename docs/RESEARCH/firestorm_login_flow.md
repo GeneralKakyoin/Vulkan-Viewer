@@ -63,6 +63,12 @@
 - Feature/options list (inventory roots/skeleton, buddy list, event/classified categories, max groups, map/voice/config flags, etc.).
 - MFA token/hash-related params (when present).
 
+### Auth payload note: `passwd` semantics
+- Firestorm references consistently use `params.passwd` for legacy XML-RPC style login payloads.
+- Firestorm tests include legacy `passwd` values in `$1$...` form (see `reference/firestorm/indra/newview/tests/lllogininstance_test.cpp`).
+- Firestorm login handler paths compute MD5 password digests for credential handling (`reference/firestorm/indra/newview/llloginhandler.cpp`).
+- Compatibility implication for this rewrite: LLSD login payload should treat `passwd` as legacy-hash formatted data (`$1$<md5>`), not raw plaintext.
+
 ## Important Response Data (Login/Startup)
 - Session identity:
   - `agent_id`

@@ -1,0 +1,5 @@
+model = "gpt-5.3-codex"
+
+[agents]
+max_threads = 2
+max_depth = 1

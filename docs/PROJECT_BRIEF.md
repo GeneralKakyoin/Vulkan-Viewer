@@ -1,51 +1,132 @@
-# PROJECT_BRIEF
+# PROJECT_BRIEF.md
 
 ## Project Overview
-This project is a from-scratch Rust rewrite of a Second Life / OpenSim viewer.
 
-It is a networked virtual-world client, not a game engine. The priorities remain:
-1. Compatibility
-2. Stability
-3. Maintainability
-4. Performance
-5. Feature breadth
+This repository is a from-scratch Rust rewrite of a Second Life / OpenSim viewer.
 
-## Current Implemented State
-- Workspace crate boundaries are in place:
-  - `viewer_app`, `viewer_core`, `viewer_render`, `viewer_ui`, `viewer_net`, `viewer_grid`, `viewer_asset`, `viewer_platform`
-- First vertical slice is working:
-  - Window creation and event loop
-  - `wgpu` initialization and rendering
-  - `egui` debug overlay
-  - Keyboard + mouse-look camera controls
-- Minimal 3D spatial scene is rendered:
-  - Ground plane
-  - Cube
-  - World-axis marker
-  - Depth buffering enabled
-- Networking and grid boundaries are scaffolded:
-  - `viewer_net`: async connection/session skeleton
-  - `viewer_grid`: grid login adapter trait and typed login models
-  - Mock login handshake between `viewer_net` and `viewer_grid` with passing tests
-- Research baseline exists:
-  - `docs/RESEARCH/firestorm_login_flow.md`
+The aim is to replace legacy architectural constraints with a modern, maintainable, compatibility-first design while preserving the long-term ambition of conventional-viewer feature parity.
 
-## Near-Term Goals
-- Keep improving the thin vertical slice toward real login:
-  - Replace mock login transport with real transport in `viewer_net`
-  - Keep request shaping and response interpretation in `viewer_grid`
-  - Preserve startup and rendering isolation in `viewer_app` / `viewer_render`
-- Expand minimal world rendering carefully:
-  - Continue with simple explicit scene data
-  - Avoid broad scene-system refactors before login bootstrap is stable
+This project is not a game engine.  
+It is a networked virtual-world viewer.
 
-## Non-Goals (Current Phase)
-- No full protocol implementation yet (HTTP/CAPS/UDP incomplete)
-- No asset pipeline implementation yet
-- No ECS-heavy gameplay-style architecture
-- No Firestorm architecture reuse
+---
 
-## Design Direction
-- Keep crate boundaries explicit and strict.
-- Prefer small reversible steps with compile-safe checkpoints.
-- Treat Firestorm as behavior reference only, not implementation source.
+## Final Goal
+
+Build a modern Rust-based viewer with long-term feature parity with conventional Second Life / OpenSim viewers while improving:
+
+- architecture
+- maintainability
+- compatibility
+- performance
+- debuggability
+- continuity across contributors and agents
+
+---
+
+## Final Scope
+
+Over time, the viewer is intended to cover:
+
+- login and session handling
+- live world entry and region transitions
+- camera, movement, and controls
+- terrain, objects, avatars, and attachments
+- textures, meshes, materials, and lighting
+- inventory and appearance basics
+- chat, IM, groups, and presence basics
+- map/minimap and teleport workflows
+- diagnostics, settings, and stability tooling
+- compatibility with established SL/OpenSim server expectations
+
+---
+
+## Delivery Strategy
+
+The project will not attempt full parity at once.
+
+It is being delivered in phases:
+
+1. Foundation and architecture proof
+2. Real login compatibility
+3. Post-login bootstrap and capability startup
+4. First connected world slice
+5. Asset-backed rendering
+6. Core viewer workflows
+7. Parity expansion and compatibility hardening
+
+---
+
+## Current Phase
+
+The project is currently in:
+
+**Phase 2 — Real login compatibility**
+
+The runtime foundation is working. The current task is to move from architectural proof to real protocol acceptance.
+
+---
+
+## Primary Goals
+
+- preserve strict crate boundaries
+- keep transport and grid semantics separated
+- reach a successful real login path
+- build toward a connected-world slice without architectural debt
+- maintain repository-resident continuity for future agents/models
+
+---
+
+## Non-Goals For Early Phases
+
+The following are intentionally deferred:
+- full conventional-viewer parity
+- advanced UI polish
+- full avatar fidelity
+- media/voice completeness
+- broad OpenSim divergence support
+- simulator/world integration before login/bootstrap is credible
+
+---
+
+## Current Architecture Direction
+
+- `viewer_app` = orchestration
+- `viewer_core` = shared domain state
+- `viewer_render` = GPU/rendering
+- `viewer_ui` = egui/debug UI
+- `viewer_net` = transport/session
+- `viewer_grid` = grid-specific semantics
+- `viewer_asset` = future asset pipeline
+- `viewer_platform` = future OS/platform concerns
+
+---
+
+## Firestorm Policy
+
+Firestorm is used only as a behavior reference.
+
+It informs:
+- login flow
+- bootstrap sequencing
+- compatibility expectations
+- protocol behavior
+
+It must not dictate:
+- project structure
+- architecture
+- code reuse
+- rendering design
+
+---
+
+## Current Success Condition
+
+The current near-term success condition is:
+
+**a real login request that reaches the live endpoint and progresses beyond the current payload/auth-compatibility blocker**
+
+After that, the next success condition becomes:
+- real successful login
+- populated bootstrap/session data
+- seed capability/bootstrap work

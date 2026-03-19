@@ -100,7 +100,14 @@ impl LoginCodec for LlsdLoginCodec {
         ));
         xml.push_str("<key>params</key><map>");
         xml.push_str(&llsd_string("username", &request.params.username));
-        xml.push_str(&llsd_string("password", &request.params.password));
+        xml.push_str(&llsd_string(
+            "passwd",
+            &normalize_legacy_passwd(&request.params.password),
+        ));
+        if let Some((first, last)) = split_legacy_name(&request.params.username) {
+            xml.push_str(&llsd_string("first", &first));
+            xml.push_str(&llsd_string("last", &last));
+        }
         xml.push_str(&llsd_string("start", &request.params.start));
         xml.push_str(&llsd_boolean("agree_to_tos", request.params.agree_to_tos));
         xml.push_str(&llsd_boolean("read_critical", request.params.read_critical));
@@ -161,6 +168,37 @@ fn llsd_string(key: &str, value: &str) -> String {
 
 fn llsd_boolean(key: &str, value: bool) -> String {
     format!("<key>{}</key><boolean>{}</boolean>", escape_xml(key), value)
+}
+
+fn split_legacy_name(username: &str) -> Option<(String, String)> {
+    let trimmed = username.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((first, last)) = trimmed.split_once('.') {
+        if !first.is_empty() && !last.is_empty() {
+            return Some((first.to_string(), last.to_string()));
+        }
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let first = parts.next()?;
+    let remainder: Vec<&str> = parts.collect();
+    if remainder.is_empty() {
+        return None;
+    }
+
+    Some((first.to_string(), remainder.join(" ")))
+}
+
+fn normalize_legacy_passwd(passwd: &str) -> String {
+    if passwd.starts_with("$1$") {
+        return passwd.to_string();
+    }
+
+    let digest = md5::compute(passwd.as_bytes());
+    format!("$1${digest:x}")
 }
 
 fn escape_xml(text: &str) -> String {
@@ -1107,8 +1145,50 @@ mod tests {
         .expect("valid UTF-8");
         assert!(encoded.contains("<key>method</key><string>login_to_simulator</string>"));
         assert!(encoded.contains("<key>username</key><string>test.user</string>"));
+        assert!(encoded.contains(
+            "<key>passwd</key><string>$1$5ebe2294ecd0e0f08eab7690d2a6ee69</string>"
+        ));
+        assert!(!encoded.contains("<key>password</key>"));
         assert!(encoded.contains("<string>inventory-root</string>"));
         assert!(encoded.contains("<key>options</key><array>"));
+    }
+
+    #[test]
+    fn llsd_codec_encodes_legacy_first_last_fields() {
+        let codec = LlsdLoginCodec;
+        let mut intent = make_intent(true);
+        intent.username = String::from("first.last");
+        let request = SecondLifeAdapter.shape_login_request(&intent);
+
+        let encoded = String::from_utf8(
+            codec
+                .encode_request(&request)
+                .expect("LLSD encode should succeed"),
+        )
+        .expect("valid UTF-8");
+
+        assert!(encoded.contains("<key>first</key><string>first</string>"));
+        assert!(encoded.contains("<key>last</key><string>last</string>"));
+        assert!(encoded.contains(
+            "<key>passwd</key><string>$1$5ebe2294ecd0e0f08eab7690d2a6ee69</string>"
+        ));
+    }
+
+    #[test]
+    fn llsd_codec_preserves_existing_legacy_passwd_prefix() {
+        let codec = LlsdLoginCodec;
+        let mut intent = make_intent(true);
+        intent.password = String::from("$1$alreadyhashed");
+        let request = SecondLifeAdapter.shape_login_request(&intent);
+
+        let encoded = String::from_utf8(
+            codec
+                .encode_request(&request)
+                .expect("LLSD encode should succeed"),
+        )
+        .expect("valid UTF-8");
+
+        assert!(encoded.contains("<key>passwd</key><string>$1$alreadyhashed</string>"));
     }
 
     #[test]

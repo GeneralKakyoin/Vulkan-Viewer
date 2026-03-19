@@ -1,248 +1,492 @@
 # AGENTS.md
 
-## Project
-This repository is a from-scratch Rust rewrite of a Second Life / OpenSim viewer.
+## Purpose
+This file defines how AI agents and subagents should operate in this repository.
 
-Primary priorities, in order:
-1. Compatibility
-2. Stability
-3. Maintainability
-4. Performance
-5. Feature breadth
+The goal is to make the rewrite durable across many chats, many models, and many handoffs without loss of quality. Agents must treat repository documentation as the source of truth and must preserve project continuity.
 
-This is a networked virtual-world viewer, not a game engine.
+This project is a from-scratch Rust rewrite of a Second Life / OpenSim viewer. It is a networked virtual-world viewer, not a game engine.
 
-## Stack defaults
-Prefer these unless an ADR says otherwise:
+---
+
+## Cost-Efficient Model Policy
+
+This repository should optimize for low usage and long continuity.
+
+### Default model strategy
+- Prefer the cheapest model that is likely to succeed.
+- For subagents, default to `gpt-5.4-mini` for implementation, repetitive edits, test updates, scaffolding, documentation, and file-local debugging.
+- Escalate to `gpt-5.3` only when the task genuinely requires stronger reasoning.
+
+### Escalation triggers
+Use a stronger model only when at least one of these is true:
+- architectural ambiguity or boundary conflict
+- protocol ambiguity that cannot be resolved from current docs/research
+- competing subagent outputs need arbitration
+- root-cause debugging spans multiple subsystems and cheaper passes failed
+- the task changes project direction, interfaces, or milestone sequencing
+
+### Subagent usage rules
+- Prefer one small subagent over several.
+- Do not spawn parallel subagents unless the work is clearly independent.
+- Do not use stronger models for boilerplate, rote summaries, formatting, or mechanical refactors.
+- If a cheap subagent can gather facts and a stronger model only needs to decide, do exactly that.
+
+### Practical model routing
+- `gpt-5.4-mini`:
+  - repetitive code edits
+  - doc updates
+  - test fixes
+  - scaffolding
+  - simple bug fixes
+  - narrow protocol comparison work
+- `gpt-5.3-codex`:
+  - architecture decisions
+  - interface changes
+  - protocol ambiguity resolution
+  - conflict resolution between subagents
+  - milestone planning when the next step is unclear
+
+### Failure policy
+If a `gpt-5.4-mini` subagent stalls or produces uncertain output:
+1. summarize what it found
+2. escalate only the unresolved part
+3. keep the stronger-model task narrow
+
+## Core Project Principles
+
+1. Compatibility first
+2. Stability second
+3. Maintainability third
+4. Performance fourth
+5. Feature breadth last
+
+Additional rules:
+- Firestorm is a behavior reference, not an architecture template
+- Never copy Firestorm code
+- Keep crate boundaries strict
+- Prefer small, reversible changes
+- Make assumptions explicit
+- Do not silently change architecture
+
+---
+
+## Scope Guardrails
+
+### Final Goal
+The long-term goal is feature parity with conventional Second Life / OpenSim viewers while replacing legacy architecture with a modern Rust-based design.
+
+### Current Delivery Phase
+The current delivery phase is still login compatibility and post-foundation protocol alignment.
+
+Agents must not jump ahead into simulator/world integration until login/bootstrap is credible and documented.
+
+---
+
+## Repository Truth Rule
+
+Agents must treat repository documentation as the primary source of truth, not prior chat memory.
+
+Before making changes, agents must read in this order:
+
+1. `AGENTS.md`
+2. `docs/MASTER_PLAN.md`
+3. `docs/CURRENT_STATE.md`
+4. `docs/HANDOFF.md`
+5. `docs/ARCHITECTURE.md`
+6. `docs/INTERFACES.md`
+7. `docs/FIRESTORM_REFERENCE.md`
+6. relevant `docs/RESEARCH/*`
+7. then inspect code
+
+Before changing anything, the agent must identify:
+- current phase
+- immediate objective
+- boundaries not to break
+- smallest correct next milestone
+
+---
+
+## Workflow Discipline (MANDATORY)
+
+For every meaningful change, agents must follow this workflow:
+
+1. Make the code change
+2. Validate the change
+   - `cargo check`
+   - `cargo test`
+   - manual run if applicable
+3. Commit the change
+4. Update `docs/CURRENT_STATE.md`
+5. Update `docs/HANDOFF.md`
+6. Update `docs/MASTER_PLAN.md` only if a milestone or project state has materially changed
+
+This workflow exists to preserve continuity across agents and across time.
+
+### Continuity Rule
+Agents must assume:
+- future agents may have zero useful chat context
+- repository docs are the only reliable continuity mechanism
+
+Therefore:
+- always update `CURRENT_STATE.md` and `HANDOFF.md` after meaningful progress
+- keep changes small, explicit, and well-documented
+- never rely on memory of previous interactions
+
+Failure to follow this workflow is a continuity failure.
+
+---
+
+## Current Technology Direction
+
+Preferred stack unless an ADR explicitly changes it:
+
 - Rust
 - wgpu
 - winit
 - egui
-- bevy_ecs (standalone only, not full Bevy)
+- bevy_ecs (standalone only if needed, not full Bevy)
 - tokio
 - serde
 - tracing
 
-Firestorm code is for reference only.
-
-Agents must:
-- NOT copy Firestorm code directly
-- NOT replicate its architecture
-- extract behavior, not implementation
-- design clean Rust equivalents
+Login transport stack currently:
+- reqwest
+- JSON codec
+- LLSD codec (minimal support)
+- typed grid adapter boundary
 
 Do not introduce:
 - full Bevy engine
 - Vulkan-only architecture
 - large framework dependencies without a documented reason
 
+---
 
+## Crate Boundaries
 
-## Core architecture rules
-Keep boundaries strict:
-- renderer must not depend on grid-specific logic
-- grid logic must not depend on renderer internals
-- UI must not contain protocol or asset logic
-- networking must remain testable in isolation
-- asset/cache logic must be separable from rendering
+### `viewer_app`
+Owns:
+- application startup
+- event loop wiring
+- window orchestration
+- camera/input wiring
+- scene wiring
 
-Preferred crate layout:
-- viewer_app
-- viewer_core
-- viewer_render
-- viewer_ui
-- viewer_net
-- viewer_grid
-- viewer_asset
-- viewer_platform
+Must not own:
+- protocol semantics
+- rendering internals
 
-## Documentation rules
-Treat docs as product assets.
+### `viewer_core`
+Owns:
+- camera
+- transforms
+- scene model
+- renderable instance descriptions
+- shared domain types
 
-Core docs:
-- docs/PROJECT_BRIEF.md
-- docs/ARCHITECTURE.md
-- docs/ROADMAP.md
+### `viewer_render`
+Owns:
+- GPU initialization
+- render pipelines
+- mesh buffers
+- depth buffer
+- camera uniform handling
+- object rendering
+- debug spatial rendering
 
-Decisions:
-- docs/DECISIONS/000x-name.md
+### `viewer_ui`
+Owns:
+- egui integration
+- debug UI
+- display-only diagnostics
 
-Research notes:
-- docs/RESEARCH/
+Must not own:
+- protocol logic
+- business logic
 
-Do not mix rough notes into source-of-truth docs.
+### `viewer_net`
+Owns:
+- connection lifecycle
+- session state
+- HTTP transport
+- redirect following
+- codec selection
+- login diagnostics and trace collection
 
-When architecture, boundaries, or workflow assumptions change, update docs in the same task.
+Must not own:
+- grid-specific meaning
 
-## Build and validation expectations
-Before finishing a coding task:
-- ensure the code builds
-- run the narrowest relevant checks first
-- avoid expensive full-repo validation unless the task needs it
+### `viewer_grid`
+Owns:
+- request shaping
+- response interpretation
+- login result classification
+- session/bootstrap typing
+- grid-specific policy
 
-Typical commands:
-- cargo fmt
-- cargo check
-- cargo test
+Must not own:
+- transport
 
-Prefer minimal validation for small, localized changes.
+### `viewer_asset`
+Reserved for:
+- asset fetching
+- caching
+- texture/mesh asset pipeline
 
-## Change policy
-Prefer:
-- small, reversible changes
-- narrow diffs
-- explicit interfaces
-- incremental progress
+### `viewer_platform`
+Reserved for:
+- OS/platform integration concerns
 
-Avoid:
-- speculative rewrites
-- broad refactors unrelated to the task
-- hidden coupling
-- engine-style global state
+---
 
-## Subagent policy
-Use subagents only when delegation is explicitly allowed by the task or user instruction.
+## Firestorm Policy
 
-For this repository, if the prompt says or implies any of the following, delegation is allowed and encouraged:
-- "use subagents"
-- "parallelize"
-- "delegate"
-- "split this up"
-- "use agents when useful"
-- "orchestrate this"
+Firestorm source is reference-only.
 
-When delegation is allowed, prefer subagents for:
-- codebase exploration
-- repetitive edits
-- narrow file-local implementations
-- test triage
-- log/error inspection
-- documentation drafting
-- research summaries
-- bounded comparisons
+Use Firestorm for:
+- protocol behavior
+- login/session behavior
+- capability/bootstrap sequence
+- compatibility research
+- edge-case understanding
 
-Be cautious with parallel write-heavy tasks that touch the same files.
+Do not use Firestorm for:
+- project structure
+- code reuse
+- architecture
+- dependency choices
+- rendering design
 
-## Delegation strategy
-Main agent responsibilities:
-- understand the task
-- decide whether delegation is worth the cost
-- keep the main thread clean
-- assign bounded tasks
-- resolve conflicts
-- integrate outputs
-- make final architectural decisions
+When using Firestorm:
+1. identify behavior
+2. document findings in `docs/RESEARCH`
+3. translate that behavior into clean Rust abstractions
 
-Subagent responsibilities:
-- execute a narrow task
-- return concise results
-- avoid unnecessary exploration
-- avoid broad refactors
-- avoid touching unrelated files
+---
 
-Subagents should return distilled findings, not long raw logs.
+## Agent Roles
 
-## Model selection policy
-Optimize for low usage by default.
+### Architect Agent
+Responsible for:
+- module boundaries
+- system interactions
+- data flow proposals
+- risks and tradeoffs
+- keeping implementation aligned with the brief and plan
 
-Use the cheapest model that is likely to succeed.
+Must not:
+- silently redesign the project
+- dump large implementation changes without being asked
 
-Recommended model routing:
-- easy, repetitive, well-bounded tasks:
-  - prefer gpt-5-mini
-  - or gpt-5.1-codex-mini for coding-specific delegated tasks
-- medium implementation tasks with some repo context:
-  - prefer gpt-5.1-codex
-- architecture, orchestration, conflict resolution, tricky debugging, and final integration:
-  - prefer gpt-5.3-class / strongest available coding model in the current Codex environment
-  - if the environment exposes gpt-5.4 as the primary top-tier Codex model, use that instead
+### Scaffolding Agent
+Responsible for:
+- folder structures
+- starter files
+- crate/module skeletons
+- interface placeholders
+- minimal templates
 
-Practical rule:
-- minions do the bulk work
-- strongest model handles planning, arbitration, and merge decisions
+Must:
+- scaffold only what is needed
+- avoid overbuilding
 
-Do not spend a top-tier model on rote boilerplate, mechanical edits, or simple summaries.
+### Implementation Agent
+Responsible for:
+- focused production code for a defined task
+- small, testable units
+- preserving architecture
+- readable and maintainable code
 
-## Delegation heuristics
-Delegate when at least one of these is true:
-- the task can be split into independent parts
-- the work is noisy and would pollute the main thread
-- multiple files or subsystems need inspection
-- there is a repetitive mechanical transformation
-- architecture review is easier after parallel reconnaissance
+Must:
+- work from a clearly defined task
+- avoid unrelated changes
+- note assumptions and unfinished areas
 
-Do not delegate when:
-- the task is tiny
-- the task is highly sequential
-- the task centers on one small file
-- coordination overhead would exceed the savings
+### Refactor Agent
+Responsible for:
+- reducing duplication
+- improving readability
+- preparing systems for future work
+- improving separation of concerns
 
-## Preferred subagent roles
-Use lightweight, temporary specialist roles such as:
-- Scout: explore relevant files and return only the important paths and findings
-- Implementer: make a bounded code change in a clearly defined area
-- Tester: run targeted validation and summarize failures
-- Researcher: compare alternatives and produce a concise recommendation
-- Docs: draft or update focused documentation
-- Refactorer: perform mechanical renames or local cleanup only
-- Resolver: analyze conflicting outputs and present merge options
+Must:
+- preserve behavior unless explicitly told otherwise
+- keep changes scoped
 
-Create these organically as needed. Do not create agents just to mirror an org chart.
+### Testing Agent
+Responsible for:
+- unit tests
+- integration test suggestions
+- smoke tests
+- validating assumptions
 
-## Subagent task template
-When spawning a subagent, give it:
-- one clear objective
-- explicit scope boundaries
-- files or directories to focus on
-- success criteria
-- model preference based on task difficulty
-- instruction to keep output concise
+Must:
+- focus on meaningful coverage
+- avoid low-value tests
 
-Example expectations:
-- "Inspect viewer_render startup only; identify the minimum files to change."
-- "Update docs/ROADMAP.md only; do not edit code."
-- "Run targeted validation for viewer_net and summarize failures in 5 bullets max."
+### Documentation Agent
+Responsible for:
+- updating markdown docs
+- summarizing decisions
+- documenting boundaries
+- maintaining continuity files
 
-## Conflict resolution
-If multiple subagents disagree:
-1. preserve correctness and compatibility first
-2. prefer the simpler design
-3. prefer the option with cleaner module boundaries
-4. document the decision if it is architectural
+Must:
+- reflect actual project state
+- avoid vague claims
 
-Escalate to a stronger model for arbitration when needed.
+### Research Agent
+Responsible for:
+- library comparisons
+- protocol research
+- compatibility investigations
+- implementation reference gathering
 
-## Repo-specific engineering guidance
-This project is expected to evolve through a thin vertical slice:
-1. app shell
-2. renderer bootstrap
-3. UI overlay
-4. core scheduling
-5. networking/login
-6. first world rendering
-7. assets/cache
-8. compatibility expansion
+Must:
+- separate facts from recommendations
+- highlight uncertainty
+- avoid making final decisions unless asked
 
-Do not front-load advanced features before the slice works.
+---
 
-## First milestone
-A valid first milestone is:
-- app launches
-- window opens
-- wgpu initializes
-- screen clears
-- egui overlay renders
-- app exits cleanly
+## Optional Specialized Agents
 
-No networking or asset loading is required before this milestone.
+These can be used as needed:
 
-## Final behavior rules
-When in doubt:
-- simplify
-- isolate
-- document
-- choose the lower-cost path unless the task genuinely needs stronger reasoning
+- Rendering Agent
+- Networking Agent
+- Asset Pipeline Agent
+- UI Agent
+- Performance Agent
 
-Keep the main thread focused.
-Use minions for bounded work.
-Use stronger models for decisions.
+Use them only when it helps. Do not create complexity for its own sake.
+
+---
+
+## Skills Usage Policy
+
+Agents must prefer repository skills for repeatable workflows instead of re-prompting from scratch.
+
+### Skill discovery
+Check repository skills before starting non-trivial work.
+
+## Skills Policy
+
+Before starting medium or large work:
+1. check whether a repository skill applies
+2. use the skill explicitly when the match is clear
+3. only proceed without a skill if no existing skill fits
+
+Primary repo skills live in:
+- `.agents/skills/`
+
+Expected core skills:
+- plan-next-step
+- implement-feature
+- protocol-alignment
+- debug-trace-analysis
+- firestorm-research
+- doc-update
+- validate-and-commit
+
+### When to use skills
+Use a skill when:
+- the workflow is repeatable
+- the task matches a skill description
+- the skill reduces prompt length or context load
+- the skill encodes project-specific rules or boundaries
+
+### Continuity rule
+If a repeated workflow appears more than once, create or update a skill for it.
+
+## Agent Operating Rules
+
+### Rule 1: Stay in Scope
+Only perform the task assigned. If a task pressures architecture changes, flag that explicitly.
+
+### Rule 2: Make Assumptions Visible
+If something is unclear, state assumptions. Do not bury them in code.
+
+### Rule 3: Prefer Small Reviewable Outputs
+Smaller, checkable outputs are better than large opaque dumps.
+
+### Rule 4: Respect Project Documents
+All work must align with:
+- `docs/PROJECT_BRIEF.md`
+- `docs/ROADMAP.md`
+- `docs/MASTER_PLAN.md`
+- `docs/CURRENT_STATE.md`
+- `docs/HANDOFF.md`
+- `AGENTS.md`
+
+### Rule 5: Do Not Overengineer Early
+Prefer the simplest structure that supports the current phase.
+
+### Rule 6: Separate Proposal from Implementation
+State clearly whether you are:
+- proposing
+- scaffolding
+- implementing
+- refactoring
+- documenting
+- validating
+
+---
+
+## Standard Task Format
+
+When assigning work to an agent, use this structure where possible:
+
+### Task
+Short description of the work.
+
+### Goal
+What success looks like.
+
+### Inputs
+Relevant files, modules, constraints, or docs.
+
+### Output Required
+What the agent should produce.
+
+### Boundaries
+What must not change.
+
+### Notes
+Assumptions, roadmap phase, compatibility concerns, or follow-up context.
+
+---
+
+## Handoff Rules
+
+When one agent hands off to another, include:
+- what was completed
+- what assumptions were made
+- what remains unfinished
+- what files changed
+- what risks or unknowns remain
+
+---
+
+## Review Expectations
+
+Review agent output for:
+- project alignment
+- scope control
+- readability
+- maintainability
+- unnecessary complexity
+- hidden architecture changes
+
+Human review remains required for major technical direction.
+
+---
+
+## Current Project Rule
+
+The current next step is:
+
+**continue login compatibility alignment until the real LLSD login endpoint recognizes credentials correctly**
+
+Do not move to simulator/bootstrap yet unless login compatibility is working or rigorously characterized and documented.
