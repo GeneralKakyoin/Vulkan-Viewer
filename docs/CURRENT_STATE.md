@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase C - First-simulator handshake wire-fidelity and live receive validation
+Phase C - First-simulator handshake live inbound progression
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -80,6 +80,10 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 - one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
   - `Connection::probe_first_simulator_handshake_once(...)`
   - manual example wiring added for live receive validation
+- bounded receive-window probe now exists on the same socket:
+  - `Connection::probe_first_simulator_handshake_window(...)`
+  - bounded packet count + timeout with ordered observation reporting
+  - receive diagnostics now include `observation_index`
 - outbound handshake send packets are now protocol-shaped binary LLUDP datagrams:
   - reliable LLUDP flags + packet-id header
   - low-frequency message numbers for `UseCircuitCode` (3) and `CompleteAgentMovement` (249)
@@ -87,8 +91,13 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - per-send diagnostics now include packet id and packet message number
 - live same-socket probe now receives parseable real inbound simulator traffic:
   - inbound low message `387` classified as `AgentDataUpdate`
+  - inbound low message `1` classified as `TestMessage`
+  - inbound low message `250` classified as `AgentMovementComplete`
   - inbound classification source is typed packet message-number decode
-  - stage remains `WaitingForAgentMovementComplete` (no `AgentMovementComplete` observed yet)
+  - handshake stage now advances to `AgentMovementComplete` in live bounded-window probe runs
+  - typed inbound classification now also includes:
+    - `HealthMessage` (low 138)
+    - `SimulatorViewerTimeMessage` (low 150)
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -111,10 +120,9 @@ Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
-- Current handshake blocker narrowed to protocol payload fidelity on real simulator traffic:
-  - outbound wire shape now elicits real inbound simulator packets (`AgentDataUpdate`)
-  - `AgentMovementComplete` is still not observed in current one-shot window
-  - next blocker is inbound handshake progression/completion evidence, not basic outbound send shape
+- Current handshake blocker narrowed to post-movement inbound coverage:
+  - first inbound progression to `AgentMovementComplete` is now observed and classified
+  - next gap is broader typed coverage for additional early inbound messages beyond the initial handshake completion path
 
 ---
 
@@ -130,6 +138,7 @@ Current concrete blocker inside bootstrap:
 - improve outbound handshake packet fidelity toward real LLUDP message layout while preserving current scaffold boundaries
 - extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
 - classify and observe additional early inbound low-frequency packets that appear before `AgentMovementComplete` in live traffic
+- expand typed coverage for additional early post-movement inbound traffic while keeping handshake scope bounded
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -139,7 +148,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**continue live handshake progression analysis from observed `AgentDataUpdate` toward first observed `AgentMovementComplete` (with typed inbound expansion as needed)**
+**extend typed inbound classification and diagnostics for the next early packets after `AgentMovementComplete`, without drifting into full world-state handling**
 
 ---
 

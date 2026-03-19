@@ -2,6 +2,22 @@
 
 ## Last Completed Work
 
+- Implemented bounded multi-packet same-socket live probe in `viewer_net`:
+  - added `probe_first_simulator_handshake_window(bind, timeout, max_packets)`
+  - one-shot probe now delegates to bounded-window probe (`max_packets=1`)
+  - added probe result typing with ordered observations + timeout flag
+  - receive diagnostics now include `observation_index` for sequence tracking
+- Expanded typed inbound classification for early live progression:
+  - added `TestMessage` (low 1)
+  - added `HealthMessage` (low 138)
+  - added `SimulatorViewerTimeMessage` (low 150)
+- Live bounded-window probe now observes and classifies multi-packet progression:
+  - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete`
+  - `AgentMovementComplete` classified via packet message-number decode
+  - handshake stage advanced from waiting to terminal completion in live run
+- Updated manual example to support bounded receive window controls:
+  - `VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS`
+  - report now prints ordered observations from probe window
 - Completed first-simulator outbound wire-fidelity pass in `viewer_net`:
   - replaced JSON-like UDP handshake payloads with binary LLUDP packet construction for:
     - `UseCircuitCode` (low 3)
@@ -175,7 +191,9 @@
 - Receive-side handshake observation/classification is now in place; next risk is protocol-level fidelity (actual UDP packet decoding semantics).
 - Receive-side handshake identity classification now uses typed UDP message-number decoding; the next fidelity risk moved to block/field-level decode inside handshake messages.
 - Same-socket live probe removed local bind-continuity ambiguity; primary remaining risk is likely outbound handshake packet wire fidelity.
-- Outbound handshake wire fidelity is now materially improved and producing live inbound packets; current risk shifted to progression from early inbound traffic to `AgentMovementComplete`.
+- Outbound handshake wire fidelity is now materially improved and producing live inbound packets.
+- Early inbound progression through `AgentMovementComplete` is now observed.
+- Current risk shifted to narrow typed coverage expansion after initial movement completion (still within handshake/bootstrap scope).
 
 ---
 
@@ -198,6 +216,7 @@ This includes:
 - extend typed decode from message identity to minimal block/field extraction for `AgentMovementComplete` while preserving current send/receive stage flow
 - improve outbound `UseCircuitCode`/`CompleteAgentMovement` packet wire fidelity to unlock first real inbound handshake packet observation
 - continue typed inbound expansion/progression analysis from `AgentDataUpdate` toward first observed `AgentMovementComplete`
+- extend typed inbound coverage for the next early post-movement packets and add minimal field-level decode where it most helps diagnostics
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

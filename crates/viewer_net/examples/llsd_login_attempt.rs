@@ -37,6 +37,8 @@ async fn run() -> Result<(), String> {
         .unwrap_or_else(|_| String::from("0.0.0.0:0"));
     let first_sim_receive_timeout_secs =
         parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS", 5);
+    let first_sim_receive_max_packets =
+        parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS", 3) as usize;
 
     let intent = LoginIntent {
         username,
@@ -155,6 +157,7 @@ async fn run() -> Result<(), String> {
                         &mut connection,
                         &first_sim_receive_bind,
                         Duration::from_secs(first_sim_receive_timeout_secs),
+                        first_sim_receive_max_packets,
                     )
                     .await?;
                 }
@@ -228,24 +231,35 @@ async fn inspect_first_simulator_handshake_once(
     connection: &mut Connection,
     receive_bind: &str,
     receive_timeout: Duration,
+    max_packets: usize,
 ) -> Result<(), String> {
     println!(
-        "First-simulator one-shot receive attempt: bind={}, timeout_secs={}",
+        "First-simulator receive window attempt: bind={}, timeout_secs={}, max_packets={}",
         receive_bind,
-        receive_timeout.as_secs()
+        receive_timeout.as_secs(),
+        max_packets
     );
     match connection
-        .probe_first_simulator_handshake_once(receive_bind, receive_timeout)
+        .probe_first_simulator_handshake_window(receive_bind, receive_timeout, max_packets)
         .await
     {
-        Ok(classification) => {
+        Ok(report) => {
             println!(
-                "First-simulator inbound classified: kind={:?}, source={:?}, signal={}, packet_message_number={:?}",
-                classification.kind,
-                classification.decode_source,
-                classification.signal,
-                classification.packet_message_number
+                "First-simulator receive report: observations={}, timed_out={}",
+                report.observations.len(),
+                report.timed_out
             );
+            for obs in &report.observations {
+                println!(
+                    "Observation {}: kind={:?}, source={:?}, signal={}, packet_message_number={:?}, payload_len={}",
+                    obs.observation_index,
+                    obs.classification.kind,
+                    obs.classification.decode_source,
+                    obs.classification.signal,
+                    obs.classification.packet_message_number,
+                    obs.payload_len
+                );
+            }
         }
         Err(err) => {
             println!("First-simulator one-shot receive failed: {err}");

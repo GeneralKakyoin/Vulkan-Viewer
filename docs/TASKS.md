@@ -119,6 +119,15 @@ Done when:
 - receive-side typed classification covers observed early packets without heuristic dependence
 - next blocker from `AgentDataUpdate` to `AgentMovementComplete` is explicitly characterized
 
+Status update:
+- materially advanced: bounded probe now observes `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` and stage advancement is confirmed in live runs
+
+### T7.4 - Early post-movement inbound typing
+Done when:
+- the next inbound packets after initial `AgentMovementComplete` are captured with bounded diagnostics
+- typed classification is expanded only for the small set repeatedly observed in this stage
+- progression remains handshake/bootstrap-focused (no world-state subsystem implementation)
+
 ### T8 - First connected world slice
 Done when:
 - world-derived placeholder state can be rendered from live connection data

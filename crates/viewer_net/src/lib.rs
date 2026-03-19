@@ -29,7 +29,10 @@ const LLUDP_RELIABLE_FLAG: u8 = 0x40;
 const LLUDP_LOW_FREQUENCY_PREFIX: u32 = 0xFFFF0000;
 const LLUDP_USE_CIRCUIT_CODE_LOW_ID: u16 = 3;
 const LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID: u16 = 249;
+const LLUDP_TEST_MESSAGE_LOW_ID: u16 = 1;
 const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
+const LLUDP_HEALTH_MESSAGE_LOW_ID: u16 = 138;
+const LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID: u16 = 150;
 const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
 const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
 const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
@@ -793,8 +796,11 @@ pub struct FirstSimulatorHandshakeSendDiagnostic {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FirstSimulatorInboundMessageKind {
+    TestMessage,
     AgentMovementComplete,
     RegionHandshake,
+    HealthMessage,
+    SimulatorViewerTimeMessage,
     EnableSimulator,
     AgentDataUpdate,
     Irrelevant,
@@ -818,6 +824,7 @@ pub struct FirstSimulatorInboundClassification {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorHandshakeReceiveDiagnostic {
+    pub observation_index: usize,
     pub kind: FirstSimulatorInboundMessageKind,
     pub payload_len: usize,
     pub stage_before: Option<FirstSimulatorHandshakeStage>,
@@ -826,6 +833,19 @@ pub struct FirstSimulatorHandshakeReceiveDiagnostic {
     pub signal: String,
     pub decode_source: FirstSimulatorInboundDecodeSource,
     pub packet_message_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorHandshakeProbeObservation {
+    pub observation_index: usize,
+    pub payload_len: usize,
+    pub classification: FirstSimulatorInboundClassification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorHandshakeProbeReport {
+    pub observations: Vec<FirstSimulatorHandshakeProbeObservation>,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1316,8 +1336,10 @@ impl Connection {
         }
 
         let stage_after = self.first_simulator_handshake_state.as_ref().map(|s| s.stage);
+        let observation_index = self.first_simulator_handshake_receive_diagnostics.len() + 1;
         self.first_simulator_handshake_receive_diagnostics
             .push(FirstSimulatorHandshakeReceiveDiagnostic {
+                observation_index,
                 kind: classification.kind,
                 payload_len: payload.len(),
                 stage_before,
@@ -1373,8 +1395,31 @@ impl Connection {
         bind: &str,
         wait_timeout: Duration,
     ) -> Result<FirstSimulatorInboundClassification, ConnectionError> {
+        let report = self
+            .probe_first_simulator_handshake_window(bind, wait_timeout, 1)
+            .await?;
+        if let Some(first) = report.observations.first() {
+            return Ok(first.classification.clone());
+        }
+        Err(ConnectionError::FirstSimulatorReceiveTimedOut {
+            bind: bind.to_string(),
+            timeout_ms: wait_timeout.as_millis(),
+        })
+    }
+
+    pub async fn probe_first_simulator_handshake_window(
+        &mut self,
+        bind: &str,
+        wait_timeout: Duration,
+        max_packets: usize,
+    ) -> Result<FirstSimulatorHandshakeProbeReport, ConnectionError> {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
+        }
+        if max_packets == 0 {
+            return Err(ConnectionError::CapabilityDecode(String::from(
+                "max_packets must be greater than zero",
+            )));
         }
 
         if self.first_simulator_handshake_state.is_none() {
@@ -1489,25 +1534,47 @@ impl Connection {
             });
         }
 
-        let mut buf = vec![0u8; 2048];
-        let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
-        let (received_len, _) = match recv {
-            Ok(Ok(parts)) => parts,
-            Ok(Err(err)) => {
-                return Err(ConnectionError::FirstSimulatorReceiveFailed {
-                    bind: bind.to_string(),
-                    reason: err.to_string(),
-                })
-            }
-            Err(_) => {
-                return Err(ConnectionError::FirstSimulatorReceiveTimedOut {
-                    bind: bind.to_string(),
-                    timeout_ms: wait_timeout.as_millis(),
-                })
-            }
-        };
+        let mut observations = Vec::new();
+        let mut timed_out = false;
+        for _ in 0..max_packets {
+            let mut buf = vec![0u8; 2048];
+            let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
+            let (received_len, _) = match recv {
+                Ok(Ok(parts)) => parts,
+                Ok(Err(err)) => {
+                    return Err(ConnectionError::FirstSimulatorReceiveFailed {
+                        bind: bind.to_string(),
+                        reason: err.to_string(),
+                    })
+                }
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
+            };
 
-        self.observe_first_simulator_inbound_payload(&buf[..received_len])
+            let classification = self.observe_first_simulator_inbound_payload(&buf[..received_len])?;
+            let observation_index = self.first_simulator_handshake_receive_diagnostics.len();
+            observations.push(FirstSimulatorHandshakeProbeObservation {
+                observation_index,
+                payload_len: received_len,
+                classification: classification.clone(),
+            });
+
+            if self
+                .first_simulator_handshake_state
+                .as_ref()
+                .map(|state| state.stage)
+                == Some(FirstSimulatorHandshakeStage::AgentMovementComplete)
+            {
+                break;
+            }
+        }
+
+        Ok(FirstSimulatorHandshakeProbeReport {
+            observations,
+            timed_out,
+        })
     }
 
     pub async fn fetch_seed_capabilities(&self) -> Result<SeedCapabilityMap, ConnectionError> {
@@ -2043,9 +2110,33 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == lludp_low_frequency_message_number(LLUDP_TEST_MESSAGE_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::TestMessage,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::RegionHandshake,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::HealthMessage,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -3990,6 +4081,18 @@ mod tests {
         );
         assert_eq!(movement.packet_message_number, Some(0xffff00fa));
 
+        let test_message = classify_first_simulator_inbound_message(&make_low_frequency_packet(1));
+        assert_eq!(
+            test_message.kind,
+            FirstSimulatorInboundMessageKind::TestMessage
+        );
+        assert_eq!(test_message.signal, "packet:0xffff0001");
+        assert_eq!(
+            test_message.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(test_message.packet_message_number, Some(0xffff0001));
+
         let region = classify_first_simulator_inbound_message(&make_low_frequency_packet(148));
         assert_eq!(region.kind, FirstSimulatorInboundMessageKind::RegionHandshake);
         assert_eq!(region.signal, "packet:0xffff0094");
@@ -3998,6 +4101,27 @@ mod tests {
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
         );
         assert_eq!(region.packet_message_number, Some(0xffff0094));
+
+        let health = classify_first_simulator_inbound_message(&make_low_frequency_packet(138));
+        assert_eq!(health.kind, FirstSimulatorInboundMessageKind::HealthMessage);
+        assert_eq!(health.signal, "packet:0xffff008a");
+        assert_eq!(
+            health.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(health.packet_message_number, Some(0xffff008a));
+
+        let sim_time = classify_first_simulator_inbound_message(&make_low_frequency_packet(150));
+        assert_eq!(
+            sim_time.kind,
+            FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage
+        );
+        assert_eq!(sim_time.signal, "packet:0xffff0096");
+        assert_eq!(
+            sim_time.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(sim_time.packet_message_number, Some(0xffff0096));
 
         let enable = classify_first_simulator_inbound_message(&make_low_frequency_packet(151));
         assert_eq!(enable.kind, FirstSimulatorInboundMessageKind::EnableSimulator);
@@ -4127,6 +4251,7 @@ mod tests {
         let diagnostics = connection.first_simulator_handshake_receive_diagnostics();
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].advanced_stage);
+        assert_eq!(diagnostics[0].observation_index, 1);
         assert_eq!(
             diagnostics[0].decode_source,
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
@@ -4187,6 +4312,7 @@ mod tests {
         let diagnostics = connection.first_simulator_handshake_receive_diagnostics();
         assert_eq!(diagnostics.len(), 1);
         assert!(!diagnostics[0].advanced_stage);
+        assert_eq!(diagnostics[0].observation_index, 1);
     }
 
     #[tokio::test]
@@ -4339,6 +4465,7 @@ mod tests {
             FirstSimulatorInboundMessageKind::RegionHandshake
         );
         assert!(!diagnostics[0].advanced_stage);
+        assert_eq!(diagnostics[0].observation_index, 1);
         assert_eq!(
             diagnostics[0].decode_source,
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
@@ -4436,9 +4563,89 @@ mod tests {
         let receive_diagnostics = connection.first_simulator_handshake_receive_diagnostics();
         assert_eq!(receive_diagnostics.len(), 1);
         assert!(receive_diagnostics[0].advanced_stage);
+        assert_eq!(receive_diagnostics[0].observation_index, 1);
         assert_eq!(
             receive_diagnostics[0].decode_source,
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_first_simulator_handshake_window_collects_multiple_observations() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener.local_addr().expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            let _ = listener
+                .send_to(&make_low_frequency_packet(387), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(250), sender)
+                .await;
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let report = connection
+            .probe_first_simulator_handshake_window("127.0.0.1:0", Duration::from_secs(1), 3)
+            .await
+            .expect("probe window should succeed");
+        assert_eq!(report.observations.len(), 2);
+        assert!(!report.timed_out);
+        assert_eq!(
+            report.observations[0].classification.kind,
+            FirstSimulatorInboundMessageKind::AgentDataUpdate
+        );
+        assert_eq!(
+            report.observations[1].classification.kind,
+            FirstSimulatorInboundMessageKind::AgentMovementComplete
+        );
+        assert_eq!(
+            connection
+                .first_simulator_handshake_state()
+                .expect("state should exist")
+                .stage,
+            FirstSimulatorHandshakeStage::AgentMovementComplete
         );
     }
 }
