@@ -63,6 +63,21 @@
     - happy-path ordered progression through waiting stage
     - out-of-order transition rejection
     - logged-in state precondition
+- Bound first-simulator scaffold to real transport sends in `viewer_net`:
+  - added `send_first_simulator_use_circuit_code()` transport action
+  - added `send_first_simulator_complete_agent_movement()` transport action
+  - both actions now send UDP datagram payloads to first-simulator target derived from bootstrap
+  - send actions enforce ordered stage flow in code
+  - added per-send diagnostics structure and history tracking:
+    - action
+    - target
+    - payload length
+    - elapsed time
+    - success/failure + error text
+  - added focused tests for:
+    - `UseCircuitCode` send success + stage advancement + diagnostic capture
+    - `CompleteAgentMovement` send success + waiting stage advancement + diagnostic capture
+    - out-of-order send rejection
 - Achieved successful real Second Life login through the live endpoint
 - Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
 - Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
@@ -82,6 +97,7 @@
 - MapLayer should no longer be treated as the best HTTP one-shot bootstrap candidate; immediate HTTP bootstrap evidence should prioritize SimulatorFeatures and EventQueueGet.
 - Bootstrap capability probing is now characterized enough to begin handshake-sequencing planning without starting simulator transport implementation.
 - Handshake sequencing is now represented in typed Rust state in `viewer_net`; the next risk moved from sequencing ambiguity to transport binding of the scaffold stages.
+- Handshake transport binding for send actions is now in place; next risk is ack/receive-side classification and integration.
 
 ---
 
@@ -99,6 +115,7 @@ This includes:
 - keep MapLayer classified as likely legacy/unsupported for HTTP one-shot inspection unless new evidence suggests otherwise
 - derive minimal Rust-facing handshake stage model from documented Firestorm first-region sequence (documentation/planning only)
 - wire `UseCircuitCode` and `CompleteAgentMovement` scaffold stages to minimal transport send/ack mechanics in `viewer_net` (without world integration)
+- add bounded ack/receive diagnostics and transition classification for first-simulator handshake actions
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 
