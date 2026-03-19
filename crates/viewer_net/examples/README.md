@@ -27,6 +27,7 @@ It is manual-only and requires environment variables. It does not store credenti
 - `VIEWER_FIRST_SIM_RECEIVE_BIND` (UDP bind target for one-shot receive, default: `0.0.0.0:0`)
 - `VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS` (default: `5`)
 - `VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS` (bounded receive packet count, default: `3`)
+- `VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS` (how many packets to keep after first `AgentMovementComplete`, default: `0`)
 
 ## Run
 ```powershell
@@ -42,6 +43,7 @@ $env:VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE="true"
 $env:VIEWER_FIRST_SIM_RECEIVE_BIND="0.0.0.0:0"
 $env:VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS="5"
 $env:VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS="3"
+$env:VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS="2"
 cargo run -p viewer_net --example llsd_login_attempt
 ```
 

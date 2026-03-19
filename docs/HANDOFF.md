@@ -2,6 +2,26 @@
 
 ## Last Completed Work
 
+- Extended first-simulator bounded probe with optional post-movement tail capture:
+  - added `probe_first_simulator_handshake_window_with_tail(bind, timeout, max_packets, post_movement_tail_packets)`
+  - preserved existing behavior for `probe_first_simulator_handshake_window(...)` via wrapper (`tail=0`)
+  - probe report now captures:
+    - `agent_movement_complete_observation_index`
+    - `post_movement_observations`
+- Updated manual example/README for bounded post-movement observation:
+  - new env var `VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS`
+  - report output now prints movement-complete index and post-movement count
+- Improved unknown inbound packet diagnostics:
+  - packet-shaped but unmapped traffic now uses explicit signal `packet:0x........:unmapped`
+  - avoids generic `text:none` for decodeable-but-unmapped packet IDs
+- Added focused tests:
+  - `probe_first_simulator_handshake_window_with_tail_collects_post_movement_packets`
+  - additional assertions for probe-report movement-complete index/post-movement count
+  - additional assertions for explicit unmapped packet signal
+- Live manual bounded-tail validation (`tail=2`) now observes immediate post-movement packets:
+  - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `Irrelevant(unmapped packet id 0xfffffffb)` -> `HealthMessage`
+  - handshake stage still advances correctly to `AgentMovementComplete`
+
 - Implemented bounded multi-packet same-socket live probe in `viewer_net`:
   - added `probe_first_simulator_handshake_window(bind, timeout, max_packets)`
   - one-shot probe now delegates to bounded-window probe (`max_packets=1`)
@@ -194,6 +214,7 @@
 - Outbound handshake wire fidelity is now materially improved and producing live inbound packets.
 - Early inbound progression through `AgentMovementComplete` is now observed.
 - Current risk shifted to narrow typed coverage expansion after initial movement completion (still within handshake/bootstrap scope).
+- Immediate post-movement packet window is now directly observable with bounded tail capture; the next risk is minimal mapping of repeated unmapped packet IDs (starting with `0xfffffffb`) without broad world-state decode.
 
 ---
 
@@ -217,6 +238,7 @@ This includes:
 - improve outbound `UseCircuitCode`/`CompleteAgentMovement` packet wire fidelity to unlock first real inbound handshake packet observation
 - continue typed inbound expansion/progression analysis from `AgentDataUpdate` toward first observed `AgentMovementComplete`
 - extend typed inbound coverage for the next early post-movement packets and add minimal field-level decode where it most helps diagnostics
+- classify repeated unmapped post-movement packet IDs observed in bounded-tail runs and add the smallest bootstrap-relevant typed mappings
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

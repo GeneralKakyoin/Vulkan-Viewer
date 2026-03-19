@@ -846,6 +846,8 @@ pub struct FirstSimulatorHandshakeProbeObservation {
 pub struct FirstSimulatorHandshakeProbeReport {
     pub observations: Vec<FirstSimulatorHandshakeProbeObservation>,
     pub timed_out: bool,
+    pub agent_movement_complete_observation_index: Option<usize>,
+    pub post_movement_observations: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1396,7 +1398,7 @@ impl Connection {
         wait_timeout: Duration,
     ) -> Result<FirstSimulatorInboundClassification, ConnectionError> {
         let report = self
-            .probe_first_simulator_handshake_window(bind, wait_timeout, 1)
+            .probe_first_simulator_handshake_window_with_tail(bind, wait_timeout, 1, 0)
             .await?;
         if let Some(first) = report.observations.first() {
             return Ok(first.classification.clone());
@@ -1412,6 +1414,17 @@ impl Connection {
         bind: &str,
         wait_timeout: Duration,
         max_packets: usize,
+    ) -> Result<FirstSimulatorHandshakeProbeReport, ConnectionError> {
+        self.probe_first_simulator_handshake_window_with_tail(bind, wait_timeout, max_packets, 0)
+            .await
+    }
+
+    pub async fn probe_first_simulator_handshake_window_with_tail(
+        &mut self,
+        bind: &str,
+        wait_timeout: Duration,
+        max_packets: usize,
+        post_movement_tail_packets: usize,
     ) -> Result<FirstSimulatorHandshakeProbeReport, ConnectionError> {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
@@ -1536,6 +1549,8 @@ impl Connection {
 
         let mut observations = Vec::new();
         let mut timed_out = false;
+        let mut agent_movement_complete_observation_index = None;
+        let mut post_movement_observations = 0usize;
         for _ in 0..max_packets {
             let mut buf = vec![0u8; 2048];
             let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
@@ -1561,12 +1576,31 @@ impl Connection {
                 classification: classification.clone(),
             });
 
-            if self
+            let is_agent_movement_complete = self
                 .first_simulator_handshake_state
                 .as_ref()
                 .map(|state| state.stage)
-                == Some(FirstSimulatorHandshakeStage::AgentMovementComplete)
-            {
+                == Some(FirstSimulatorHandshakeStage::AgentMovementComplete);
+            if is_agent_movement_complete {
+                if agent_movement_complete_observation_index.is_none() {
+                    agent_movement_complete_observation_index = Some(observation_index);
+                    if post_movement_tail_packets == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                post_movement_observations += 1;
+                if post_movement_observations >= post_movement_tail_packets {
+                    break;
+                }
+            } else if agent_movement_complete_observation_index.is_some() {
+                post_movement_observations += 1;
+                if post_movement_observations >= post_movement_tail_packets {
+                    break;
+                }
+            }
+
+            if observations.len() >= max_packets {
                 break;
             }
         }
@@ -1574,6 +1608,8 @@ impl Connection {
         Ok(FirstSimulatorHandshakeProbeReport {
             observations,
             timed_out,
+            agent_movement_complete_observation_index,
+            post_movement_observations,
         })
     }
 
@@ -2201,12 +2237,17 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
         };
     }
 
+    let packet_message_number =
+        decode_first_simulator_packet_header(payload).map(|header| header.message_number);
+    let signal = packet_message_number
+        .map(|message_number| format!("packet:0x{message_number:08x}:unmapped"))
+        .unwrap_or_else(|| String::from("text:none"));
+
     FirstSimulatorInboundClassification {
         kind: FirstSimulatorInboundMessageKind::Irrelevant,
-        signal: String::from("text:none"),
+        signal,
         decode_source: FirstSimulatorInboundDecodeSource::Unknown,
-        packet_message_number: decode_first_simulator_packet_header(payload)
-            .map(|header| header.message_number),
+        packet_message_number,
     }
 }
 
@@ -4165,6 +4206,7 @@ mod tests {
             FirstSimulatorInboundDecodeSource::Unknown
         );
         assert!(irrelevant.packet_message_number.is_some());
+        assert!(irrelevant.signal.starts_with("packet:0x"));
 
         let unknown_packet = classify_first_simulator_inbound_message(&make_low_frequency_packet(42));
         assert_eq!(unknown_packet.kind, FirstSimulatorInboundMessageKind::Irrelevant);
@@ -4172,6 +4214,7 @@ mod tests {
             unknown_packet.decode_source,
             FirstSimulatorInboundDecodeSource::Unknown
         );
+        assert_eq!(unknown_packet.signal, "packet:0xffff002a:unmapped");
         assert_eq!(unknown_packet.packet_message_number, Some(0xffff002a));
     }
 
@@ -4632,6 +4675,8 @@ mod tests {
             .expect("probe window should succeed");
         assert_eq!(report.observations.len(), 2);
         assert!(!report.timed_out);
+        assert_eq!(report.agent_movement_complete_observation_index, Some(2));
+        assert_eq!(report.post_movement_observations, 0);
         assert_eq!(
             report.observations[0].classification.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
@@ -4644,8 +4689,86 @@ mod tests {
             connection
                 .first_simulator_handshake_state()
                 .expect("state should exist")
-                .stage,
+            .stage,
             FirstSimulatorHandshakeStage::AgentMovementComplete
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_first_simulator_handshake_window_with_tail_collects_post_movement_packets() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener.local_addr().expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            let _ = listener
+                .send_to(&make_low_frequency_packet(387), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(250), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(1), sender)
+                .await;
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let report = connection
+            .probe_first_simulator_handshake_window_with_tail(
+                "127.0.0.1:0",
+                Duration::from_secs(1),
+                5,
+                1,
+            )
+            .await
+            .expect("probe window with tail should succeed");
+        assert_eq!(report.observations.len(), 3);
+        assert!(!report.timed_out);
+        assert_eq!(report.agent_movement_complete_observation_index, Some(2));
+        assert_eq!(report.post_movement_observations, 1);
+        assert_eq!(
+            report.observations[2].classification.kind,
+            FirstSimulatorInboundMessageKind::TestMessage
         );
     }
 }

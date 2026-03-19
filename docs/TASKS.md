@@ -128,6 +128,13 @@ Done when:
 - typed classification is expanded only for the small set repeatedly observed in this stage
 - progression remains handshake/bootstrap-focused (no world-state subsystem implementation)
 
+Status update:
+- materially advanced: bounded post-movement tail capture now exists (`probe_first_simulator_handshake_window_with_tail`)
+- live tail run (`tail=2`) observed post-movement packets beyond handshake completion, including:
+  - `HealthMessage` (typed)
+  - one unmapped packet-shaped ID (`0xfffffffb`) now surfaced explicitly in diagnostics
+- next narrow step: map repeated unmapped post-movement IDs into the smallest bootstrap-relevant typed set
+
 ### T8 - First connected world slice
 Done when:
 - world-derived placeholder state can be rendered from live connection data

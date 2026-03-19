@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase C - First-simulator handshake live inbound progression
+Phase C - Post-AgentMovementComplete bootstrap observation
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -84,6 +84,10 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `Connection::probe_first_simulator_handshake_window(...)`
   - bounded packet count + timeout with ordered observation reporting
   - receive diagnostics now include `observation_index`
+- bounded post-movement tail probing now exists (opt-in):
+  - `Connection::probe_first_simulator_handshake_window_with_tail(...)`
+  - default bounded-window behavior remains unchanged (`tail=0`)
+  - probe report now includes first `AgentMovementComplete` index and post-movement observation count
 - outbound handshake send packets are now protocol-shaped binary LLUDP datagrams:
   - reliable LLUDP flags + packet-id header
   - low-frequency message numbers for `UseCircuitCode` (3) and `CompleteAgentMovement` (249)
@@ -98,6 +102,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - typed inbound classification now also includes:
     - `HealthMessage` (low 138)
     - `SimulatorViewerTimeMessage` (low 150)
+- live bounded post-movement tail probe now captures immediate post-movement traffic:
+  - with `post_movement_tail_packets=2`, observed:
+    - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `Irrelevant(unmapped)` -> `HealthMessage`
+  - unmapped packet-shaped traffic now surfaces explicit signal form:
+    - `packet:0x........:unmapped`
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -122,7 +131,8 @@ Current concrete blocker inside bootstrap:
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
 - Current handshake blocker narrowed to post-movement inbound coverage:
   - first inbound progression to `AgentMovementComplete` is now observed and classified
-  - next gap is broader typed coverage for additional early inbound messages beyond the initial handshake completion path
+  - immediate post-movement tail is now observable in bounded live runs
+  - next gap is mapping the repeated unmapped post-movement packet ID(s) (currently including `0xfffffffb`) into the smallest bootstrap-relevant typed set
 
 ---
 
@@ -139,6 +149,7 @@ Current concrete blocker inside bootstrap:
 - extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
 - classify and observe additional early inbound low-frequency packets that appear before `AgentMovementComplete` in live traffic
 - expand typed coverage for additional early post-movement inbound traffic while keeping handshake scope bounded
+- map and type the first repeated unmapped post-movement packet IDs without drifting into broad world-state decode
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -148,7 +159,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**extend typed inbound classification and diagnostics for the next early packets after `AgentMovementComplete`, without drifting into full world-state handling**
+**map and type the first repeated unmapped post-`AgentMovementComplete` packet IDs (starting with `0xfffffffb`) while keeping decode scope handshake/bootstrap-only**
 
 ---
 

@@ -39,6 +39,8 @@ async fn run() -> Result<(), String> {
         parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS", 5);
     let first_sim_receive_max_packets =
         parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS", 3) as usize;
+    let first_sim_post_movement_tail_packets =
+        parse_u64_env("VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS", 0) as usize;
 
     let intent = LoginIntent {
         username,
@@ -158,6 +160,7 @@ async fn run() -> Result<(), String> {
                         &first_sim_receive_bind,
                         Duration::from_secs(first_sim_receive_timeout_secs),
                         first_sim_receive_max_packets,
+                        first_sim_post_movement_tail_packets,
                     )
                     .await?;
                 }
@@ -232,22 +235,31 @@ async fn inspect_first_simulator_handshake_once(
     receive_bind: &str,
     receive_timeout: Duration,
     max_packets: usize,
+    post_movement_tail_packets: usize,
 ) -> Result<(), String> {
     println!(
-        "First-simulator receive window attempt: bind={}, timeout_secs={}, max_packets={}",
+        "First-simulator receive window attempt: bind={}, timeout_secs={}, max_packets={}, post_movement_tail_packets={}",
         receive_bind,
         receive_timeout.as_secs(),
-        max_packets
+        max_packets,
+        post_movement_tail_packets
     );
     match connection
-        .probe_first_simulator_handshake_window(receive_bind, receive_timeout, max_packets)
+        .probe_first_simulator_handshake_window_with_tail(
+            receive_bind,
+            receive_timeout,
+            max_packets,
+            post_movement_tail_packets,
+        )
         .await
     {
         Ok(report) => {
             println!(
-                "First-simulator receive report: observations={}, timed_out={}",
+                "First-simulator receive report: observations={}, timed_out={}, movement_complete_observation_index={:?}, post_movement_observations={}",
                 report.observations.len(),
-                report.timed_out
+                report.timed_out,
+                report.agent_movement_complete_observation_index,
+                report.post_movement_observations
             );
             for obs in &report.observations {
                 println!(
