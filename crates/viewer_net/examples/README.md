@@ -24,12 +24,20 @@ It is manual-only and requires environment variables. It does not store credenti
 - `VIEWER_INSPECT_SIMULATOR_FEATURES_ONCE` (`true/false`, default: `false`)
 - `VIEWER_INSPECT_MAP_LAYER_ONCE` (`true/false`, default: `false`)
 - `VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE` (`true/false`, default: `false`)
+  - explicit first-simulator probe enable flag
+  - probe is also auto-enabled if any `VIEWER_FIRST_SIM_*` control variable is set
 - `VIEWER_FIRST_SIM_RECEIVE_BIND` (UDP bind target for one-shot receive, default: `0.0.0.0:0`)
 - `VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS` (default: `5`)
 - `VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS` (bounded receive packet count, default: `3`)
 - `VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS` (how many packets to keep after first `AgentMovementComplete`, default: `0`)
 - `VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS` (optional post-AMC receive timeout override; if unset, uses `VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS`)
 - `VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL` (`true/false`, default: `false`; stop early once first `CrossedRegion`/`ConfirmEnableSimulator` is observed)
+
+## First-Simulator Probe Enable Rules
+- Probe runs when either:
+  - `VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE=true`, or
+  - any `VIEWER_FIRST_SIM_*` probe-control env var is set
+- If neither condition is met, the example prints an explicit message that probe is disabled and how to enable it.
 
 ## Run
 ```powershell

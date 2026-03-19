@@ -5,6 +5,15 @@ use viewer_grid::{
 };
 use viewer_net::{Connection, ConnectionConfig, ConnectionError, LoginWireFormat};
 
+const FIRST_SIM_PROBE_CONTROL_ENVS: &[&str] = &[
+    "VIEWER_FIRST_SIM_RECEIVE_BIND",
+    "VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS",
+    "VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS",
+    "VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS",
+    "VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS",
+    "VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL",
+];
+
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
@@ -45,6 +54,11 @@ async fn run() -> Result<(), String> {
         parse_optional_u64_env("VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS");
     let first_sim_stop_on_region_control =
         parse_bool_env("VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL", false);
+    let first_sim_probe_controls_set = FIRST_SIM_PROBE_CONTROL_ENVS
+        .iter()
+        .any(|name| std::env::var(name).is_ok());
+    let inspect_first_simulator_probe =
+        inspect_first_sim_handshake_once || first_sim_probe_controls_set;
 
     let intent = LoginIntent {
         username,
@@ -72,6 +86,18 @@ async fn run() -> Result<(), String> {
             println!("Login outcome: {}", result_kind(&result));
             println!("Sanitized trace:\n{trace:#?}");
             println!("Interpreted result:\n{result:#?}");
+            if first_sim_probe_controls_set && !inspect_first_sim_handshake_once {
+                println!(
+                    "First-simulator probe auto-enabled because one or more VIEWER_FIRST_SIM_* controls are set. \
+Set VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE=true to enable explicitly."
+                );
+            }
+            if !inspect_first_simulator_probe {
+                println!(
+                    "First-simulator probe is disabled. Set VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE=true \
+or set any VIEWER_FIRST_SIM_* control variable to auto-enable it."
+                );
+            }
             if fetch_seed_caps && matches!(result, GridLoginResult::Success(_)) {
                 let caps = connection
                     .fetch_seed_capabilities()
@@ -158,18 +184,18 @@ async fn run() -> Result<(), String> {
                         println!("EventQueueGet capability not present in seed map");
                     }
                 }
-                if inspect_first_sim_handshake_once {
-                    inspect_first_simulator_handshake_once(
-                        &mut connection,
-                        &first_sim_receive_bind,
-                        Duration::from_secs(first_sim_receive_timeout_secs),
-                        first_sim_receive_max_packets,
-                        first_sim_post_movement_tail_packets,
-                        first_sim_post_movement_timeout_secs.map(Duration::from_secs),
-                        first_sim_stop_on_region_control,
-                    )
-                    .await?;
-                }
+            }
+            if inspect_first_simulator_probe && matches!(result, GridLoginResult::Success(_)) {
+                inspect_first_simulator_handshake_once(
+                    &mut connection,
+                    &first_sim_receive_bind,
+                    Duration::from_secs(first_sim_receive_timeout_secs),
+                    first_sim_receive_max_packets,
+                    first_sim_post_movement_tail_packets,
+                    first_sim_post_movement_timeout_secs.map(Duration::from_secs),
+                    first_sim_stop_on_region_control,
+                )
+                .await?;
             }
             Ok(())
         }
