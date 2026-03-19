@@ -45,3 +45,10 @@ Do not start broad world-state decoding from this map alone.
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.
 - Otherwise keep it in `LikelyBroaderTraffic` or `Unknown` diagnostics and stop at boundary documentation.
+
+## Consolidation Status
+- Current consolidation is "done enough" for this phase:
+  - repeated observed early non-bootstrap packet set is typed in the early-traffic scaffold
+  - diagnostics preserve scope separation and per-kind summaries
+- Hard stop remains:
+  - do not start broad object/world-state decoding from this slice.

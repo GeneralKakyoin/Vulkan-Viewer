@@ -90,6 +90,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `ViewerEffect`
     - `CoarseLocationUpdate`
   - available via `Connection::early_simulator_traffic_observations()`
+  - summary available via `Connection::summarize_early_simulator_traffic()`
 - handshake-stage confirmation was tightened:
   - `AgentMovementComplete` stage advancement now requires packet-message decode evidence (not JSON/text fallback alone)
 - one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
@@ -128,6 +129,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `0xfffffffb` is now typed as `PacketAck` (transport-control) instead of unmapped traffic
   - known typed packets are now explicitly separated from likely broader traffic in diagnostics
   - bounded probe report now includes post-boundary summary counters and ordered post-boundary kinds
+  - post-boundary summary now also captures unknown packet message numbers when unknown traffic appears
   - early-traffic observations are now captured as a separate typed layer (beyond bootstrap/control)
 
 ### Research / Continuity
@@ -156,7 +158,9 @@ Current concrete blocker inside bootstrap:
   - immediate post-movement tail is now observable in bounded live runs
   - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
-  - current gap is selecting the next narrow transport-observation additions (for example medium handoff/control IDs) without entering broad world/object decode
+  - early simulator traffic consolidation is now "done enough" for this phase
+  - hard stop remains: no broad object/world-state decoding in current scope
+  - next gap is narrow handoff/control visibility only if repeatedly observed (for example `CrossedRegion` / `ConfirmEnableSimulator`)
 
 ---
 
@@ -183,7 +187,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**incrementally extend early-traffic observation only for repeated medium handoff/control IDs when they materially improve diagnostics, while keeping world/object decode deferred**
+**begin the next bounded phase: targeted medium handoff/control visibility (`CrossedRegion` / `ConfirmEnableSimulator`) while keeping world/object decode explicitly out of scope**
 
 ---
 

@@ -2,6 +2,28 @@
 
 ## Last Completed Work
 
+- Completed early simulator traffic consolidation as a bounded milestone:
+  - repeated observed early non-bootstrap packet set is now typed in scaffold scope:
+    - `HealthMessage`
+    - `SimulatorViewerTimeMessage`
+    - `OnlineNotification`
+    - `ViewerEffect`
+    - `CoarseLocationUpdate`
+  - intentionally-untyped traffic remains explicit via `Unknown` classification with packet-number diagnostics
+- Added scaffold-level summary diagnostics:
+  - `Connection::summarize_early_simulator_traffic()`
+  - per-kind counts for early-traffic scaffold observations
+- Extended post-boundary summary diagnostics:
+  - now includes `unknown_packet_message_numbers` for unknown post-boundary traffic
+- Manual example now prints:
+  - post-boundary summary (+ unknown packet numbers when present)
+  - early-traffic summary counts
+  - early-traffic observation list
+- Confirmed in live bounded runs:
+  - bootstrap/control separation remains intact
+  - early broader packet kinds are captured in scaffold and summary outputs
+  - no new packet is confirmed as an additional bootstrap gate
+
 - Added a small typed early-simulator-traffic scaffold in `viewer_net`:
   - new model types:
     - `EarlySimulatorTrafficKind`
@@ -309,6 +331,7 @@
 - Immediate post-movement boundary is now materially consolidated: additional repeated packets in the short tail are currently broader-traffic (or explicit unknown), not bootstrap-gating.
 - Boundary-to-next-phase handoff is now explicit in code diagnostics: bootstrap confirmation is complete, and current observation effort is early non-bootstrap traffic characterization only.
 - Transition milestone is now concrete in code: early non-bootstrap traffic is no longer just classified; it is represented in a dedicated typed scaffold layer in `viewer_net`.
+- This consolidation phase is now considered complete enough to stop safely before broad object/world-state decode work.
 
 ---
 
@@ -337,6 +360,7 @@ This includes:
 - hold the bootstrap boundary and plan the first bounded post-bootstrap simulator-traffic slice without starting broad world-state implementation
 - if needed next, type only narrow medium IDs that help early handoff visibility (`CrossedRegion`/`ConfirmEnableSimulator`) while still avoiding broad world/object decode
 - keep extending only this typed observation scaffold until the next phase boundary requires deliberate world/object decode design
+- next phase should stay bounded to medium handoff/control visibility only (`CrossedRegion`, `ConfirmEnableSimulator`) before any world/object-state decode planning
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

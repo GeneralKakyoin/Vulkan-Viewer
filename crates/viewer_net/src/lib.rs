@@ -868,6 +868,7 @@ pub struct FirstSimulatorPostBoundarySummary {
     pub likely_broader_traffic: usize,
     pub unknown: usize,
     pub kinds: Vec<FirstSimulatorInboundMessageKind>,
+    pub unknown_packet_message_numbers: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,6 +887,16 @@ pub struct EarlySimulatorTrafficObservation {
     pub packet_message_number: Option<u32>,
     pub payload_len: usize,
     pub signal: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EarlySimulatorTrafficSummary {
+    pub observations: usize,
+    pub health_message: usize,
+    pub simulator_viewer_time_message: usize,
+    pub online_notification: usize,
+    pub viewer_effect: usize,
+    pub coarse_location_update: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1054,6 +1065,25 @@ impl Connection {
 
     pub fn early_simulator_traffic_observations(&self) -> &[EarlySimulatorTrafficObservation] {
         &self.early_simulator_traffic_observations
+    }
+
+    pub fn summarize_early_simulator_traffic(&self) -> EarlySimulatorTrafficSummary {
+        let mut summary = EarlySimulatorTrafficSummary::default();
+        for observation in &self.early_simulator_traffic_observations {
+            summary.observations += 1;
+            match observation.kind {
+                EarlySimulatorTrafficKind::HealthMessage => summary.health_message += 1,
+                EarlySimulatorTrafficKind::SimulatorViewerTimeMessage => {
+                    summary.simulator_viewer_time_message += 1
+                }
+                EarlySimulatorTrafficKind::OnlineNotification => summary.online_notification += 1,
+                EarlySimulatorTrafficKind::ViewerEffect => summary.viewer_effect += 1,
+                EarlySimulatorTrafficKind::CoarseLocationUpdate => {
+                    summary.coarse_location_update += 1
+                }
+            }
+        }
+        summary
     }
 
     pub async fn connect(&mut self) -> Result<(), ConnectionError> {
@@ -1623,6 +1653,7 @@ impl Connection {
         let mut post_boundary_likely_broader_traffic = 0usize;
         let mut post_boundary_unknown = 0usize;
         let mut post_boundary_kinds = Vec::new();
+        let mut post_boundary_unknown_packet_message_numbers = Vec::new();
         for _ in 0..max_packets {
             let mut buf = vec![0u8; 2048];
             let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
@@ -1672,7 +1703,12 @@ impl Connection {
                     FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic => {
                         post_boundary_likely_broader_traffic += 1
                     }
-                    FirstSimulatorInboundTrafficScope::Unknown => post_boundary_unknown += 1,
+                    FirstSimulatorInboundTrafficScope::Unknown => {
+                        post_boundary_unknown += 1;
+                        if let Some(number) = classification.packet_message_number {
+                            post_boundary_unknown_packet_message_numbers.push(number);
+                        }
+                    }
                 }
                 post_boundary_kinds.push(classification.kind);
                 if post_movement_observations >= post_movement_tail_packets {
@@ -1690,7 +1726,12 @@ impl Connection {
                     FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic => {
                         post_boundary_likely_broader_traffic += 1
                     }
-                    FirstSimulatorInboundTrafficScope::Unknown => post_boundary_unknown += 1,
+                    FirstSimulatorInboundTrafficScope::Unknown => {
+                        post_boundary_unknown += 1;
+                        if let Some(number) = classification.packet_message_number {
+                            post_boundary_unknown_packet_message_numbers.push(number);
+                        }
+                    }
                 }
                 post_boundary_kinds.push(classification.kind);
                 if post_movement_observations >= post_movement_tail_packets {
@@ -1711,6 +1752,7 @@ impl Connection {
                 likely_broader_traffic: post_boundary_likely_broader_traffic,
                 unknown: post_boundary_unknown,
                 kinds: post_boundary_kinds,
+                unknown_packet_message_numbers: post_boundary_unknown_packet_message_numbers,
             })
         } else {
             None
@@ -4970,6 +5012,7 @@ mod tests {
         assert_eq!(summary.transport_control, 0);
         assert_eq!(summary.likely_broader_traffic, 0);
         assert_eq!(summary.unknown, 0);
+        assert!(summary.unknown_packet_message_numbers.is_empty());
         assert!(summary.kinds.is_empty());
         assert_eq!(
             report.observations[0].classification.kind,
@@ -5140,6 +5183,7 @@ mod tests {
         assert_eq!(summary.transport_control, 1);
         assert_eq!(summary.likely_broader_traffic, 4);
         assert_eq!(summary.unknown, 0);
+        assert!(summary.unknown_packet_message_numbers.is_empty());
         assert_eq!(
             summary.kinds,
             vec![
@@ -5159,5 +5203,12 @@ mod tests {
             EarlySimulatorTrafficKind::CoarseLocationUpdate
         );
         assert_eq!(early_traffic[3].kind, EarlySimulatorTrafficKind::ViewerEffect);
+        let early_summary = connection.summarize_early_simulator_traffic();
+        assert_eq!(early_summary.observations, 4);
+        assert_eq!(early_summary.health_message, 1);
+        assert_eq!(early_summary.simulator_viewer_time_message, 0);
+        assert_eq!(early_summary.online_notification, 1);
+        assert_eq!(early_summary.viewer_effect, 1);
+        assert_eq!(early_summary.coarse_location_update, 1);
     }
 }
