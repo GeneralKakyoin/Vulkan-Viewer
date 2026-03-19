@@ -870,6 +870,24 @@ pub struct FirstSimulatorPostBoundarySummary {
     pub kinds: Vec<FirstSimulatorInboundMessageKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EarlySimulatorTrafficKind {
+    HealthMessage,
+    SimulatorViewerTimeMessage,
+    OnlineNotification,
+    ViewerEffect,
+    CoarseLocationUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EarlySimulatorTrafficObservation {
+    pub observation_index: usize,
+    pub kind: EarlySimulatorTrafficKind,
+    pub packet_message_number: Option<u32>,
+    pub payload_len: usize,
+    pub signal: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorHandshakeProbeReport {
     pub observations: Vec<FirstSimulatorHandshakeProbeObservation>,
@@ -987,6 +1005,7 @@ pub struct Connection {
     first_simulator_handshake_state: Option<FirstSimulatorHandshakeState>,
     first_simulator_handshake_send_diagnostics: Vec<FirstSimulatorHandshakeSendDiagnostic>,
     first_simulator_handshake_receive_diagnostics: Vec<FirstSimulatorHandshakeReceiveDiagnostic>,
+    early_simulator_traffic_observations: Vec<EarlySimulatorTrafficObservation>,
     next_first_simulator_packet_id: u32,
 }
 
@@ -1000,6 +1019,7 @@ impl Connection {
             first_simulator_handshake_state: None,
             first_simulator_handshake_send_diagnostics: Vec::new(),
             first_simulator_handshake_receive_diagnostics: Vec::new(),
+            early_simulator_traffic_observations: Vec::new(),
             next_first_simulator_packet_id: 1,
         }
     }
@@ -1030,6 +1050,10 @@ impl Connection {
         &self,
     ) -> &[FirstSimulatorHandshakeReceiveDiagnostic] {
         &self.first_simulator_handshake_receive_diagnostics
+    }
+
+    pub fn early_simulator_traffic_observations(&self) -> &[EarlySimulatorTrafficObservation] {
+        &self.early_simulator_traffic_observations
     }
 
     pub async fn connect(&mut self) -> Result<(), ConnectionError> {
@@ -1063,6 +1087,7 @@ impl Connection {
         self.first_simulator_handshake_state = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.early_simulator_traffic_observations.clear();
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -1173,6 +1198,7 @@ impl Connection {
         self.first_simulator_handshake_state = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.early_simulator_traffic_observations.clear();
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::Disconnected;
         Ok(())
@@ -1381,6 +1407,17 @@ impl Connection {
                 decode_source: classification.decode_source,
                 packet_message_number: classification.packet_message_number,
             });
+
+        if let Some(kind) = to_early_simulator_traffic_kind(classification.kind) {
+            self.early_simulator_traffic_observations
+                .push(EarlySimulatorTrafficObservation {
+                    observation_index,
+                    kind,
+                    packet_message_number: classification.packet_message_number,
+                    payload_len: payload.len(),
+                    signal: classification.signal.clone(),
+                });
+        }
 
         Ok(classification)
     }
@@ -1955,6 +1992,7 @@ impl Connection {
         self.first_simulator_handshake_state = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.early_simulator_traffic_observations.clear();
         self.next_first_simulator_packet_id = 1;
     }
 
@@ -2317,6 +2355,29 @@ fn classify_first_simulator_inbound_from_packet(
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
             })
+        }
+        _ => None,
+    }
+}
+
+fn to_early_simulator_traffic_kind(
+    kind: FirstSimulatorInboundMessageKind,
+) -> Option<EarlySimulatorTrafficKind> {
+    match kind {
+        FirstSimulatorInboundMessageKind::HealthMessage => {
+            Some(EarlySimulatorTrafficKind::HealthMessage)
+        }
+        FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage => {
+            Some(EarlySimulatorTrafficKind::SimulatorViewerTimeMessage)
+        }
+        FirstSimulatorInboundMessageKind::OnlineNotification => {
+            Some(EarlySimulatorTrafficKind::OnlineNotification)
+        }
+        FirstSimulatorInboundMessageKind::ViewerEffect => {
+            Some(EarlySimulatorTrafficKind::ViewerEffect)
+        }
+        FirstSimulatorInboundMessageKind::CoarseLocationUpdate => {
+            Some(EarlySimulatorTrafficKind::CoarseLocationUpdate)
         }
         _ => None,
     }
@@ -4323,6 +4384,10 @@ mod tests {
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
         );
         assert_eq!(sim_time.packet_message_number, Some(0xffff0096));
+        assert_eq!(
+            to_early_simulator_traffic_kind(sim_time.kind),
+            Some(EarlySimulatorTrafficKind::SimulatorViewerTimeMessage)
+        );
 
         let enable = classify_first_simulator_inbound_message(&make_low_frequency_packet(151));
         assert_eq!(enable.kind, FirstSimulatorInboundMessageKind::EnableSimulator);
@@ -4362,6 +4427,7 @@ mod tests {
         );
         assert_eq!(packet_ack.signal, "packet:0xfffffffb");
         assert_eq!(packet_ack.packet_message_number, Some(0xfffffffb));
+        assert_eq!(to_early_simulator_traffic_kind(packet_ack.kind), None);
 
         let online_notification =
             classify_first_simulator_inbound_message(&make_low_frequency_packet(322));
@@ -4913,6 +4979,7 @@ mod tests {
             report.observations[1].classification.kind,
             FirstSimulatorInboundMessageKind::AgentMovementComplete
         );
+        assert!(connection.early_simulator_traffic_observations().is_empty());
         assert_eq!(
             connection
                 .first_simulator_handshake_state()
@@ -4977,6 +5044,9 @@ mod tests {
                 .send_to(&make_low_frequency_packet(322), sender)
                 .await;
             let _ = listener
+                .send_to(&make_medium_frequency_packet(6), sender)
+                .await;
+            let _ = listener
                 .send_to(&make_medium_frequency_packet(17), sender)
                 .await;
         });
@@ -4997,15 +5067,15 @@ mod tests {
             .probe_first_simulator_handshake_window_with_tail(
                 "127.0.0.1:0",
                 Duration::from_secs(1),
-                10,
-                4,
+                11,
+                5,
             )
             .await
             .expect("probe window with tail should succeed");
-        assert_eq!(report.observations.len(), 7);
+        assert_eq!(report.observations.len(), 8);
         assert!(!report.timed_out);
         assert_eq!(report.agent_movement_complete_observation_index, Some(3));
-        assert_eq!(report.post_movement_observations, 4);
+        assert_eq!(report.post_movement_observations, 5);
         assert_eq!(
             report.observations[0].classification.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
@@ -5032,6 +5102,10 @@ mod tests {
         );
         assert_eq!(
             report.observations[6].classification.kind,
+            FirstSimulatorInboundMessageKind::CoarseLocationUpdate
+        );
+        assert_eq!(
+            report.observations[7].classification.kind,
             FirstSimulatorInboundMessageKind::ViewerEffect
         );
         assert_eq!(
@@ -5054,13 +5128,17 @@ mod tests {
             report.observations[6].classification.scope,
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
         );
+        assert_eq!(
+            report.observations[7].classification.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
         let summary = report
             .post_boundary_summary
             .expect("post-boundary summary should exist once movement complete is observed");
-        assert_eq!(summary.observations, 4);
+        assert_eq!(summary.observations, 5);
         assert_eq!(summary.bootstrap_relevant, 0);
         assert_eq!(summary.transport_control, 1);
-        assert_eq!(summary.likely_broader_traffic, 3);
+        assert_eq!(summary.likely_broader_traffic, 4);
         assert_eq!(summary.unknown, 0);
         assert_eq!(
             summary.kinds,
@@ -5068,8 +5146,18 @@ mod tests {
                 FirstSimulatorInboundMessageKind::PacketAck,
                 FirstSimulatorInboundMessageKind::HealthMessage,
                 FirstSimulatorInboundMessageKind::OnlineNotification,
+                FirstSimulatorInboundMessageKind::CoarseLocationUpdate,
                 FirstSimulatorInboundMessageKind::ViewerEffect,
             ]
         );
+        let early_traffic = connection.early_simulator_traffic_observations();
+        assert_eq!(early_traffic.len(), 4);
+        assert_eq!(early_traffic[0].kind, EarlySimulatorTrafficKind::HealthMessage);
+        assert_eq!(early_traffic[1].kind, EarlySimulatorTrafficKind::OnlineNotification);
+        assert_eq!(
+            early_traffic[2].kind,
+            EarlySimulatorTrafficKind::CoarseLocationUpdate
+        );
+        assert_eq!(early_traffic[3].kind, EarlySimulatorTrafficKind::ViewerEffect);
     }
 }

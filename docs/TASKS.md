@@ -142,6 +142,7 @@ Status update:
   - `ViewerEffect` (`0x0000ff11`) as likely broader traffic
 - `CoarseLocationUpdate` (`0x0000ff06`) is now typed as likely broader traffic
 - probe reports now include post-boundary summary counts + ordered post-boundary kinds for durable diagnostics
+- small typed early-simulator-traffic scaffold now exists in `viewer_net` and captures observed broader packet kinds separately from bootstrap/control diagnostics
 - next narrow step: optionally type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed, without broad world/object decoding
 
 ### T8 - First connected world slice

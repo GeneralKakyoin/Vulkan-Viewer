@@ -80,6 +80,16 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `TransportControl`
   - `LikelyBroaderTraffic`
   - `Unknown`
+- small typed early-simulator-traffic scaffold now exists in `viewer_net`:
+  - `EarlySimulatorTrafficKind`
+  - `EarlySimulatorTrafficObservation`
+  - currently routed kinds:
+    - `HealthMessage`
+    - `SimulatorViewerTimeMessage`
+    - `OnlineNotification`
+    - `ViewerEffect`
+    - `CoarseLocationUpdate`
+  - available via `Connection::early_simulator_traffic_observations()`
 - handshake-stage confirmation was tightened:
   - `AgentMovementComplete` stage advancement now requires packet-message decode evidence (not JSON/text fallback alone)
 - one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
@@ -118,6 +128,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `0xfffffffb` is now typed as `PacketAck` (transport-control) instead of unmapped traffic
   - known typed packets are now explicitly separated from likely broader traffic in diagnostics
   - bounded probe report now includes post-boundary summary counters and ordered post-boundary kinds
+  - early-traffic observations are now captured as a separate typed layer (beyond bootstrap/control)
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -145,7 +156,7 @@ Current concrete blocker inside bootstrap:
   - immediate post-movement tail is now observable in bounded live runs
   - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
-  - current gap is selecting the first bounded non-bootstrap simulator-traffic diagnostics slice (still no broad world/object decode)
+  - current gap is selecting the next narrow transport-observation additions (for example medium handoff/control IDs) without entering broad world/object decode
 
 ---
 
@@ -172,7 +183,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**keep bootstrap boundary fixed and expand only narrow early non-bootstrap simulator traffic observation (for example medium handoff/control visibility) without broad world-state decoding**
+**incrementally extend early-traffic observation only for repeated medium handoff/control IDs when they materially improve diagnostics, while keeping world/object decode deferred**
 
 ---
 

@@ -332,5 +332,17 @@ async fn inspect_first_simulator_handshake_once(
         );
     }
 
+    let early_traffic = connection.early_simulator_traffic_observations();
+    println!(
+        "Early simulator traffic observations: {}",
+        early_traffic.len()
+    );
+    for obs in early_traffic {
+        println!(
+            "Early traffic: observation_index={}, kind={:?}, packet_message_number={:?}, payload_len={}, signal={}",
+            obs.observation_index, obs.kind, obs.packet_message_number, obs.payload_len, obs.signal
+        );
+    }
+
     Ok(())
 }

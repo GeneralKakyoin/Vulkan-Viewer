@@ -37,6 +37,10 @@ Do not start broad world-state decoding from this map alone.
   - per-scope counts
   - ordered post-boundary kinds
 - This is intended to preserve early non-bootstrap observation evidence without repeated ad hoc manual parsing.
+- `viewer_net` now also has a typed early-traffic scaffold for this phase:
+  - `EarlySimulatorTrafficKind`
+  - `EarlySimulatorTrafficObservation`
+  - scoped to currently observed non-bootstrap early traffic only (no broad world/object decode).
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.

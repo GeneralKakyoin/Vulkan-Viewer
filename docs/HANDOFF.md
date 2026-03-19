@@ -2,6 +2,32 @@
 
 ## Last Completed Work
 
+- Added a small typed early-simulator-traffic scaffold in `viewer_net`:
+  - new model types:
+    - `EarlySimulatorTrafficKind`
+    - `EarlySimulatorTrafficObservation`
+  - new `Connection` accessor:
+    - `early_simulator_traffic_observations()`
+  - this layer captures only non-bootstrap, non-transport-control early traffic currently observed in bounded tails
+- Routed observed early broader packet kinds into that typed layer:
+  - `HealthMessage`
+  - `SimulatorViewerTimeMessage`
+  - `OnlineNotification`
+  - `ViewerEffect`
+  - `CoarseLocationUpdate`
+- Added post-boundary aggregation to probe output:
+  - post-boundary scope counts + ordered kinds remain available
+  - early-traffic observation list is now separately queryable for durable diagnostics/fixtures
+- Updated manual example output:
+  - now prints typed early-traffic observations in addition to probe summary and receive diagnostics
+- Extended tests:
+  - early-traffic layer population is validated in the bounded post-AMC fixture
+  - classifier tests include `CoarseLocationUpdate` and mapping checks for early-traffic inclusion/exclusion
+- Live bounded runs confirm:
+  - bootstrap/control prefix remains stable through `AgentMovementComplete`
+  - broader early traffic is captured cleanly in typed early-traffic observations
+  - no newly repeated packet is confirmed as another bootstrap gate
+
 - Advanced into an explicit early non-bootstrap simulator-traffic observation slice:
   - typed `CoarseLocationUpdate` (`0x0000ff06`, medium 6) as `LikelyBroaderTraffic`
   - retained `PacketAck`/`TestMessage` as `TransportControl`
@@ -282,6 +308,7 @@
 - Immediate post-movement boundary is now clearer: `PacketAck` is transport-control, not world-state/bootstrap payload; next risk is identifying the next repeated bootstrap-relevant IDs after this control/message baseline.
 - Immediate post-movement boundary is now materially consolidated: additional repeated packets in the short tail are currently broader-traffic (or explicit unknown), not bootstrap-gating.
 - Boundary-to-next-phase handoff is now explicit in code diagnostics: bootstrap confirmation is complete, and current observation effort is early non-bootstrap traffic characterization only.
+- Transition milestone is now concrete in code: early non-bootstrap traffic is no longer just classified; it is represented in a dedicated typed scaffold layer in `viewer_net`.
 
 ---
 
@@ -309,6 +336,7 @@ This includes:
 - classify only repeated bootstrap-relevant post-AMC packet IDs, while leaving transport-control (`PacketAck`) and likely broader traffic explicitly categorized
 - hold the bootstrap boundary and plan the first bounded post-bootstrap simulator-traffic slice without starting broad world-state implementation
 - if needed next, type only narrow medium IDs that help early handoff visibility (`CrossedRegion`/`ConfirmEnableSimulator`) while still avoiding broad world/object decode
+- keep extending only this typed observation scaffold until the next phase boundary requires deliberate world/object decode design
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 
