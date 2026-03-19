@@ -98,7 +98,14 @@ Done when:
 - typed first-simulator handshake stages are bound to minimal transport send/ack actions in `viewer_net`
 - send-side handshake diagnostics exist for attempts/success/failure
 - receive-side handshake observation/classification exists and can drive `AgentMovementComplete` stage confirmation
+- receive-side handshake identity classification is driven by typed UDP message-number decode (not heuristic-only matching)
 - handshake work is scoped without collapsing crate boundaries
+
+### T7.1 - Handshake payload decode fidelity
+Done when:
+- `AgentMovementComplete` receive handling includes minimal typed block/field extraction (beyond message identity)
+- receive diagnostics can surface typed decode success/failure for handshake payload fields
+- out-of-order/irrelevant message handling remains stable with focused tests
 
 ### T8 - First connected world slice
 Done when:

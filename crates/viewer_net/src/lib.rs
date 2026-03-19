@@ -22,6 +22,13 @@ const MAX_LOGIN_REDIRECTS: usize = 4;
 const MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS: usize = 3;
 const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
 const LLSD_XML_CONTENT_TYPE: &str = "application/llsd+xml";
+const LLUDP_PACKET_ID_SIZE: usize = 6;
+const LLUDP_MINIMUM_VALID_PACKET_SIZE: usize = LLUDP_PACKET_ID_SIZE + 1;
+const LLUDP_MESSAGE_PREFIX: u8 = 0xFF;
+const LLUDP_LOW_FREQUENCY_PREFIX: u32 = 0xFFFF0000;
+const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
+const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
+const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -1727,7 +1734,79 @@ fn encode_first_simulator_complete_agent_movement_payload(
     .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FirstSimulatorPacketHeader {
+    message_number: u32,
+}
+
+fn lludp_low_frequency_message_number(message_id: u16) -> u32 {
+    LLUDP_LOW_FREQUENCY_PREFIX | u32::from(message_id)
+}
+
+fn decode_first_simulator_packet_header(payload: &[u8]) -> Option<FirstSimulatorPacketHeader> {
+    if payload.len() < LLUDP_MINIMUM_VALID_PACKET_SIZE {
+        return None;
+    }
+
+    let header = &payload[LLUDP_PACKET_ID_SIZE..];
+    if header.is_empty() {
+        return None;
+    }
+
+    let message_number = if header[0] != LLUDP_MESSAGE_PREFIX {
+        u32::from(header[0])
+    } else if payload.len() >= LLUDP_MINIMUM_VALID_PACKET_SIZE + 1
+        && header.get(1).is_some()
+        && header[1] != LLUDP_MESSAGE_PREFIX
+    {
+        (u32::from(LLUDP_MESSAGE_PREFIX) << 8) | u32::from(header[1])
+    } else if payload.len() >= LLUDP_MINIMUM_VALID_PACKET_SIZE + 3
+        && header.len() >= 4
+        && header[1] == LLUDP_MESSAGE_PREFIX
+    {
+        let low = u16::from_be_bytes([header[2], header[3]]);
+        lludp_low_frequency_message_number(low)
+    } else {
+        return None;
+    };
+
+    Some(FirstSimulatorPacketHeader { message_number })
+}
+
+fn classify_first_simulator_inbound_from_packet(
+    payload: &[u8],
+) -> Option<FirstSimulatorInboundClassification> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    let signal = format!("packet:0x{:08x}", header.message_number);
+
+    match header.message_number {
+        num if num == lludp_low_frequency_message_number(LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
+                signal,
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::RegionHandshake,
+                signal,
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_ENABLE_SIMULATOR_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::EnableSimulator,
+                signal,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInboundClassification {
+    if let Some(classification) = classify_first_simulator_inbound_from_packet(payload) {
+        return classification;
+    }
+
     let text = String::from_utf8_lossy(payload);
     let lowered = text.to_ascii_lowercase();
 
@@ -2204,6 +2283,16 @@ mod tests {
             read_critical: true,
             mfa_token: None,
         }
+    }
+
+    fn make_low_frequency_packet(low_id: u16) -> Vec<u8> {
+        let [high, low] = low_id.to_be_bytes();
+        vec![
+            0x00, // flags
+            0x00, 0x00, 0x00, 0x01, // packet sequence
+            0x00, // extra header offset
+            0xFF, 0xFF, high, low, // low-frequency message number
+        ]
     }
 
     #[tokio::test]
@@ -3572,21 +3661,28 @@ mod tests {
 
     #[test]
     fn observe_first_simulator_inbound_payload_classifies_message_kinds() {
-        let movement = classify_first_simulator_inbound_message(
-            br#"{"message":"AgentMovementComplete","extra":"x"}"#,
-        );
+        let movement = classify_first_simulator_inbound_message(&make_low_frequency_packet(250));
         assert_eq!(
             movement.kind,
             FirstSimulatorInboundMessageKind::AgentMovementComplete
         );
+        assert_eq!(movement.signal, "packet:0xffff00fa");
 
-        let region = classify_first_simulator_inbound_message(
-            br#"{"type":"RegionHandshake"}"#,
-        );
+        let region = classify_first_simulator_inbound_message(&make_low_frequency_packet(148));
         assert_eq!(region.kind, FirstSimulatorInboundMessageKind::RegionHandshake);
+        assert_eq!(region.signal, "packet:0xffff0094");
 
-        let enable = classify_first_simulator_inbound_message(b"EnableSimulator packet");
+        let enable = classify_first_simulator_inbound_message(&make_low_frequency_packet(151));
         assert_eq!(enable.kind, FirstSimulatorInboundMessageKind::EnableSimulator);
+        assert_eq!(enable.signal, "packet:0xffff0097");
+
+        let json_fallback =
+            classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
+        assert_eq!(
+            json_fallback.kind,
+            FirstSimulatorInboundMessageKind::AgentMovementComplete
+        );
+        assert_eq!(json_fallback.signal, "json:message:AgentMovementComplete");
 
         let irrelevant = classify_first_simulator_inbound_message(b"totally unrelated");
         assert_eq!(irrelevant.kind, FirstSimulatorInboundMessageKind::Irrelevant);
@@ -3652,9 +3748,7 @@ mod tests {
             .expect("second outgoing datagram read should succeed");
 
         let classification = connection
-            .observe_first_simulator_inbound_payload(
-                br#"{"message":"AgentMovementComplete","position":[1,2,3]}"#,
-            )
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(250))
             .expect("inbound payload observation should succeed");
         assert_eq!(
             classification.kind,
@@ -3709,7 +3803,7 @@ mod tests {
             .expect("scaffold should initialize");
 
         let classification = connection
-            .observe_first_simulator_inbound_payload(br#"{"message":"AgentMovementComplete"}"#)
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(250))
             .expect("inbound payload observation should succeed");
         assert_eq!(
             classification.kind,
@@ -3776,7 +3870,7 @@ mod tests {
                 .expect("sender bind should succeed");
             tokio::time::sleep(Duration::from_millis(25)).await;
             let _ = sender
-                .send_to(br#"{"type":"RegionHandshake"}"#, bind_addr)
+                .send_to(&make_low_frequency_packet(148), bind_addr)
                 .await;
         });
 

@@ -62,6 +62,19 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
 - `CompleteAgentMovement`: viewer -> sim finalizes entering the region.
 - `AgentMovementComplete`: sim -> viewer confirms movement completion with position/look-at data.
 
+### Packet Identity Decode Details (for receive-side classification)
+- Firestorm template reader (`lltemplatemessagereader.cpp`) decodes message identity from bytes after the LL packet ID header (`LL_PACKET_ID_SIZE = 6`):
+  - high frequency: first header byte != `0xFF`
+  - medium frequency: `0xFF` then one-byte ID
+  - low frequency: `0xFF 0xFF` then two-byte network-order ID
+- For first-simulator handshake-relevant inbound messages from `message_template.msg`:
+  - `RegionHandshake` = low `148`
+  - `EnableSimulator` = low `151`
+  - `AgentMovementComplete` = low `250`
+- Practical translation for this rewrite:
+  - minimal receive classifier can be protocol-aware by decoding message number first,
+  - then mapping those low IDs before any heuristic text/JSON fallback.
+
 ## Crate-Boundary Mapping For This Rewrite
 
 ### `viewer_grid` (meaning/policy)

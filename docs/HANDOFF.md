@@ -2,6 +2,14 @@
 
 ## Last Completed Work
 
+- Replaced heuristic-first receive classification with a minimal typed UDP decode path in `viewer_net`:
+  - added LLUDP packet header/message-number decode for high/medium/low frequency forms
+  - mapped handshake-relevant low-frequency message IDs from Firestorm template semantics:
+    - `RegionHandshake` (low 148)
+    - `EnableSimulator` (low 151)
+    - `AgentMovementComplete` (low 250)
+  - handshake receive classification now prioritizes typed packet decode and uses JSON/text matching only as fallback
+  - updated focused tests so receive classification and stage effects are validated with packet-shaped datagrams
 - Updated repository agent-policy infrastructure (no product-code behavior change):
   - strengthened `AGENTS.MD` autonomous execution guidance for milestone-driven progress
   - clarified low-cost subagent usage expectations and main-session responsibilities
@@ -119,6 +127,7 @@
 - Handshake sequencing is now represented in typed Rust state in `viewer_net`; the next risk moved from sequencing ambiguity to transport binding of the scaffold stages.
 - Handshake transport binding for send actions is now in place; next risk is ack/receive-side classification and integration.
 - Receive-side handshake observation/classification is now in place; next risk is protocol-level fidelity (actual UDP packet decoding semantics).
+- Receive-side handshake identity classification now uses typed UDP message-number decoding; the next fidelity risk moved to block/field-level decode inside handshake messages.
 
 ---
 
@@ -138,6 +147,7 @@ This includes:
 - wire `UseCircuitCode` and `CompleteAgentMovement` scaffold stages to minimal transport send/ack mechanics in `viewer_net` (without world integration)
 - add bounded ack/receive diagnostics and transition classification for first-simulator handshake actions
 - improve receive classification from heuristic signal matching to a minimal typed decoder aligned to real packet schema
+- extend typed decode from message identity to minimal block/field extraction for `AgentMovementComplete` while preserving current send/receive stage flow
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase C - First-simulator handshake scaffolding
+Phase C - First-simulator handshake receive-side protocol alignment
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -65,6 +65,13 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - typed inbound message classification (`AgentMovementComplete`, `RegionHandshake`, `EnableSimulator`, `Irrelevant`)
   - typed receive diagnostics (classification signal, stage before/after, stage advancement flag)
   - explicit `AgentMovementComplete` receive-side stage confirmation when waiting
+- receive-side handshake classification now includes a minimal typed LLUDP packet-header/message-number decoder:
+  - decodes high/medium/low message-number forms from simulator UDP packet shape
+  - classifies handshake-relevant low-frequency messages by packet message number:
+    - `RegionHandshake` (low 148)
+    - `EnableSimulator` (low 151)
+    - `AgentMovementComplete` (low 250)
+  - keeps JSON/text matching only as compatibility fallback (no longer primary path)
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -87,7 +94,7 @@ Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
-- Current handshake blocker narrowed to protocol payload fidelity: receive-side observation/classification exists, but message decoding is still heuristic and not yet bound to real SL UDP packet schema.
+- Current handshake blocker narrowed to deeper protocol payload fidelity: handshake message identity now uses typed UDP message-number decode, but block/field-level payload decoding is still not implemented.
 
 ---
 
@@ -100,7 +107,7 @@ Current concrete blocker inside bootstrap:
 - stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
 - bind first-simulator handshake scaffold stages to minimal transport-side send/ack stubs in `viewer_net`
 - add bounded receive/ack classification for first-simulator handshake transport actions without starting world integration
-- improve first-simulator UDP payload decode fidelity so receive classification relies on actual packet structure rather than heuristic string matching
+- extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -110,7 +117,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**replace heuristic first-simulator receive classification with a minimal typed decoder aligned to actual handshake packet structure**
+**extend the typed receive decoder from handshake message-number classification into minimal block/field-level decode for `AgentMovementComplete`**
 
 ---
 
