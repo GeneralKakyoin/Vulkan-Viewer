@@ -276,6 +276,12 @@ async fn inspect_first_simulator_handshake_once(
                         summary.unknown_packet_message_numbers
                     );
                 }
+                if !summary.repeated_unknown_packet_message_numbers.is_empty() {
+                    println!(
+                        "Post-boundary repeated unknown packet numbers: {:?}",
+                        summary.repeated_unknown_packet_message_numbers
+                    );
+                }
                 for (idx, kind) in summary.kinds.iter().enumerate() {
                     println!("Post-boundary kind {}: {:?}", idx + 1, kind);
                 }
@@ -341,13 +347,14 @@ async fn inspect_first_simulator_handshake_once(
     let early_traffic = connection.early_simulator_traffic_observations();
     let early_summary = connection.summarize_early_simulator_traffic();
     println!(
-        "Early traffic summary: observations={}, health={}, simulator_viewer_time={}, online_notification={}, viewer_effect={}, coarse_location_update={}",
+        "Early traffic summary: observations={}, health={}, simulator_viewer_time={}, online_notification={}, viewer_effect={}, coarse_location_update={}, attached_sound={}",
         early_summary.observations,
         early_summary.health_message,
         early_summary.simulator_viewer_time_message,
         early_summary.online_notification,
         early_summary.viewer_effect,
-        early_summary.coarse_location_update
+        early_summary.coarse_location_update,
+        early_summary.attached_sound
     );
     println!(
         "Early simulator traffic observations: {}",

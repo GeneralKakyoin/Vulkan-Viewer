@@ -40,6 +40,7 @@ const LLUDP_PACKET_ACK_LOW_ID: u16 = 0xFFFB;
 const LLUDP_ONLINE_NOTIFICATION_LOW_ID: u16 = 322;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
+const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -811,6 +812,7 @@ pub enum FirstSimulatorInboundMessageKind {
     OnlineNotification,
     ViewerEffect,
     CoarseLocationUpdate,
+    AttachedSound,
     Irrelevant,
 }
 
@@ -869,6 +871,7 @@ pub struct FirstSimulatorPostBoundarySummary {
     pub unknown: usize,
     pub kinds: Vec<FirstSimulatorInboundMessageKind>,
     pub unknown_packet_message_numbers: Vec<u32>,
+    pub repeated_unknown_packet_message_numbers: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -878,6 +881,7 @@ pub enum EarlySimulatorTrafficKind {
     OnlineNotification,
     ViewerEffect,
     CoarseLocationUpdate,
+    AttachedSound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -897,6 +901,7 @@ pub struct EarlySimulatorTrafficSummary {
     pub online_notification: usize,
     pub viewer_effect: usize,
     pub coarse_location_update: usize,
+    pub attached_sound: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1081,6 +1086,7 @@ impl Connection {
                 EarlySimulatorTrafficKind::CoarseLocationUpdate => {
                     summary.coarse_location_update += 1
                 }
+                EarlySimulatorTrafficKind::AttachedSound => summary.attached_sound += 1,
             }
         }
         summary
@@ -1745,6 +1751,14 @@ impl Connection {
         }
 
         let post_boundary_summary = if agent_movement_complete_observation_index.is_some() {
+            let mut unknown_counts = BTreeMap::new();
+            for number in &post_boundary_unknown_packet_message_numbers {
+                *unknown_counts.entry(*number).or_insert(0usize) += 1;
+            }
+            let repeated_unknown_packet_message_numbers = unknown_counts
+                .into_iter()
+                .filter_map(|(number, count)| if count > 1 { Some(number) } else { None })
+                .collect::<Vec<_>>();
             Some(FirstSimulatorPostBoundarySummary {
                 observations: post_movement_observations,
                 bootstrap_relevant: post_boundary_bootstrap_relevant,
@@ -1753,6 +1767,7 @@ impl Connection {
                 unknown: post_boundary_unknown,
                 kinds: post_boundary_kinds,
                 unknown_packet_message_numbers: post_boundary_unknown_packet_message_numbers,
+                repeated_unknown_packet_message_numbers,
             })
         } else {
             None
@@ -2398,6 +2413,15 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == lludp_medium_frequency_message_number(LLUDP_ATTACHED_SOUND_MEDIUM_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::AttachedSound,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         _ => None,
     }
 }
@@ -2420,6 +2444,9 @@ fn to_early_simulator_traffic_kind(
         }
         FirstSimulatorInboundMessageKind::CoarseLocationUpdate => {
             Some(EarlySimulatorTrafficKind::CoarseLocationUpdate)
+        }
+        FirstSimulatorInboundMessageKind::AttachedSound => {
+            Some(EarlySimulatorTrafficKind::AttachedSound)
         }
         _ => None,
     }
@@ -4507,6 +4534,20 @@ mod tests {
         assert_eq!(coarse_location_update.signal, "packet:0x0000ff06");
         assert_eq!(coarse_location_update.packet_message_number, Some(0x0000ff06));
 
+        let attached_sound =
+            classify_first_simulator_inbound_message(&make_medium_frequency_packet(13));
+        assert_eq!(attached_sound.kind, FirstSimulatorInboundMessageKind::AttachedSound);
+        assert_eq!(
+            attached_sound.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(attached_sound.signal, "packet:0x0000ff0d");
+        assert_eq!(attached_sound.packet_message_number, Some(0x0000ff0d));
+        assert_eq!(
+            to_early_simulator_traffic_kind(attached_sound.kind),
+            Some(EarlySimulatorTrafficKind::AttachedSound)
+        );
+
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
         assert_eq!(
@@ -5013,6 +5054,7 @@ mod tests {
         assert_eq!(summary.likely_broader_traffic, 0);
         assert_eq!(summary.unknown, 0);
         assert!(summary.unknown_packet_message_numbers.is_empty());
+        assert!(summary.repeated_unknown_packet_message_numbers.is_empty());
         assert!(summary.kinds.is_empty());
         assert_eq!(
             report.observations[0].classification.kind,
@@ -5090,6 +5132,9 @@ mod tests {
                 .send_to(&make_medium_frequency_packet(6), sender)
                 .await;
             let _ = listener
+                .send_to(&make_medium_frequency_packet(13), sender)
+                .await;
+            let _ = listener
                 .send_to(&make_medium_frequency_packet(17), sender)
                 .await;
         });
@@ -5110,15 +5155,15 @@ mod tests {
             .probe_first_simulator_handshake_window_with_tail(
                 "127.0.0.1:0",
                 Duration::from_secs(1),
-                11,
-                5,
+                12,
+                6,
             )
             .await
             .expect("probe window with tail should succeed");
-        assert_eq!(report.observations.len(), 8);
+        assert_eq!(report.observations.len(), 9);
         assert!(!report.timed_out);
         assert_eq!(report.agent_movement_complete_observation_index, Some(3));
-        assert_eq!(report.post_movement_observations, 5);
+        assert_eq!(report.post_movement_observations, 6);
         assert_eq!(
             report.observations[0].classification.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
@@ -5149,6 +5194,10 @@ mod tests {
         );
         assert_eq!(
             report.observations[7].classification.kind,
+            FirstSimulatorInboundMessageKind::AttachedSound
+        );
+        assert_eq!(
+            report.observations[8].classification.kind,
             FirstSimulatorInboundMessageKind::ViewerEffect
         );
         assert_eq!(
@@ -5175,15 +5224,20 @@ mod tests {
             report.observations[7].classification.scope,
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
         );
+        assert_eq!(
+            report.observations[8].classification.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
         let summary = report
             .post_boundary_summary
             .expect("post-boundary summary should exist once movement complete is observed");
-        assert_eq!(summary.observations, 5);
+        assert_eq!(summary.observations, 6);
         assert_eq!(summary.bootstrap_relevant, 0);
         assert_eq!(summary.transport_control, 1);
-        assert_eq!(summary.likely_broader_traffic, 4);
+        assert_eq!(summary.likely_broader_traffic, 5);
         assert_eq!(summary.unknown, 0);
         assert!(summary.unknown_packet_message_numbers.is_empty());
+        assert!(summary.repeated_unknown_packet_message_numbers.is_empty());
         assert_eq!(
             summary.kinds,
             vec![
@@ -5191,24 +5245,27 @@ mod tests {
                 FirstSimulatorInboundMessageKind::HealthMessage,
                 FirstSimulatorInboundMessageKind::OnlineNotification,
                 FirstSimulatorInboundMessageKind::CoarseLocationUpdate,
+                FirstSimulatorInboundMessageKind::AttachedSound,
                 FirstSimulatorInboundMessageKind::ViewerEffect,
             ]
         );
         let early_traffic = connection.early_simulator_traffic_observations();
-        assert_eq!(early_traffic.len(), 4);
+        assert_eq!(early_traffic.len(), 5);
         assert_eq!(early_traffic[0].kind, EarlySimulatorTrafficKind::HealthMessage);
         assert_eq!(early_traffic[1].kind, EarlySimulatorTrafficKind::OnlineNotification);
         assert_eq!(
             early_traffic[2].kind,
             EarlySimulatorTrafficKind::CoarseLocationUpdate
         );
-        assert_eq!(early_traffic[3].kind, EarlySimulatorTrafficKind::ViewerEffect);
+        assert_eq!(early_traffic[3].kind, EarlySimulatorTrafficKind::AttachedSound);
+        assert_eq!(early_traffic[4].kind, EarlySimulatorTrafficKind::ViewerEffect);
         let early_summary = connection.summarize_early_simulator_traffic();
-        assert_eq!(early_summary.observations, 4);
+        assert_eq!(early_summary.observations, 5);
         assert_eq!(early_summary.health_message, 1);
         assert_eq!(early_summary.simulator_viewer_time_message, 0);
         assert_eq!(early_summary.online_notification, 1);
         assert_eq!(early_summary.viewer_effect, 1);
         assert_eq!(early_summary.coarse_location_update, 1);
+        assert_eq!(early_summary.attached_sound, 1);
     }
 }

@@ -145,7 +145,9 @@ Status update:
 - small typed early-simulator-traffic scaffold now exists in `viewer_net` and captures observed broader packet kinds separately from bootstrap/control diagnostics
 - scaffold diagnostics now include per-kind early-traffic summary counts
 - phase status: early simulator traffic consolidation is done enough for current scope
-- next phase: optionally type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed, without broad world/object decoding
+- repeated unknown medium `0x0000ff0d` is now typed as `AttachedSound` (likely broader traffic)
+- post-boundary diagnostics now include repeated unknown packet-number reporting
+- next phase: type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed, without broad world/object decoding
 
 ### T8 - First connected world slice
 Done when:

@@ -89,6 +89,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `OnlineNotification`
     - `ViewerEffect`
     - `CoarseLocationUpdate`
+    - `AttachedSound`
   - available via `Connection::early_simulator_traffic_observations()`
   - summary available via `Connection::summarize_early_simulator_traffic()`
 - handshake-stage confirmation was tightened:
@@ -125,6 +126,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
       - `OnlineNotification` (`0xFFFF0142`, low 322)
       - `ViewerEffect` (`0x0000FF11`, medium 17)
       - `CoarseLocationUpdate` (`0x0000FF06`, medium 6)
+      - `AttachedSound` (`0x0000FF0D`, medium 13)
     - remaining medium unknowns can still appear in this window and remain explicitly `Unknown`
   - `0xfffffffb` is now typed as `PacketAck` (transport-control) instead of unmapped traffic
   - known typed packets are now explicitly separated from likely broader traffic in diagnostics
@@ -158,9 +160,9 @@ Current concrete blocker inside bootstrap:
   - immediate post-movement tail is now observable in bounded live runs
   - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
-  - early simulator traffic consolidation is now "done enough" for this phase
+  - early simulator traffic consolidation remains stable
   - hard stop remains: no broad object/world-state decoding in current scope
-  - next gap is narrow handoff/control visibility only if repeatedly observed (for example `CrossedRegion` / `ConfirmEnableSimulator`)
+  - next gap is narrow handoff/control visibility for region-transition-adjacent medium signals when observed repeatedly (for example `CrossedRegion`/`ConfirmEnableSimulator`)
 
 ---
 
@@ -187,7 +189,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**begin the next bounded phase: targeted medium handoff/control visibility (`CrossedRegion` / `ConfirmEnableSimulator`) while keeping world/object decode explicitly out of scope**
+**continue bounded handoff/control visibility by watching for repeated region-transition control IDs (`0x0000ff07` / `0x0000ff08`) while keeping world/object decode explicitly out of scope**
 
 ---
 

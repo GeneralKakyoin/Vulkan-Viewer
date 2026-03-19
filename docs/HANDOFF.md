@@ -2,6 +2,25 @@
 
 ## Last Completed Work
 
+- Advanced bounded handoff/control visibility diagnostics:
+  - repeated unknown post-AMC medium ID `0x0000ff0d` is now typed as `AttachedSound` (broader traffic)
+  - this reduces unknown churn and keeps handoff/control focus clearer
+- Tightened post-boundary diagnostics:
+  - `FirstSimulatorPostBoundarySummary` now carries:
+    - `unknown_packet_message_numbers`
+    - `repeated_unknown_packet_message_numbers`
+  - enables faster detection of repeated unknown IDs without manual log inspection
+- Tightened early-traffic scaffold diagnostics:
+  - added `EarlySimulatorTrafficSummary` via `Connection::summarize_early_simulator_traffic()`
+  - includes per-kind counts (including `AttachedSound`)
+- Manual example output now prints:
+  - repeated unknown packet numbers (when present)
+  - early-traffic per-kind summary counts
+- Live bounded validation in this run:
+  - stable post-boundary summaries observed
+  - no repeated handoff/control-specific IDs (`0x0000ff07`/`0x0000ff08`) confirmed yet
+  - handoff/control next-step remains targeted observation, not broad decode
+
 - Completed early simulator traffic consolidation as a bounded milestone:
   - repeated observed early non-bootstrap packet set is now typed in scaffold scope:
     - `HealthMessage`
@@ -361,6 +380,7 @@ This includes:
 - if needed next, type only narrow medium IDs that help early handoff visibility (`CrossedRegion`/`ConfirmEnableSimulator`) while still avoiding broad world/object decode
 - keep extending only this typed observation scaffold until the next phase boundary requires deliberate world/object decode design
 - next phase should stay bounded to medium handoff/control visibility only (`CrossedRegion`, `ConfirmEnableSimulator`) before any world/object-state decode planning
+- keep this boundary strict: only type those handoff/control IDs once observed repeatedly in live traces
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

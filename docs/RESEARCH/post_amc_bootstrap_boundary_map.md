@@ -20,6 +20,7 @@ After `AgentMovementComplete`, which inbound packets should still be treated as 
 | `OnlineNotification` | `0xFFFF0142` (low 322) | `LikelyBroaderTraffic` | Social/world notification traffic after initial bootstrap. |
 | `ViewerEffect` | `0x0000FF11` (medium 17) | `LikelyBroaderTraffic` | Viewer effect broadcast traffic, not bootstrap sequencing. |
 | `CoarseLocationUpdate` | `0x0000FF06` (medium 6) | `LikelyBroaderTraffic` | Coarse avatar/presence location traffic; useful for diagnostics but not bootstrap-gating in this phase. |
+| `AttachedSound` | `0x0000FF0D` (medium 13) | `LikelyBroaderTraffic` | Audio/world side-effect traffic; not bootstrap/handoff control. |
 | unknown medium example | varies | `Unknown` | Some medium IDs can still appear in short tails; keep explicit until repeated and justified. |
 
 ## Boundary Rule For This Phase
@@ -52,3 +53,7 @@ Do not start broad world-state decoding from this map alone.
   - diagnostics preserve scope separation and per-kind summaries
 - Hard stop remains:
   - do not start broad object/world-state decoding from this slice.
+
+## Handoff/Control Watch List (Next Phase)
+- `0x0000FF07` (`CrossedRegion`) and `0x0000FF08` (`ConfirmEnableSimulator`) are high-value region-transition control IDs to type once repeatedly observed.
+- Keep them as next-phase targets; do not pre-emptively expand payload decode beyond message-ID visibility.
