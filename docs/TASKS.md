@@ -113,6 +113,12 @@ Done when:
 - live manual probe outcome is captured with explicit diagnostics
 - if no inbound packets are observed, blocker is classified clearly (transport continuity vs outbound payload fidelity)
 
+### T7.3 - Handshake progression observation
+Done when:
+- first live inbound handshake-relevant packet after wire-fidelity pass is classified (currently `AgentDataUpdate`)
+- receive-side typed classification covers observed early packets without heuristic dependence
+- next blocker from `AgentDataUpdate` to `AgentMovementComplete` is explicitly characterized
+
 ### T8 - First connected world slice
 Done when:
 - world-derived placeholder state can be rendered from live connection data

@@ -2,6 +2,28 @@
 
 ## Last Completed Work
 
+- Completed first-simulator outbound wire-fidelity pass in `viewer_net`:
+  - replaced JSON-like UDP handshake payloads with binary LLUDP packet construction for:
+    - `UseCircuitCode` (low 3)
+    - `CompleteAgentMovement` (low 249)
+  - packet construction now includes:
+    - reliable LLUDP header flags
+    - network-order packet-id sequencing
+    - low-frequency message number encoding
+    - protocol-faithful fixed field ordering for handshake blocks
+  - handshake send diagnostics now include:
+    - outbound packet id
+    - outbound packet message number
+  - send-path tests now assert packet invariants (header/message/body layout) instead of string payload matching
+- Expanded typed inbound classification for live-observed early packet:
+  - added `AgentDataUpdate` (low 387) classification in receive decoder
+- Live same-socket probe rerun after wire-fidelity pass:
+  - real login succeeded
+  - seed capability fetch succeeded
+  - both handshake sends succeeded with LLUDP packet diagnostics
+  - real inbound packet observed and classified:
+    - `AgentDataUpdate` (`packet:0xffff0183`)
+  - handshake stage did not advance to `AgentMovementComplete` yet (still waiting)
 - Strengthened first-simulator receive-side protocol fidelity in `viewer_net`:
   - added typed inbound decode evidence fields:
     - decode source (`PacketMessageNumber`, `JsonField`, `TextScan`, `Unknown`)
@@ -153,6 +175,7 @@
 - Receive-side handshake observation/classification is now in place; next risk is protocol-level fidelity (actual UDP packet decoding semantics).
 - Receive-side handshake identity classification now uses typed UDP message-number decoding; the next fidelity risk moved to block/field-level decode inside handshake messages.
 - Same-socket live probe removed local bind-continuity ambiguity; primary remaining risk is likely outbound handshake packet wire fidelity.
+- Outbound handshake wire fidelity is now materially improved and producing live inbound packets; current risk shifted to progression from early inbound traffic to `AgentMovementComplete`.
 
 ---
 
@@ -174,6 +197,7 @@ This includes:
 - improve receive classification from heuristic signal matching to a minimal typed decoder aligned to real packet schema
 - extend typed decode from message identity to minimal block/field extraction for `AgentMovementComplete` while preserving current send/receive stage flow
 - improve outbound `UseCircuitCode`/`CompleteAgentMovement` packet wire fidelity to unlock first real inbound handshake packet observation
+- continue typed inbound expansion/progression analysis from `AgentDataUpdate` toward first observed `AgentMovementComplete`
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

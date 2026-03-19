@@ -260,8 +260,15 @@ async fn inspect_first_simulator_handshake_once(
     );
     for diag in send_diagnostics {
         println!(
-            "Send diag: action={:?}, target={}, payload_len={}, elapsed_ms={}, success={}, error={:?}",
-            diag.action, diag.target, diag.payload_len, diag.elapsed_ms, diag.success, diag.error
+            "Send diag: action={:?}, target={}, packet_id={}, packet_message_number={:?}, payload_len={}, elapsed_ms={}, success={}, error={:?}",
+            diag.action,
+            diag.target,
+            diag.packet_id,
+            diag.packet_message_number,
+            diag.payload_len,
+            diag.elapsed_ms,
+            diag.success,
+            diag.error
         );
     }
 

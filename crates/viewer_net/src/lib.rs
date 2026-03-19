@@ -25,10 +25,14 @@ const LLSD_XML_CONTENT_TYPE: &str = "application/llsd+xml";
 const LLUDP_PACKET_ID_SIZE: usize = 6;
 const LLUDP_MINIMUM_VALID_PACKET_SIZE: usize = LLUDP_PACKET_ID_SIZE + 1;
 const LLUDP_MESSAGE_PREFIX: u8 = 0xFF;
+const LLUDP_RELIABLE_FLAG: u8 = 0x40;
 const LLUDP_LOW_FREQUENCY_PREFIX: u32 = 0xFFFF0000;
+const LLUDP_USE_CIRCUIT_CODE_LOW_ID: u16 = 3;
+const LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID: u16 = 249;
 const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
 const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
 const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
+const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -779,6 +783,8 @@ pub enum FirstSimulatorHandshakeAction {
 pub struct FirstSimulatorHandshakeSendDiagnostic {
     pub action: FirstSimulatorHandshakeAction,
     pub target: String,
+    pub packet_id: u32,
+    pub packet_message_number: Option<u32>,
     pub payload_len: usize,
     pub elapsed_ms: u128,
     pub success: bool,
@@ -790,6 +796,7 @@ pub enum FirstSimulatorInboundMessageKind {
     AgentMovementComplete,
     RegionHandshake,
     EnableSimulator,
+    AgentDataUpdate,
     Irrelevant,
 }
 
@@ -929,6 +936,7 @@ pub struct Connection {
     first_simulator_handshake_state: Option<FirstSimulatorHandshakeState>,
     first_simulator_handshake_send_diagnostics: Vec<FirstSimulatorHandshakeSendDiagnostic>,
     first_simulator_handshake_receive_diagnostics: Vec<FirstSimulatorHandshakeReceiveDiagnostic>,
+    next_first_simulator_packet_id: u32,
 }
 
 impl Connection {
@@ -941,6 +949,7 @@ impl Connection {
             first_simulator_handshake_state: None,
             first_simulator_handshake_send_diagnostics: Vec::new(),
             first_simulator_handshake_receive_diagnostics: Vec::new(),
+            next_first_simulator_packet_id: 1,
         }
     }
 
@@ -1003,6 +1012,7 @@ impl Connection {
         self.first_simulator_handshake_state = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::LoggedIn;
         Ok(())
     }
@@ -1112,6 +1122,7 @@ impl Connection {
         self.first_simulator_handshake_state = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::Disconnected;
         Ok(())
     }
@@ -1217,7 +1228,10 @@ impl Connection {
             .expect("handshake state must be initialized")
             .prerequisites
             .clone();
-        let payload = encode_first_simulator_use_circuit_code_payload(&prerequisites)?;
+        let payload = encode_first_simulator_use_circuit_code_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
         self.send_first_simulator_handshake_datagram(
             FirstSimulatorHandshakeAction::UseCircuitCode,
             &prerequisites.target,
@@ -1257,7 +1271,10 @@ impl Connection {
             .expect("handshake state must be initialized")
             .prerequisites
             .clone();
-        let payload = encode_first_simulator_complete_agent_movement_payload(&prerequisites)?;
+        let payload = encode_first_simulator_complete_agent_movement_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
         self.send_first_simulator_handshake_datagram(
             FirstSimulatorHandshakeAction::CompleteAgentMovement,
             &prerequisites.target,
@@ -1391,7 +1408,10 @@ impl Connection {
                 .expect("handshake state must be initialized")
                 .prerequisites
                 .clone();
-            let payload = encode_first_simulator_use_circuit_code_payload(&prerequisites)?;
+            let payload = encode_first_simulator_use_circuit_code_payload(
+                &prerequisites,
+                self.next_first_simulator_packet_id(),
+            )?;
             self.send_first_simulator_handshake_datagram_with_socket(
                 FirstSimulatorHandshakeAction::UseCircuitCode,
                 &prerequisites.target,
@@ -1417,7 +1437,10 @@ impl Connection {
                 .expect("handshake state must be initialized")
                 .prerequisites
                 .clone();
-            let payload = encode_first_simulator_complete_agent_movement_payload(&prerequisites)?;
+            let payload = encode_first_simulator_complete_agent_movement_payload(
+                &prerequisites,
+                self.next_first_simulator_packet_id(),
+            )?;
             self.send_first_simulator_handshake_datagram_with_socket(
                 FirstSimulatorHandshakeAction::CompleteAgentMovement,
                 &prerequisites.target,
@@ -1438,7 +1461,10 @@ impl Connection {
                 .expect("handshake state must be initialized")
                 .prerequisites
                 .clone();
-            let payload = encode_first_simulator_complete_agent_movement_payload(&prerequisites)?;
+            let payload = encode_first_simulator_complete_agent_movement_payload(
+                &prerequisites,
+                self.next_first_simulator_packet_id(),
+            )?;
             self.send_first_simulator_handshake_datagram_with_socket(
                 FirstSimulatorHandshakeAction::CompleteAgentMovement,
                 &prerequisites.target,
@@ -1751,6 +1777,14 @@ impl Connection {
         self.first_simulator_handshake_state = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.next_first_simulator_packet_id = 1;
+    }
+
+    fn next_first_simulator_packet_id(&mut self) -> u32 {
+        let packet_id = self.next_first_simulator_packet_id;
+        self.next_first_simulator_packet_id =
+            self.next_first_simulator_packet_id.wrapping_add(1).max(1);
+        packet_id
     }
 
     async fn send_first_simulator_handshake_datagram(
@@ -1777,6 +1811,9 @@ impl Connection {
         payload: &[u8],
         socket: &UdpSocket,
     ) -> Result<(), ConnectionError> {
+        let packet_id = decode_lludp_packet_id(payload).unwrap_or_default();
+        let packet_message_number =
+            decode_first_simulator_packet_header(payload).map(|header| header.message_number);
         let target_text = format!("{}:{}", target.sim_ip, target.sim_port);
         let socket_addr = match target_text.parse::<SocketAddr>() {
             Ok(addr) => addr,
@@ -1785,6 +1822,8 @@ impl Connection {
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
                         target: target_text.clone(),
+                        packet_id,
+                        packet_message_number,
                         payload_len: payload.len(),
                         elapsed_ms: 0,
                         success: false,
@@ -1808,6 +1847,8 @@ impl Connection {
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
                         target: target_text,
+                        packet_id,
+                        packet_message_number,
                         payload_len: payload.len(),
                         elapsed_ms,
                         success: true,
@@ -1822,6 +1863,8 @@ impl Connection {
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
                         target: target_text.clone(),
+                        packet_id,
+                        packet_message_number,
                         payload_len: payload.len(),
                         elapsed_ms,
                         success: false,
@@ -1839,6 +1882,8 @@ impl Connection {
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
                         target: target_text.clone(),
+                        packet_id,
+                        packet_message_number,
                         payload_len: payload.len(),
                         elapsed_ms,
                         success: false,
@@ -1873,26 +1918,75 @@ fn llsd_event_queue_request(ack: u64, done: bool) -> String {
 
 fn encode_first_simulator_use_circuit_code_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
 ) -> Result<Vec<u8>, ConnectionError> {
-    serde_json::to_vec(&serde_json::json!({
-        "action": "UseCircuitCode",
-        "agent_id": prerequisites.agent_id,
-        "session_id": prerequisites.session_id,
-        "circuit_code": prerequisites.circuit_code,
-    }))
-    .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let mut body = Vec::with_capacity(36);
+    body.extend_from_slice(&prerequisites.circuit_code.to_le_bytes());
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&agent_id);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_USE_CIRCUIT_CODE_LOW_ID,
+        &body,
+    ))
 }
 
 fn encode_first_simulator_complete_agent_movement_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
 ) -> Result<Vec<u8>, ConnectionError> {
-    serde_json::to_vec(&serde_json::json!({
-        "action": "CompleteAgentMovement",
-        "agent_id": prerequisites.agent_id,
-        "session_id": prerequisites.session_id,
-        "circuit_code": prerequisites.circuit_code,
-    }))
-    .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let mut body = Vec::with_capacity(36);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&prerequisites.circuit_code.to_le_bytes());
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID,
+        &body,
+    ))
+}
+
+fn parse_uuid_bytes(raw: &str) -> Result<[u8; 16], ConnectionError> {
+    let compact = raw.replace('-', "");
+    if compact.len() != 32 {
+        return Err(ConnectionError::CapabilityDecode(format!(
+            "invalid UUID length for '{raw}'"
+        )));
+    }
+
+    let mut bytes = [0u8; 16];
+    for (idx, slot) in bytes.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&compact[start..end], 16).map_err(|err| {
+            ConnectionError::CapabilityDecode(format!("invalid UUID hex for '{raw}': {err}"))
+        })?;
+    }
+    Ok(bytes)
+}
+
+fn encode_lludp_low_frequency_packet(packet_id: u32, message_id: u16, body: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(LLUDP_PACKET_ID_SIZE + 4 + body.len());
+    payload.push(LLUDP_RELIABLE_FLAG);
+    payload.extend_from_slice(&packet_id.to_be_bytes());
+    payload.push(0);
+    payload.push(LLUDP_MESSAGE_PREFIX);
+    payload.push(LLUDP_MESSAGE_PREFIX);
+    payload.extend_from_slice(&message_id.to_be_bytes());
+    payload.extend_from_slice(body);
+    payload
+}
+
+fn decode_lludp_packet_id(payload: &[u8]) -> Option<u32> {
+    if payload.len() < LLUDP_PACKET_ID_SIZE {
+        return None;
+    }
+    let id_bytes: [u8; 4] = payload[1..5].try_into().ok()?;
+    Some(u32::from_be_bytes(id_bytes))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1960,6 +2054,14 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_ENABLE_SIMULATOR_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::EnableSimulator,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_AGENT_DATA_UPDATE_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::AgentDataUpdate,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2475,6 +2577,19 @@ mod tests {
             0x00, // extra header offset
             0xFF, 0xFF, high, low, // low-frequency message number
         ]
+    }
+
+    fn decode_outbound_handshake_payload(payload: &[u8]) -> (u8, u32, u32, &[u8]) {
+        assert!(payload.len() >= LLUDP_PACKET_ID_SIZE + 4);
+        let flags = payload[0];
+        let packet_id = u32::from_be_bytes(payload[1..5].try_into().expect("packet id bytes"));
+        let message_number = {
+            assert_eq!(payload[6], 0xFF);
+            assert_eq!(payload[7], 0xFF);
+            let low = u16::from_be_bytes(payload[8..10].try_into().expect("low id bytes"));
+            lludp_low_frequency_message_number(low)
+        };
+        (flags, packet_id, message_number, &payload[10..])
     }
 
     #[tokio::test]
@@ -3702,9 +3817,15 @@ mod tests {
             .await
             .expect("datagram receive should not timeout")
             .expect("datagram receive should succeed");
-        let payload = std::str::from_utf8(&buf[..received_len]).expect("payload should be utf8");
-        assert!(payload.contains("UseCircuitCode"));
-        assert!(payload.contains("22222222-2222-2222-2222-222222222222"));
+        let (flags, packet_id, message_number, body) =
+            decode_outbound_handshake_payload(&buf[..received_len]);
+        assert_eq!(flags & LLUDP_RELIABLE_FLAG, LLUDP_RELIABLE_FLAG);
+        assert_eq!(
+            message_number,
+            lludp_low_frequency_message_number(LLUDP_USE_CIRCUIT_CODE_LOW_ID)
+        );
+        assert_eq!(body.len(), 36);
+        assert_eq!(u32::from_le_bytes(body[0..4].try_into().expect("code bytes")), 424242);
 
         let diagnostics = connection.first_simulator_handshake_send_diagnostics();
         assert_eq!(diagnostics.len(), 1);
@@ -3712,6 +3833,8 @@ mod tests {
             diagnostics[0].action,
             FirstSimulatorHandshakeAction::UseCircuitCode
         );
+        assert_eq!(diagnostics[0].packet_id, packet_id);
+        assert_eq!(diagnostics[0].packet_message_number, Some(message_number));
         assert!(diagnostics[0].success);
     }
 
@@ -3780,8 +3903,18 @@ mod tests {
             .await
             .expect("second datagram should not timeout")
             .expect("second datagram receive should succeed");
-        let payload = std::str::from_utf8(&buf[..received_len]).expect("payload should be utf8");
-        assert!(payload.contains("CompleteAgentMovement"));
+        let (flags, packet_id, message_number, body) =
+            decode_outbound_handshake_payload(&buf[..received_len]);
+        assert_eq!(flags & LLUDP_RELIABLE_FLAG, LLUDP_RELIABLE_FLAG);
+        assert_eq!(
+            message_number,
+            lludp_low_frequency_message_number(LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID)
+        );
+        assert_eq!(body.len(), 36);
+        assert_eq!(
+            u32::from_le_bytes(body[32..36].try_into().expect("circuit bytes")),
+            424242
+        );
 
         let diagnostics = connection.first_simulator_handshake_send_diagnostics();
         assert_eq!(diagnostics.len(), 2);
@@ -3789,6 +3922,8 @@ mod tests {
             diagnostics[1].action,
             FirstSimulatorHandshakeAction::CompleteAgentMovement
         );
+        assert_eq!(diagnostics[1].packet_id, packet_id);
+        assert_eq!(diagnostics[1].packet_message_number, Some(message_number));
         assert!(diagnostics[1].success);
     }
 
@@ -3872,6 +4007,19 @@ mod tests {
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
         );
         assert_eq!(enable.packet_message_number, Some(0xffff0097));
+
+        let agent_data =
+            classify_first_simulator_inbound_message(&make_low_frequency_packet(387));
+        assert_eq!(
+            agent_data.kind,
+            FirstSimulatorInboundMessageKind::AgentDataUpdate
+        );
+        assert_eq!(agent_data.signal, "packet:0xffff0183");
+        assert_eq!(
+            agent_data.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(agent_data.packet_message_number, Some(0xffff0183));
 
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
@@ -4271,6 +4419,19 @@ mod tests {
         let send_diagnostics = connection.first_simulator_handshake_send_diagnostics();
         assert_eq!(send_diagnostics.len(), 2);
         assert!(send_diagnostics.iter().all(|diag| diag.success));
+        assert_eq!(send_diagnostics[0].packet_id + 1, send_diagnostics[1].packet_id);
+        assert_eq!(
+            send_diagnostics[0].packet_message_number,
+            Some(lludp_low_frequency_message_number(
+                LLUDP_USE_CIRCUIT_CODE_LOW_ID
+            ))
+        );
+        assert_eq!(
+            send_diagnostics[1].packet_message_number,
+            Some(lludp_low_frequency_message_number(
+                LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID
+            ))
+        );
 
         let receive_diagnostics = connection.first_simulator_handshake_receive_diagnostics();
         assert_eq!(receive_diagnostics.len(), 1);

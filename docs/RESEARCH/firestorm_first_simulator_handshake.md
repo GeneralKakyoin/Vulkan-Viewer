@@ -101,7 +101,8 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
 - Whether additional startup messages are mandatory for a minimal first connected slice versus optional for richer behavior.
 - Real-live acceptance threshold for outbound handshake packet payload fidelity in this rewrite:
   - same-socket one-shot probe now removes local receive-port continuity ambiguity,
-  - but current transport payloads still produce no observed inbound handshake response in live probing.
+  - after LLUDP wire-fidelity pass, live probing now receives `AgentDataUpdate` (low 387),
+  - `AgentMovementComplete` is still not observed in the one-shot window.
 
 ## Practical Next Step (Non-implementation)
 Document a minimal first-region handshake state chart for this codebase:

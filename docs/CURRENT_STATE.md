@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase C - First-simulator handshake receive-side protocol alignment
+Phase C - First-simulator handshake wire-fidelity and live receive validation
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -80,10 +80,15 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 - one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
   - `Connection::probe_first_simulator_handshake_once(...)`
   - manual example wiring added for live receive validation
-- live probe attempt now confirmed with same-socket transport:
-  - login and seed capability fetch still succeed
-  - both handshake sends report transport success
-  - no inbound handshake packet observed within timeout in current live conditions
+- outbound handshake send packets are now protocol-shaped binary LLUDP datagrams:
+  - reliable LLUDP flags + packet-id header
+  - low-frequency message numbers for `UseCircuitCode` (3) and `CompleteAgentMovement` (249)
+  - field ordering/layout aligned to template expectations (UUID + U32 blocks)
+  - per-send diagnostics now include packet id and packet message number
+- live same-socket probe now receives parseable real inbound simulator traffic:
+  - inbound low message `387` classified as `AgentDataUpdate`
+  - inbound classification source is typed packet message-number decode
+  - stage remains `WaitingForAgentMovementComplete` (no `AgentMovementComplete` observed yet)
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -107,9 +112,9 @@ Current concrete blocker inside bootstrap:
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
 - Current handshake blocker narrowed to protocol payload fidelity on real simulator traffic:
-  - inbound classification path is now typed and diagnostics are stronger
-  - live same-socket probe still receives no inbound handshake packet
-  - most likely next gap is outbound packet fidelity (`UseCircuitCode`/`CompleteAgentMovement` wire shape) rather than receive bind/socket continuity
+  - outbound wire shape now elicits real inbound simulator packets (`AgentDataUpdate`)
+  - `AgentMovementComplete` is still not observed in current one-shot window
+  - next blocker is inbound handshake progression/completion evidence, not basic outbound send shape
 
 ---
 
@@ -124,6 +129,7 @@ Current concrete blocker inside bootstrap:
 - add bounded receive/ack classification for first-simulator handshake transport actions without starting world integration
 - improve outbound handshake packet fidelity toward real LLUDP message layout while preserving current scaffold boundaries
 - extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
+- classify and observe additional early inbound low-frequency packets that appear before `AgentMovementComplete` in live traffic
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -133,7 +139,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**improve outbound first-simulator handshake packet wire fidelity so live inbound handshake responses can be observed, then continue typed inbound field-level decode**
+**continue live handshake progression analysis from observed `AgentDataUpdate` toward first observed `AgentMovementComplete` (with typed inbound expansion as needed)**
 
 ---
 
