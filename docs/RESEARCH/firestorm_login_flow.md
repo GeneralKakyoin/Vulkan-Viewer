@@ -69,6 +69,16 @@
 - Firestorm login handler paths compute MD5 password digests for credential handling (`reference/firestorm/indra/newview/llloginhandler.cpp`).
 - Compatibility implication for this rewrite: LLSD login payload should treat `passwd` as legacy-hash formatted data (`$1$<md5>`), not raw plaintext.
 
+### XML-RPC envelope experiment (2026-03-19)
+- Added a transport-level experimental XML-RPC codec path in `viewer_net` using:
+  - `methodName = login_to_simulator`
+  - one struct parameter carrying shaped login fields and `options` array
+  - legacy `passwd` formatting (`$1$<md5>`)
+- Controlled live comparison against `https://login.agni.lindenlab.com/cgi-bin/login.cgi` with dummy credentials:
+  - LLSD path returned `reason=viewer-data` with `Missing password`
+  - XML-RPC path returned `reason=key` with invalid-credentials style message
+- Interpretation: endpoint behavior strongly suggests XML-RPC envelope recognition, and the current blocker likely moved from envelope-level mismatch toward field-level auth compatibility.
+
 ## Important Response Data (Login/Startup)
 - Session identity:
   - `agent_id`

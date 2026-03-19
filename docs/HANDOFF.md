@@ -11,6 +11,11 @@
 - Confirmed the current blocker is payload/auth compatibility, not transport failure
 - Corrected LLSD `passwd` semantics to legacy `$1$<md5>` encoding with idempotent handling for already-prefixed values
 - Added focused tests for LLSD `passwd` encoding behavior
+- Added an experimental XML-RPC `login_to_simulator` wire format path in `viewer_net`
+- Added XML-RPC request/response codec tests and wire-format transport test
+- Verified live endpoint behavior shift on 2026-03-19:
+  - LLSD attempt still returns `reason=viewer-data`, `message=Missing password`
+  - XML-RPC attempt returns `reason=key` (credential/auth failure), indicating the envelope is recognized
 
 ---
 

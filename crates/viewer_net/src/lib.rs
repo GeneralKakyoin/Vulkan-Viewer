@@ -1,6 +1,7 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use reqwest::{Method, StatusCode, header::CONTENT_TYPE};
+use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -23,6 +24,7 @@ pub trait LoginCodec {
 pub enum LoginWireFormat {
     Json,
     Llsd,
+    XmlRpc,
 }
 
 impl Default for LoginWireFormat {
@@ -36,6 +38,7 @@ impl LoginWireFormat {
         match self {
             LoginWireFormat::Json => Box::new(JsonLoginCodec),
             LoginWireFormat::Llsd => Box::new(LlsdLoginCodec),
+            LoginWireFormat::XmlRpc => Box::new(XmlRpcLoginCodec),
         }
     }
 }
@@ -86,6 +89,7 @@ impl Default for ConnectionConfig {
 }
 
 pub struct LlsdLoginCodec;
+pub struct XmlRpcLoginCodec;
 
 impl LoginCodec for LlsdLoginCodec {
     fn content_type(&self) -> &str {
@@ -158,6 +162,114 @@ impl LoginCodec for LlsdLoginCodec {
     }
 }
 
+impl LoginCodec for XmlRpcLoginCodec {
+    fn content_type(&self) -> &str {
+        "text/xml"
+    }
+
+    fn encode_request(&self, request: &GridLoginRequest) -> Result<Vec<u8>, CodecError> {
+        let mut xml = String::from("<?xml version=\"1.0\"?><methodCall>");
+        xml.push_str(&format!(
+            "<methodName>{}</methodName>",
+            escape_xml(&request.method)
+        ));
+        xml.push_str("<params><param><value><struct>");
+
+        xmlrpc_member_string(&mut xml, "username", &request.params.username);
+        xmlrpc_member_string(
+            &mut xml,
+            "passwd",
+            &normalize_legacy_passwd(&request.params.password),
+        );
+        if let Some((first, last)) = split_legacy_name(&request.params.username) {
+            xmlrpc_member_string(&mut xml, "first", &first);
+            xmlrpc_member_string(&mut xml, "last", &last);
+        }
+        xmlrpc_member_string(&mut xml, "start", &request.params.start);
+        xmlrpc_member_bool(&mut xml, "agree_to_tos", request.params.agree_to_tos);
+        xmlrpc_member_bool(&mut xml, "read_critical", request.params.read_critical);
+        if let Some(token) = &request.params.token {
+            xmlrpc_member_string(&mut xml, "token", token);
+        }
+        xmlrpc_member_string(&mut xml, "channel", &request.params.channel);
+        xmlrpc_member_string(&mut xml, "version", &request.params.version);
+        xmlrpc_member_string(&mut xml, "platform", &request.params.platform);
+        xmlrpc_member_string(&mut xml, "platform_version", &request.params.platform_version);
+        xmlrpc_member_string(&mut xml, "host_id", &request.params.host_id);
+        xmlrpc_member_string(&mut xml, "machine_hash", &request.params.machine_hash);
+        xmlrpc_member_array_of_strings(&mut xml, "options", &request.options);
+
+        xml.push_str("</struct></value></param></params></methodCall>");
+        Ok(xml.into_bytes())
+    }
+
+    fn decode_response(&self, body: &[u8]) -> Result<GridLoginResponse, CodecError> {
+        let text = std::str::from_utf8(body).map_err(|err| CodecError::Deserialize(err.to_string()))?;
+        let doc = Document::parse(text).map_err(|err| CodecError::Deserialize(err.to_string()))?;
+
+        if let Some(fault_value) = doc
+            .descendants()
+            .find(|node| node.has_tag_name("fault"))
+            .and_then(|fault| first_child_with_tag(fault, "value"))
+        {
+            let fault = parse_xmlrpc_value(fault_value)?;
+            let message = match fault {
+                XmlRpcValue::Struct(map) => map
+                    .get("faultString")
+                    .and_then(xmlrpc_as_string)
+                    .or_else(|| map.get("message").and_then(xmlrpc_as_string)),
+                _ => None,
+            };
+
+            return Ok(GridLoginResponse {
+                login: Some(false),
+                reason: Some(String::from("fault")),
+                message,
+                ..Default::default()
+            });
+        }
+
+        let value_node = doc
+            .descendants()
+            .find(|node| node.has_tag_name("params"))
+            .and_then(|params| first_child_with_tag(params, "param"))
+            .and_then(|param| first_child_with_tag(param, "value"))
+            .ok_or_else(|| CodecError::Deserialize(String::from("missing xml-rpc params/value")))?;
+
+        let parsed = parse_xmlrpc_value(value_node)?;
+        let map = match parsed {
+            XmlRpcValue::Struct(map) => map,
+            _ => {
+                return Err(CodecError::Deserialize(String::from(
+                    "xml-rpc response value is not a struct",
+                )))
+            }
+        };
+
+        Ok(GridLoginResponse {
+            login: map.get("login").and_then(xmlrpc_as_bool),
+            reason: map.get("reason").and_then(xmlrpc_as_string),
+            message: map.get("message").and_then(xmlrpc_as_string),
+            message_id: map.get("message_id").and_then(xmlrpc_as_string),
+            next_url: map.get("next_url").and_then(xmlrpc_as_string),
+            next_method: map.get("next_method").and_then(xmlrpc_as_string),
+            agent_id: map.get("agent_id").and_then(xmlrpc_as_string),
+            session_id: map.get("session_id").and_then(xmlrpc_as_string),
+            secure_session_id: map.get("secure_session_id").and_then(xmlrpc_as_string),
+            circuit_code: map.get("circuit_code").and_then(xmlrpc_as_u32),
+            sim_ip: map.get("sim_ip").and_then(xmlrpc_as_string),
+            sim_port: map.get("sim_port").and_then(xmlrpc_as_u16),
+            region_x: map.get("region_x").and_then(xmlrpc_as_u32),
+            region_y: map.get("region_y").and_then(xmlrpc_as_u32),
+            seed_capability: map.get("seed_capability").and_then(xmlrpc_as_string),
+            start_location: map.get("start_location").and_then(xmlrpc_as_string),
+            look_at: map.get("look_at").and_then(xmlrpc_as_string),
+            home: map.get("home").and_then(xmlrpc_as_string),
+            motd: map.get("motd").and_then(xmlrpc_as_string),
+        })
+    }
+}
+
 fn llsd_string(key: &str, value: &str) -> String {
     format!(
         "<key>{}</key><string>{}</string>",
@@ -168,6 +280,38 @@ fn llsd_string(key: &str, value: &str) -> String {
 
 fn llsd_boolean(key: &str, value: bool) -> String {
     format!("<key>{}</key><boolean>{}</boolean>", escape_xml(key), value)
+}
+
+fn xmlrpc_member_string(xml: &mut String, name: &str, value: &str) {
+    xml.push_str("<member>");
+    xml.push_str(&format!("<name>{}</name>", escape_xml(name)));
+    xml.push_str(&format!(
+        "<value><string>{}</string></value>",
+        escape_xml(value)
+    ));
+    xml.push_str("</member>");
+}
+
+fn xmlrpc_member_bool(xml: &mut String, name: &str, value: bool) {
+    let xmlrpc_bool = if value { "1" } else { "0" };
+    xml.push_str("<member>");
+    xml.push_str(&format!("<name>{}</name>", escape_xml(name)));
+    xml.push_str(&format!("<value><boolean>{xmlrpc_bool}</boolean></value>"));
+    xml.push_str("</member>");
+}
+
+fn xmlrpc_member_array_of_strings(xml: &mut String, name: &str, values: &[String]) {
+    xml.push_str("<member>");
+    xml.push_str(&format!("<name>{}</name>", escape_xml(name)));
+    xml.push_str("<value><array><data>");
+    for value in values {
+        xml.push_str(&format!(
+            "<value><string>{}</string></value>",
+            escape_xml(value)
+        ));
+    }
+    xml.push_str("</data></array></value>");
+    xml.push_str("</member>");
 }
 
 fn split_legacy_name(username: &str) -> Option<(String, String)> {
@@ -199,6 +343,129 @@ fn normalize_legacy_passwd(passwd: &str) -> String {
 
     let digest = md5::compute(passwd.as_bytes());
     format!("$1${digest:x}")
+}
+
+#[derive(Debug, Clone)]
+enum XmlRpcValue {
+    String(String),
+    Int(i64),
+    Bool(bool),
+    Struct(HashMap<String, XmlRpcValue>),
+    Array(Vec<XmlRpcValue>),
+}
+
+fn first_child_with_tag<'a, 'i>(node: Node<'a, 'i>, tag: &str) -> Option<Node<'a, 'i>> {
+    node.children()
+        .find(|child| child.is_element() && child.has_tag_name(tag))
+}
+
+fn parse_xmlrpc_value(value_node: Node<'_, '_>) -> Result<XmlRpcValue, CodecError> {
+    let typed_child = value_node.children().find(|child| child.is_element());
+    let Some(typed_child) = typed_child else {
+        let text = value_node
+            .text()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        return Ok(XmlRpcValue::String(text));
+    };
+
+    match typed_child.tag_name().name() {
+        "string" => Ok(XmlRpcValue::String(
+            typed_child.text().unwrap_or_default().to_string(),
+        )),
+        "int" | "i4" => {
+            let parsed = typed_child
+                .text()
+                .unwrap_or_default()
+                .trim()
+                .parse::<i64>()
+                .map_err(|err| CodecError::Deserialize(err.to_string()))?;
+            Ok(XmlRpcValue::Int(parsed))
+        }
+        "boolean" => {
+            let bool_text = typed_child.text().unwrap_or_default().trim();
+            let parsed = matches!(bool_text, "1" | "true" | "TRUE");
+            Ok(XmlRpcValue::Bool(parsed))
+        }
+        "double" => Ok(XmlRpcValue::String(
+            typed_child.text().unwrap_or_default().to_string(),
+        )),
+        "struct" => {
+            let mut map = HashMap::new();
+            for member in typed_child.children().filter(|child| child.has_tag_name("member")) {
+                let name = first_child_with_tag(member, "name")
+                    .and_then(|name_node| name_node.text())
+                    .ok_or_else(|| {
+                        CodecError::Deserialize(String::from(
+                            "xml-rpc struct member missing name text",
+                        ))
+                    })?
+                    .to_string();
+                let child_value = first_child_with_tag(member, "value").ok_or_else(|| {
+                    CodecError::Deserialize(String::from("xml-rpc struct member missing value"))
+                })?;
+                let parsed_value = parse_xmlrpc_value(child_value)?;
+                map.insert(name, parsed_value);
+            }
+            Ok(XmlRpcValue::Struct(map))
+        }
+        "array" => {
+            let data_node = first_child_with_tag(typed_child, "data").ok_or_else(|| {
+                CodecError::Deserialize(String::from("xml-rpc array missing data node"))
+            })?;
+            let mut values = Vec::new();
+            for child_value in data_node.children().filter(|child| child.has_tag_name("value")) {
+                values.push(parse_xmlrpc_value(child_value)?);
+            }
+            Ok(XmlRpcValue::Array(values))
+        }
+        other => Err(CodecError::Deserialize(format!(
+            "unsupported xml-rpc value type: {other}"
+        ))),
+    }
+}
+
+fn xmlrpc_as_string(value: &XmlRpcValue) -> Option<String> {
+    match value {
+        XmlRpcValue::String(text) => Some(text.clone()),
+        XmlRpcValue::Int(value) => Some(value.to_string()),
+        XmlRpcValue::Bool(value) => Some(value.to_string()),
+        XmlRpcValue::Struct(_) => None,
+        XmlRpcValue::Array(values) => Some(
+            values
+                .iter()
+                .filter_map(xmlrpc_as_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    }
+}
+
+fn xmlrpc_as_bool(value: &XmlRpcValue) -> Option<bool> {
+    match value {
+        XmlRpcValue::Bool(value) => Some(*value),
+        XmlRpcValue::Int(value) => Some(*value != 0),
+        XmlRpcValue::String(text) => match text.to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        XmlRpcValue::Struct(_) | XmlRpcValue::Array(_) => None,
+    }
+}
+
+fn xmlrpc_as_u32(value: &XmlRpcValue) -> Option<u32> {
+    match value {
+        XmlRpcValue::Int(value) => u32::try_from(*value).ok(),
+        XmlRpcValue::String(text) => text.parse::<u32>().ok(),
+        XmlRpcValue::Bool(value) => Some(if *value { 1 } else { 0 }),
+        XmlRpcValue::Struct(_) | XmlRpcValue::Array(_) => None,
+    }
+}
+
+fn xmlrpc_as_u16(value: &XmlRpcValue) -> Option<u16> {
+    xmlrpc_as_u32(value).and_then(|value| u16::try_from(value).ok())
 }
 
 fn escape_xml(text: &str) -> String {
@@ -1212,6 +1479,59 @@ mod tests {
         assert_eq!(decoded.circuit_code, Some(4242));
     }
 
+    #[test]
+    fn xmlrpc_codec_encodes_method_call_request() {
+        let codec = XmlRpcLoginCodec;
+        let request = SecondLifeAdapter.shape_login_request(&make_intent(true));
+        let encoded = String::from_utf8(
+            codec
+                .encode_request(&request)
+                .expect("xml-rpc encode should succeed"),
+        )
+        .expect("valid UTF-8");
+
+        assert!(encoded.contains("<methodCall>"));
+        assert!(encoded.contains("<methodName>login_to_simulator</methodName>"));
+        assert!(encoded.contains("<name>passwd</name>"));
+        assert!(encoded.contains("$1$5ebe2294ecd0e0f08eab7690d2a6ee69"));
+        assert!(encoded.contains("<name>options</name>"));
+    }
+
+    #[test]
+    fn xmlrpc_codec_decodes_login_response() {
+        let codec = XmlRpcLoginCodec;
+        let body = br#"<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value>
+        <struct>
+          <member><name>login</name><value><boolean>1</boolean></value></member>
+          <member><name>reason</name><value><string>connect</string></value></member>
+          <member><name>agent_id</name><value><string>abc</string></value></member>
+          <member><name>session_id</name><value><string>def</string></value></member>
+          <member><name>secure_session_id</name><value><string>ghi</string></value></member>
+          <member><name>circuit_code</name><value><int>1</int></value></member>
+          <member><name>sim_ip</name><value><string>127.0.0.1</string></value></member>
+          <member><name>sim_port</name><value><int>13000</int></value></member>
+          <member><name>region_x</name><value><int>1000</int></value></member>
+          <member><name>region_y</name><value><int>1000</int></value></member>
+          <member><name>seed_capability</name><value><string>https://seed</string></value></member>
+        </struct>
+      </value>
+    </param>
+  </params>
+</methodResponse>"#;
+
+        let decoded = codec
+            .decode_response(body)
+            .expect("xml-rpc decode should succeed");
+        assert_eq!(decoded.login, Some(true));
+        assert_eq!(decoded.reason.as_deref(), Some("connect"));
+        assert_eq!(decoded.agent_id.as_deref(), Some("abc"));
+        assert_eq!(decoded.circuit_code, Some(1));
+    }
+
     #[tokio::test]
     async fn login_with_json_format_uses_json_codec() {
         let server = MockServer::start().await;
@@ -1282,6 +1602,58 @@ mod tests {
             connect_timeout: Duration::from_secs(5),
             wire_format: LoginWireFormat::Llsd,
             ..Default::default()
+        });
+        let adapter = SecondLifeAdapter;
+
+        connection.connect().await.expect("connect should succeed");
+        let result = connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login succeeds");
+
+        match result {
+            GridLoginResult::Success(_) => {}
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_with_xmlrpc_format_uses_xmlrpc_codec() {
+        let server = MockServer::start().await;
+        let response = r#"<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value>
+        <struct>
+          <member><name>login</name><value><boolean>1</boolean></value></member>
+          <member><name>reason</name><value><string>connect</string></value></member>
+          <member><name>agent_id</name><value><string>abc</string></value></member>
+          <member><name>session_id</name><value><string>def</string></value></member>
+          <member><name>secure_session_id</name><value><string>ghi</string></value></member>
+          <member><name>circuit_code</name><value><int>1</int></value></member>
+          <member><name>sim_ip</name><value><string>127.0.0.1</string></value></member>
+          <member><name>sim_port</name><value><int>123</int></value></member>
+          <member><name>region_x</name><value><int>1</int></value></member>
+          <member><name>region_y</name><value><int>1</int></value></member>
+          <member><name>seed_capability</name><value><string>https://seed</string></value></member>
+        </struct>
+      </value>
+    </param>
+  </params>
+</methodResponse>"#;
+
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .and(header("content-type", "text/xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(response))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            wire_format: LoginWireFormat::XmlRpc,
         });
         let adapter = SecondLifeAdapter;
 

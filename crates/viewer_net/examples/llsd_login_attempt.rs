@@ -8,7 +8,7 @@ use viewer_net::{Connection, ConnectionConfig, LoginWireFormat};
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
-        eprintln!("LLSD login attempt failed: {err}");
+        eprintln!("Login attempt failed: {err}");
         std::process::exit(1);
     }
 }
@@ -25,6 +25,7 @@ async fn run() -> Result<(), String> {
     let read_critical = parse_bool_env("VIEWER_LOGIN_READ_CRITICAL", true);
     let connect_timeout_secs = parse_u64_env("VIEWER_LOGIN_TIMEOUT_SECS", 15);
     let mfa_token = std::env::var("VIEWER_LOGIN_MFA_TOKEN").ok();
+    let wire_format = parse_wire_format_env("VIEWER_LOGIN_WIRE_FORMAT", LoginWireFormat::Llsd);
 
     let intent = LoginIntent {
         username,
@@ -38,7 +39,7 @@ async fn run() -> Result<(), String> {
     let mut connection = Connection::new(ConnectionConfig {
         endpoint,
         connect_timeout: Duration::from_secs(connect_timeout_secs),
-        wire_format: LoginWireFormat::Llsd,
+        wire_format,
     });
     let adapter = SecondLifeAdapter;
 
@@ -82,6 +83,18 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn parse_wire_format_env(name: &str, default: LoginWireFormat) -> LoginWireFormat {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "json" => LoginWireFormat::Json,
+            "llsd" => LoginWireFormat::Llsd,
+            "xmlrpc" | "xml-rpc" => LoginWireFormat::XmlRpc,
+            _ => default,
+        },
+        Err(_) => default,
+    }
 }
 
 fn parse_start_location(value: &str) -> StartLocationIntent {

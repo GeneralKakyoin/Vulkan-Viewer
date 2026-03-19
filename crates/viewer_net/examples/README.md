@@ -1,7 +1,7 @@
-# Manual LLSD Login Attempt
+# Manual Login Attempt
 
 This example performs a controlled login attempt through `viewer_net` using:
-- `LoginWireFormat::Llsd`
+- `LoginWireFormat` selected via environment
 - `Connection::login_with_trace(...)`
 - `SecondLifeAdapter`
 
@@ -18,12 +18,14 @@ It is manual-only and requires environment variables. It does not store credenti
 - `VIEWER_LOGIN_READ_CRITICAL` (`true/false`, default: `true`)
 - `VIEWER_LOGIN_MFA_TOKEN`
 - `VIEWER_LOGIN_TIMEOUT_SECS` (default: `15`)
+- `VIEWER_LOGIN_WIRE_FORMAT` (`llsd` | `json` | `xmlrpc`, default: `llsd`)
 
 ## Run
 ```powershell
 $env:VIEWER_LOGIN_ENDPOINT="https://your-grid-login-endpoint"
 $env:VIEWER_LOGIN_USERNAME="your.username"
 $env:VIEWER_LOGIN_PASSWORD="your-password"
+$env:VIEWER_LOGIN_WIRE_FORMAT="xmlrpc"
 cargo run -p viewer_net --example llsd_login_attempt
 ```
 
