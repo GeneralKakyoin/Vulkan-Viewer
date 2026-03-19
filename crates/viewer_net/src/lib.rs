@@ -5,7 +5,7 @@ use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use viewer_grid::{
     GridAdapterError, GridLoginAdapter, GridLoginRequest, GridLoginResponse, GridLoginResult,
@@ -13,6 +13,7 @@ use viewer_grid::{
 };
 
 const MAX_LOGIN_REDIRECTS: usize = 4;
+const MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS: usize = 3;
 const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
@@ -735,6 +736,16 @@ pub struct EventQueueInspection {
     pub event_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQueueAttemptDiagnostic {
+    pub attempt: usize,
+    pub status: Option<u16>,
+    pub elapsed_ms: u128,
+    pub retryable: bool,
+    pub error_kind: String,
+    pub response_headers: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
     Disconnected,
@@ -765,6 +776,11 @@ pub enum ConnectionError {
     MissingSeedCapability,
     #[error("capability response decode error: {0}")]
     CapabilityDecode(String),
+    #[error("event queue one-shot failed after {attempts_len} attempts")]
+    EventQueueOneShotFailed {
+        attempts_len: usize,
+        attempts: Vec<EventQueueAttemptDiagnostic>,
+    },
 }
 
 /// Minimal networking boundary.
@@ -989,29 +1005,85 @@ impl Connection {
             .timeout(timeout)
             .build()?;
 
-        let request_body = llsd_event_queue_request(0, false);
-        let response = client
-            .post(event_queue_url)
-            .header(CONTENT_TYPE, "application/llsd+xml")
-            .body(request_body)
-            .send()
-            .await?;
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_ascii_lowercase());
-        let bytes = response.bytes().await?;
+        let mut attempts = Vec::new();
+        for attempt in 1..=MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
+            let request_body = llsd_event_queue_request(0, false);
+            let started = Instant::now();
+            let response = client
+                .post(event_queue_url)
+                .header(CONTENT_TYPE, "application/llsd+xml")
+                .body(request_body)
+                .send()
+                .await;
+            let elapsed_ms = started.elapsed().as_millis();
 
-        if !status.is_success() {
-            return Err(ConnectionError::HttpStatus {
-                status,
-                body: String::from_utf8_lossy(&bytes).to_string(),
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    let retryable = err.is_timeout() || err.is_connect() || err.is_request();
+                    attempts.push(EventQueueAttemptDiagnostic {
+                        attempt,
+                        status: None,
+                        elapsed_ms,
+                        retryable,
+                        error_kind: format!("transport:{err}"),
+                        response_headers: Vec::new(),
+                    });
+                    if retryable && attempt < MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
+                        continue;
+                    }
+                    return Err(ConnectionError::EventQueueOneShotFailed {
+                        attempts_len: attempts.len(),
+                        attempts,
+                    });
+                }
+            };
+
+            let status = response.status();
+            let headers = response
+                .headers()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.to_ascii_lowercase());
+            let bytes = response.bytes().await?;
+
+            if status.is_success() {
+                return parse_event_queue_once_response(&bytes, content_type.as_deref());
+            }
+
+            let body = String::from_utf8_lossy(&bytes).to_string();
+            let retryable = is_retryable_event_queue_http_failure(status, &body);
+            attempts.push(EventQueueAttemptDiagnostic {
+                attempt,
+                status: Some(status.as_u16()),
+                elapsed_ms,
+                retryable,
+                error_kind: format!("http:{status}"),
+                response_headers: headers,
+            });
+            if retryable && attempt < MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
+                continue;
+            }
+            return Err(ConnectionError::EventQueueOneShotFailed {
+                attempts_len: attempts.len(),
+                attempts,
             });
         }
 
-        parse_event_queue_once_response(&bytes, content_type.as_deref())
+        Err(ConnectionError::EventQueueOneShotFailed {
+            attempts_len: attempts.len(),
+            attempts,
+        })
     }
 
     async fn http_transport_login(
@@ -1069,6 +1141,17 @@ fn llsd_event_queue_request(ack: u64, done: bool) -> String {
     format!(
         "<llsd><map><key>ack</key><integer>{ack}</integer><key>done</key><boolean>{done_str}</boolean></map></llsd>"
     )
+}
+
+fn is_retryable_event_queue_http_failure(status: StatusCode, body: &str) -> bool {
+    if status.is_server_error() {
+        return true;
+    }
+
+    let body_lower = body.to_ascii_lowercase();
+    body_lower.contains("proxy error")
+        || body_lower.contains("upstream")
+        || body_lower.contains("error reading from remote server")
 }
 
 fn parse_seed_capability_map(
@@ -2177,5 +2260,76 @@ mod tests {
         assert!(inspection.has_events_array);
         assert!(inspection.has_id);
         assert_eq!(inspection.event_count, 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_event_queue_once_does_not_retry_non_retryable_http_failure() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/eventqueue"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(1),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let err = connection
+            .fetch_event_queue_once(&format!("{}/eventqueue", server.uri()))
+            .await
+            .expect_err("event queue should fail");
+        match err {
+            ConnectionError::EventQueueOneShotFailed { attempts_len, attempts } => {
+                assert_eq!(attempts_len, 1);
+                assert_eq!(attempts.len(), 1);
+                assert_eq!(attempts[0].status, Some(400));
+                assert!(!attempts[0].retryable);
+            }
+            other => panic!("expected EventQueueOneShotFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_event_queue_once_retries_up_to_bounded_limit() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/eventqueue"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_string("Proxy Error: Error reading from remote server"),
+            )
+            .expect(MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS as u64)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(1),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let err = connection
+            .fetch_event_queue_once(&format!("{}/eventqueue", server.uri()))
+            .await
+            .expect_err("event queue should fail after retries");
+        match err {
+            ConnectionError::EventQueueOneShotFailed { attempts_len, attempts } => {
+                assert_eq!(attempts_len, MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS);
+                assert_eq!(attempts.len(), MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS);
+                assert!(attempts.iter().all(|attempt| attempt.retryable));
+                assert!(attempts.iter().all(|attempt| attempt.status == Some(500)));
+            }
+            other => panic!("expected EventQueueOneShotFailed, got {other:?}"),
+        }
     }
 }

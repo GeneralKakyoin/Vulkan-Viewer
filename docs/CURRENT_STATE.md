@@ -57,6 +57,7 @@ Login payload compatibility is no longer the primary blocker. The immediate bloc
 
 Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now reaches the service path but currently returns upstream proxy/server failure in live conditions (no event payload yet).
+- EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 
 ---
 

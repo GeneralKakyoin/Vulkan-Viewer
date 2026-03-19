@@ -3,7 +3,7 @@ use std::time::Duration;
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
 };
-use viewer_net::{Connection, ConnectionConfig, LoginWireFormat};
+use viewer_net::{Connection, ConnectionConfig, ConnectionError, LoginWireFormat};
 
 #[tokio::main]
 async fn main() {
@@ -66,16 +66,38 @@ async fn run() -> Result<(), String> {
                 }
                 if inspect_event_queue_once {
                     if let Some(event_queue_url) = caps.entries.get("EventQueueGet") {
-                        let inspection = connection
-                            .fetch_event_queue_once(event_queue_url)
-                            .await
-                            .map_err(|err| format!("event queue one-shot fetch failed: {err}"))?;
-                        println!(
-                            "EventQueueGet one-shot: has_events={}, has_id={}, event_count={}",
-                            inspection.has_events_array, inspection.has_id, inspection.event_count
-                        );
-                        for event_name in &inspection.event_names {
-                            println!("Event: {event_name}");
+                        match connection.fetch_event_queue_once(event_queue_url).await {
+                            Ok(inspection) => {
+                                println!(
+                                    "EventQueueGet one-shot: has_events={}, has_id={}, event_count={}",
+                                    inspection.has_events_array,
+                                    inspection.has_id,
+                                    inspection.event_count
+                                );
+                                for event_name in &inspection.event_names {
+                                    println!("Event: {event_name}");
+                                }
+                            }
+                            Err(ConnectionError::EventQueueOneShotFailed { attempts, .. }) => {
+                                println!("EventQueueGet one-shot failed after {} attempts", attempts.len());
+                                for attempt in &attempts {
+                                    println!(
+                                        "Attempt {}: status={:?}, elapsed_ms={}, retryable={}, error_kind={}",
+                                        attempt.attempt,
+                                        attempt.status,
+                                        attempt.elapsed_ms,
+                                        attempt.retryable,
+                                        attempt.error_kind
+                                    );
+                                    for (name, value) in &attempt.response_headers {
+                                        println!("  Header: {name}={value}");
+                                    }
+                                }
+                                return Err(String::from("event queue one-shot fetch failed"));
+                            }
+                            Err(err) => {
+                                return Err(format!("event queue one-shot fetch failed: {err}"));
+                            }
                         }
                     } else {
                         println!("EventQueueGet capability not present in seed map");

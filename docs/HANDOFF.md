@@ -9,6 +9,13 @@
 - Added one-shot EventQueueGet inspection path (no polling loop) with minimal top-level diagnostics and event-name extraction
 - Corrected EventQueueGet one-shot timeout behavior for long-held responses
 - Live behavior shifted from transport send failure to upstream HTTP proxy/server error response (no event payload yet)
+- Added bounded one-shot EventQueueGet retry policy (3 attempts, retryable-only 5xx/transport cases)
+- Added per-attempt diagnostics for EventQueueGet one-shot:
+  - status (if present)
+  - elapsed time
+  - retryable classification
+  - response headers when available
+- Latest live run shows mixed retryable failures across attempts (HTTP 500 proxy-style and transport send) and still no parseable event names
 - Achieved successful real Second Life login through the live endpoint
 - Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
 - Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
