@@ -13,6 +13,12 @@ use viewer_grid::{
 };
 
 const MAX_LOGIN_REDIRECTS: usize = 4;
+const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
+    "EventQueueGet",
+    "SimulatorFeatures",
+    "MapLayer",
+    "ViewerAsset",
+];
 
 pub trait LoginCodec {
     fn content_type(&self) -> &str;
@@ -932,7 +938,13 @@ impl Connection {
             .timeout(self.config.connect_timeout)
             .build()?;
 
-        let response = client.get(seed_url).send().await?;
+        let request_body = llsd_string_array(DEFAULT_SEED_CAPABILITY_REQUEST);
+        let response = client
+            .post(seed_url)
+            .header(CONTENT_TYPE, "application/llsd+xml")
+            .body(request_body)
+            .send()
+            .await?;
         let status = response.status();
         let content_type = response
             .headers()
@@ -990,6 +1002,15 @@ impl Connection {
             seed_capability: Some(bootstrap.seed_capability.clone()),
         });
     }
+}
+
+fn llsd_string_array(items: &[&str]) -> String {
+    let mut xml = String::from("<llsd><array>");
+    for item in items {
+        xml.push_str(&format!("<string>{}</string>", escape_xml(item)));
+    }
+    xml.push_str("</array></llsd>");
+    xml
 }
 
 fn parse_seed_capability_map(
@@ -1147,7 +1168,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use viewer_grid::{GridLoginResult, SecondLifeAdapter, StartLocation, StartLocationIntent};
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_intent(agree_to_tos: bool) -> LoginIntent {
@@ -1855,8 +1876,11 @@ mod tests {
             <key>MapLayer</key><string>https://cap.example/map</string>
         </map></llsd>"#;
 
-        Mock::given(method("GET"))
+        Mock::given(method("POST"))
             .and(path("/seed"))
+            .and(header("content-type", "application/llsd+xml"))
+            .and(body_string_contains("<llsd><array>"))
+            .and(body_string_contains("<string>EventQueueGet</string>"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/llsd+xml")
