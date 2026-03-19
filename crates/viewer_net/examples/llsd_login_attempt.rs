@@ -28,6 +28,8 @@ async fn run() -> Result<(), String> {
     let wire_format = parse_wire_format_env("VIEWER_LOGIN_WIRE_FORMAT", LoginWireFormat::Llsd);
     let fetch_seed_caps = parse_bool_env("VIEWER_FETCH_SEED_CAPS", false);
     let inspect_event_queue_once = parse_bool_env("VIEWER_INSPECT_EVENT_QUEUE_ONCE", false);
+    let inspect_simulator_features_once =
+        parse_bool_env("VIEWER_INSPECT_SIMULATOR_FEATURES_ONCE", false);
 
     let intent = LoginIntent {
         username,
@@ -63,6 +65,25 @@ async fn run() -> Result<(), String> {
                 println!("Seed capability entries: {}", caps.entries.len());
                 for name in caps.entries.keys() {
                     println!("Capability: {name}");
+                }
+                if inspect_simulator_features_once {
+                    if let Some(sim_features_url) = caps.entries.get("SimulatorFeatures") {
+                        let inspection = connection
+                            .fetch_simulator_features_once(sim_features_url)
+                            .await
+                            .map_err(|err| format!("simulator features fetch failed: {err}"))?;
+                        println!(
+                            "SimulatorFeatures one-shot: keys={}, scalar_values={}, complex_values={}",
+                            inspection.top_level_keys.len(),
+                            inspection.scalar_values.len(),
+                            inspection.complex_value_types.len()
+                        );
+                        for key in &inspection.top_level_keys {
+                            println!("SimulatorFeatures key: {key}");
+                        }
+                    } else {
+                        println!("SimulatorFeatures capability not present in seed map");
+                    }
                 }
                 if inspect_event_queue_once {
                     if let Some(event_queue_url) = caps.entries.get("EventQueueGet") {

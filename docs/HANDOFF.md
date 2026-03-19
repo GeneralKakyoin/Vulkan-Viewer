@@ -16,6 +16,8 @@
   - retryable classification
   - response headers when available
 - Latest live run shows mixed retryable failures across attempts (HTTP 500 proxy-style and transport send) and still no parseable event names
+- Added one-shot SimulatorFeatures fetch/inspection path to continue bootstrap observation with minimal top-level diagnostics
+- Manual example now inspects SimulatorFeatures before EventQueueGet when both are enabled
 - Achieved successful real Second Life login through the live endpoint
 - Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
 - Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
@@ -43,6 +45,7 @@ This includes:
 - expand capability typing/interpretation boundary in `viewer_grid`
 - exercise seed capability fetch against live successful login state
 - continue one-shot EventQueueGet transport stabilization until first parseable event envelope is observed
+- use one-shot SimulatorFeatures inspection as parallel bootstrap evidence while EventQueueGet remains unstable
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

@@ -746,6 +746,13 @@ pub struct EventQueueAttemptDiagnostic {
     pub response_headers: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SimulatorFeaturesInspection {
+    pub top_level_keys: Vec<String>,
+    pub scalar_values: BTreeMap<String, String>,
+    pub complex_value_types: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
     Disconnected,
@@ -1086,6 +1093,37 @@ impl Connection {
         })
     }
 
+    pub async fn fetch_simulator_features_once(
+        &self,
+        simulator_features_url: &str,
+    ) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+
+        let response = client.get(simulator_features_url).send().await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+
+        parse_simulator_features_response(&bytes, content_type.as_deref())
+    }
+
     async fn http_transport_login(
         &self,
         request: &GridLoginRequest,
@@ -1293,6 +1331,123 @@ fn extract_llsd_event_messages(array_node: Node<'_, '_>, inspection: &mut EventQ
         }
     }
     count
+}
+
+fn parse_simulator_features_response(
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        return parse_simulator_features_from_json(&value);
+    }
+
+    parse_simulator_features_from_llsd_xml(body)
+}
+
+fn parse_simulator_features_from_json(
+    value: &Value,
+) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+    let Some(map) = value.as_object() else {
+        return Err(ConnectionError::CapabilityDecode(String::from(
+            "simulator features json response is not an object",
+        )));
+    };
+
+    let mut inspection = SimulatorFeaturesInspection::default();
+    for (key, raw) in map {
+        inspection.top_level_keys.push(key.clone());
+        match raw {
+            Value::String(text) => {
+                inspection.scalar_values.insert(key.clone(), text.clone());
+            }
+            Value::Number(num) => {
+                inspection
+                    .scalar_values
+                    .insert(key.clone(), num.to_string());
+            }
+            Value::Bool(flag) => {
+                inspection
+                    .scalar_values
+                    .insert(key.clone(), flag.to_string());
+            }
+            Value::Object(_) => {
+                inspection
+                    .complex_value_types
+                    .insert(key.clone(), String::from("map"));
+            }
+            Value::Array(_) => {
+                inspection
+                    .complex_value_types
+                    .insert(key.clone(), String::from("array"));
+            }
+            Value::Null => {
+                inspection
+                    .complex_value_types
+                    .insert(key.clone(), String::from("null"));
+            }
+        }
+    }
+    inspection.top_level_keys.sort();
+    Ok(inspection)
+}
+
+fn parse_simulator_features_from_llsd_xml(
+    body: &[u8],
+) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let doc =
+        Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let map = doc
+        .descendants()
+        .find(|node| node.has_tag_name("map"))
+        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+
+    let mut inspection = SimulatorFeaturesInspection::default();
+    let children: Vec<Node<'_, '_>> = map.children().filter(|node| node.is_element()).collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let value_node = children[idx + 1];
+        if key_node.has_tag_name("key") {
+            let key_name = key_node.text().unwrap_or_default().to_string();
+            inspection.top_level_keys.push(key_name.clone());
+            if value_node.has_tag_name("string")
+                || value_node.has_tag_name("integer")
+                || value_node.has_tag_name("real")
+                || value_node.has_tag_name("boolean")
+                || value_node.has_tag_name("uri")
+                || value_node.has_tag_name("uuid")
+                || value_node.has_tag_name("date")
+            {
+                inspection.scalar_values.insert(
+                    key_name,
+                    value_node.text().unwrap_or_default().to_string(),
+                );
+            } else if value_node.has_tag_name("map") {
+                inspection
+                    .complex_value_types
+                    .insert(key_name, String::from("map"));
+            } else if value_node.has_tag_name("array") {
+                inspection
+                    .complex_value_types
+                    .insert(key_name, String::from("array"));
+            } else {
+                inspection
+                    .complex_value_types
+                    .insert(key_name, value_node.tag_name().name().to_string());
+            }
+        }
+        idx += 2;
+    }
+
+    inspection.top_level_keys.sort();
+    Ok(inspection)
 }
 
 fn normalize_login_response(raw: Value) -> Value {
@@ -2331,5 +2486,52 @@ mod tests {
             }
             other => panic!("expected EventQueueOneShotFailed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_simulator_features_once_reports_top_level_shape() {
+        let server = MockServer::start().await;
+        let simulator_features = r#"<llsd><map>
+            <key>MeshRezEnabled</key><boolean>true</boolean>
+            <key>PhysicsMaterialsEnabled</key><boolean>false</boolean>
+            <key>OpenSimExtras</key><map>
+                <key>foo</key><string>bar</string>
+            </map>
+            <key>Channel</key><string>Second Life Server</string>
+        </map></llsd>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/sim-features"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/llsd+xml")
+                    .set_body_string(simulator_features),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_simulator_features_once(&format!("{}/sim-features", server.uri()))
+            .await
+            .expect("simulator features fetch should succeed");
+
+        assert!(inspection.top_level_keys.iter().any(|k| k == "MeshRezEnabled"));
+        assert!(inspection.top_level_keys.iter().any(|k| k == "OpenSimExtras"));
+        assert_eq!(
+            inspection.scalar_values.get("Channel").map(String::as_str),
+            Some("Second Life Server")
+        );
+        assert_eq!(
+            inspection.complex_value_types.get("OpenSimExtras").map(String::as_str),
+            Some("map")
+        );
     }
 }
