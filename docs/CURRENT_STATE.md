@@ -72,6 +72,18 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `EnableSimulator` (low 151)
     - `AgentMovementComplete` (low 250)
   - keeps JSON/text matching only as compatibility fallback (no longer primary path)
+- receive-side diagnostics now include decode evidence details:
+  - decode source (`PacketMessageNumber`, `JsonField`, `TextScan`, `Unknown`)
+  - optional decoded packet message number for unknown packet-shaped traffic
+- handshake-stage confirmation was tightened:
+  - `AgentMovementComplete` stage advancement now requires packet-message decode evidence (not JSON/text fallback alone)
+- one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
+  - `Connection::probe_first_simulator_handshake_once(...)`
+  - manual example wiring added for live receive validation
+- live probe attempt now confirmed with same-socket transport:
+  - login and seed capability fetch still succeed
+  - both handshake sends report transport success
+  - no inbound handshake packet observed within timeout in current live conditions
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -94,7 +106,10 @@ Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
-- Current handshake blocker narrowed to deeper protocol payload fidelity: handshake message identity now uses typed UDP message-number decode, but block/field-level payload decoding is still not implemented.
+- Current handshake blocker narrowed to protocol payload fidelity on real simulator traffic:
+  - inbound classification path is now typed and diagnostics are stronger
+  - live same-socket probe still receives no inbound handshake packet
+  - most likely next gap is outbound packet fidelity (`UseCircuitCode`/`CompleteAgentMovement` wire shape) rather than receive bind/socket continuity
 
 ---
 
@@ -107,6 +122,7 @@ Current concrete blocker inside bootstrap:
 - stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
 - bind first-simulator handshake scaffold stages to minimal transport-side send/ack stubs in `viewer_net`
 - add bounded receive/ack classification for first-simulator handshake transport actions without starting world integration
+- improve outbound handshake packet fidelity toward real LLUDP message layout while preserving current scaffold boundaries
 - extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
@@ -117,7 +133,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**extend the typed receive decoder from handshake message-number classification into minimal block/field-level decode for `AgentMovementComplete`**
+**improve outbound first-simulator handshake packet wire fidelity so live inbound handshake responses can be observed, then continue typed inbound field-level decode**
 
 ---
 

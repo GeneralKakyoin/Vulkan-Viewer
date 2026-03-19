@@ -31,6 +31,12 @@ async fn run() -> Result<(), String> {
     let inspect_simulator_features_once =
         parse_bool_env("VIEWER_INSPECT_SIMULATOR_FEATURES_ONCE", false);
     let inspect_map_layer_once = parse_bool_env("VIEWER_INSPECT_MAP_LAYER_ONCE", false);
+    let inspect_first_sim_handshake_once =
+        parse_bool_env("VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE", false);
+    let first_sim_receive_bind = std::env::var("VIEWER_FIRST_SIM_RECEIVE_BIND")
+        .unwrap_or_else(|_| String::from("0.0.0.0:0"));
+    let first_sim_receive_timeout_secs =
+        parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS", 5);
 
     let intent = LoginIntent {
         username,
@@ -144,6 +150,14 @@ async fn run() -> Result<(), String> {
                         println!("EventQueueGet capability not present in seed map");
                     }
                 }
+                if inspect_first_sim_handshake_once {
+                    inspect_first_simulator_handshake_once(
+                        &mut connection,
+                        &first_sim_receive_bind,
+                        Duration::from_secs(first_sim_receive_timeout_secs),
+                    )
+                    .await?;
+                }
             }
             Ok(())
         }
@@ -208,4 +222,67 @@ fn result_kind(result: &GridLoginResult) -> &'static str {
         GridLoginResult::UpdateRequired { .. } => "update_required",
         GridLoginResult::Failed(_) => "failed",
     }
+}
+
+async fn inspect_first_simulator_handshake_once(
+    connection: &mut Connection,
+    receive_bind: &str,
+    receive_timeout: Duration,
+) -> Result<(), String> {
+    println!(
+        "First-simulator one-shot receive attempt: bind={}, timeout_secs={}",
+        receive_bind,
+        receive_timeout.as_secs()
+    );
+    match connection
+        .probe_first_simulator_handshake_once(receive_bind, receive_timeout)
+        .await
+    {
+        Ok(classification) => {
+            println!(
+                "First-simulator inbound classified: kind={:?}, source={:?}, signal={}, packet_message_number={:?}",
+                classification.kind,
+                classification.decode_source,
+                classification.signal,
+                classification.packet_message_number
+            );
+        }
+        Err(err) => {
+            println!("First-simulator one-shot receive failed: {err}");
+            println!("First-simulator receive error detail: {err:?}");
+        }
+    }
+
+    let send_diagnostics = connection.first_simulator_handshake_send_diagnostics();
+    println!(
+        "First-simulator send diagnostics entries: {}",
+        send_diagnostics.len()
+    );
+    for diag in send_diagnostics {
+        println!(
+            "Send diag: action={:?}, target={}, payload_len={}, elapsed_ms={}, success={}, error={:?}",
+            diag.action, diag.target, diag.payload_len, diag.elapsed_ms, diag.success, diag.error
+        );
+    }
+
+    let receive_diagnostics = connection.first_simulator_handshake_receive_diagnostics();
+    println!(
+        "First-simulator receive diagnostics entries: {}",
+        receive_diagnostics.len()
+    );
+    for diag in receive_diagnostics {
+        println!(
+            "Receive diag: kind={:?}, source={:?}, packet_message_number={:?}, payload_len={}, stage_before={:?}, stage_after={:?}, advanced_stage={}, signal={}",
+            diag.kind,
+            diag.decode_source,
+            diag.packet_message_number,
+            diag.payload_len,
+            diag.stage_before,
+            diag.stage_after,
+            diag.advanced_stage,
+            diag.signal
+        );
+    }
+
+    Ok(())
 }

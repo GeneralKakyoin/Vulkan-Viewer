@@ -107,6 +107,12 @@ Done when:
 - receive diagnostics can surface typed decode success/failure for handshake payload fields
 - out-of-order/irrelevant message handling remains stable with focused tests
 
+### T7.2 - Live handshake probe fidelity
+Done when:
+- first-simulator one-shot probe sends handshake messages and listens on the same socket/port
+- live manual probe outcome is captured with explicit diagnostics
+- if no inbound packets are observed, blocker is classified clearly (transport continuity vs outbound payload fidelity)
+
 ### T8 - First connected world slice
 Done when:
 - world-derived placeholder state can be rendered from live connection data

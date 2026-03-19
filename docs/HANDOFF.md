@@ -2,6 +2,30 @@
 
 ## Last Completed Work
 
+- Strengthened first-simulator receive-side protocol fidelity in `viewer_net`:
+  - added typed inbound decode evidence fields:
+    - decode source (`PacketMessageNumber`, `JsonField`, `TextScan`, `Unknown`)
+    - optional packet message number for packet-shaped traffic
+  - tightened handshake confirmation semantics:
+    - waiting-stage promotion to `AgentMovementComplete` now requires packet-message decode evidence
+    - JSON/text fallback detection remains diagnostic-only for movement completion
+  - added one-shot handshake probe transport path:
+    - `probe_first_simulator_handshake_once(bind, timeout)`
+    - sends `UseCircuitCode` and `CompleteAgentMovement` using one shared UDP socket
+    - waits for one inbound packet on the same socket and routes through typed receive classification
+  - expanded focused tests:
+    - decode source / packet number assertions
+    - JSON `AgentMovementComplete` no longer advances waiting stage
+    - same-socket probe send/receive flow coverage
+  - wired manual example for live probe:
+    - `VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE`
+    - `VIEWER_FIRST_SIM_RECEIVE_BIND`
+    - `VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS`
+  - live manual probe attempt result:
+    - real login succeeded
+    - seed capability fetch succeeded
+    - both handshake sends reported transport success
+    - no inbound handshake packet observed before timeout
 - Replaced heuristic-first receive classification with a minimal typed UDP decode path in `viewer_net`:
   - added LLUDP packet header/message-number decode for high/medium/low frequency forms
   - mapped handshake-relevant low-frequency message IDs from Firestorm template semantics:
@@ -128,6 +152,7 @@
 - Handshake transport binding for send actions is now in place; next risk is ack/receive-side classification and integration.
 - Receive-side handshake observation/classification is now in place; next risk is protocol-level fidelity (actual UDP packet decoding semantics).
 - Receive-side handshake identity classification now uses typed UDP message-number decoding; the next fidelity risk moved to block/field-level decode inside handshake messages.
+- Same-socket live probe removed local bind-continuity ambiguity; primary remaining risk is likely outbound handshake packet wire fidelity.
 
 ---
 
@@ -148,6 +173,7 @@ This includes:
 - add bounded ack/receive diagnostics and transition classification for first-simulator handshake actions
 - improve receive classification from heuristic signal matching to a minimal typed decoder aligned to real packet schema
 - extend typed decode from message identity to minimal block/field extraction for `AgentMovementComplete` while preserving current send/receive stage flow
+- improve outbound `UseCircuitCode`/`CompleteAgentMovement` packet wire fidelity to unlock first real inbound handshake packet observation
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

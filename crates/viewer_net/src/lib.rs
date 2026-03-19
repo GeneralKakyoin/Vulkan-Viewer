@@ -793,10 +793,20 @@ pub enum FirstSimulatorInboundMessageKind {
     Irrelevant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FirstSimulatorInboundDecodeSource {
+    PacketMessageNumber,
+    JsonField,
+    TextScan,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorInboundClassification {
     pub kind: FirstSimulatorInboundMessageKind,
     pub signal: String,
+    pub decode_source: FirstSimulatorInboundDecodeSource,
+    pub packet_message_number: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -807,6 +817,8 @@ pub struct FirstSimulatorHandshakeReceiveDiagnostic {
     pub stage_after: Option<FirstSimulatorHandshakeStage>,
     pub advanced_stage: bool,
     pub signal: String,
+    pub decode_source: FirstSimulatorInboundDecodeSource,
+    pub packet_message_number: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1279,6 +1291,7 @@ impl Connection {
         let mut advanced_stage = false;
 
         if classification.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete
+            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
             && stage_before == Some(FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete)
         {
             self.mark_first_simulator_agent_movement_complete_received()?;
@@ -1294,6 +1307,8 @@ impl Connection {
                 stage_after,
                 advanced_stage,
                 signal: classification.signal.clone(),
+                decode_source: classification.decode_source,
+                packet_message_number: classification.packet_message_number,
             });
 
         Ok(classification)
@@ -1316,6 +1331,139 @@ impl Connection {
         })?;
         let mut buf = vec![0u8; 2048];
 
+        let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
+        let (received_len, _) = match recv {
+            Ok(Ok(parts)) => parts,
+            Ok(Err(err)) => {
+                return Err(ConnectionError::FirstSimulatorReceiveFailed {
+                    bind: bind.to_string(),
+                    reason: err.to_string(),
+                })
+            }
+            Err(_) => {
+                return Err(ConnectionError::FirstSimulatorReceiveTimedOut {
+                    bind: bind.to_string(),
+                    timeout_ms: wait_timeout.as_millis(),
+                })
+            }
+        };
+
+        self.observe_first_simulator_inbound_payload(&buf[..received_len])
+    }
+
+    pub async fn probe_first_simulator_handshake_once(
+        &mut self,
+        bind: &str,
+        wait_timeout: Duration,
+    ) -> Result<FirstSimulatorInboundClassification, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        if self.first_simulator_handshake_state.is_none() {
+            self.begin_first_simulator_handshake_scaffold()?;
+        }
+
+        let socket = UdpSocket::bind(bind).await.map_err(|err| {
+            ConnectionError::InvalidFirstSimulatorReceiveBind {
+                bind: bind.to_string(),
+                reason: err.to_string(),
+            }
+        })?;
+
+        let current_stage = self
+            .first_simulator_handshake_state
+            .as_ref()
+            .map(|state| state.stage)
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+
+        if current_stage == FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady
+            || current_stage == FirstSimulatorHandshakeStage::FirstRegionTargetKnown
+        {
+            if current_stage == FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady {
+                self.advance_first_simulator_handshake_scaffold(
+                    FirstSimulatorHandshakeStage::FirstRegionTargetKnown,
+                )?;
+            }
+            let prerequisites = self
+                .first_simulator_handshake_state
+                .as_ref()
+                .expect("handshake state must be initialized")
+                .prerequisites
+                .clone();
+            let payload = encode_first_simulator_use_circuit_code_payload(&prerequisites)?;
+            self.send_first_simulator_handshake_datagram_with_socket(
+                FirstSimulatorHandshakeAction::UseCircuitCode,
+                &prerequisites.target,
+                &payload,
+                &socket,
+            )
+            .await?;
+            self.advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::UseCircuitCode,
+            )?;
+        }
+
+        let current_stage = self
+            .first_simulator_handshake_state
+            .as_ref()
+            .map(|state| state.stage)
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+
+        if current_stage == FirstSimulatorHandshakeStage::CompleteAgentMovement {
+            let prerequisites = self
+                .first_simulator_handshake_state
+                .as_ref()
+                .expect("handshake state must be initialized")
+                .prerequisites
+                .clone();
+            let payload = encode_first_simulator_complete_agent_movement_payload(&prerequisites)?;
+            self.send_first_simulator_handshake_datagram_with_socket(
+                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                &prerequisites.target,
+                &payload,
+                &socket,
+            )
+            .await?;
+            self.advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete,
+            )?;
+        } else if current_stage == FirstSimulatorHandshakeStage::UseCircuitCode {
+            self.advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::CompleteAgentMovement,
+            )?;
+            let prerequisites = self
+                .first_simulator_handshake_state
+                .as_ref()
+                .expect("handshake state must be initialized")
+                .prerequisites
+                .clone();
+            let payload = encode_first_simulator_complete_agent_movement_payload(&prerequisites)?;
+            self.send_first_simulator_handshake_datagram_with_socket(
+                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                &prerequisites.target,
+                &payload,
+                &socket,
+            )
+            .await?;
+            self.advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete,
+            )?;
+        }
+
+        let current_stage = self
+            .first_simulator_handshake_state
+            .as_ref()
+            .map(|state| state.stage)
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        if current_stage != FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete {
+            return Err(ConnectionError::InvalidFirstSimulatorHandshakeTransition {
+                from: current_stage,
+                to: FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete,
+            });
+        }
+
+        let mut buf = vec![0u8; 2048];
         let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
         let (received_len, _) = match recv {
             Ok(Ok(parts)) => parts,
@@ -1611,6 +1759,24 @@ impl Connection {
         target: &FirstSimulatorTarget,
         payload: &[u8],
     ) -> Result<(), ConnectionError> {
+        let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|err| {
+            ConnectionError::FirstSimulatorHandshakeSendFailed {
+                action,
+                target: format!("{}:{}", target.sim_ip, target.sim_port),
+                reason: err.to_string(),
+            }
+        })?;
+        self.send_first_simulator_handshake_datagram_with_socket(action, target, payload, &socket)
+            .await
+    }
+
+    async fn send_first_simulator_handshake_datagram_with_socket(
+        &mut self,
+        action: FirstSimulatorHandshakeAction,
+        target: &FirstSimulatorTarget,
+        payload: &[u8],
+        socket: &UdpSocket,
+    ) -> Result<(), ConnectionError> {
         let target_text = format!("{}:{}", target.sim_ip, target.sim_port);
         let socket_addr = match target_text.parse::<SocketAddr>() {
             Ok(addr) => addr,
@@ -1633,12 +1799,7 @@ impl Connection {
         };
 
         let started = Instant::now();
-        let send_result = async {
-            let socket = UdpSocket::bind("0.0.0.0:0").await?;
-            let sent = socket.send_to(payload, socket_addr).await?;
-            Ok::<usize, std::io::Error>(sent)
-        }
-        .await;
+        let send_result = socket.send_to(payload, socket_addr).await;
         let elapsed_ms = started.elapsed().as_millis();
 
         match send_result {
@@ -1784,18 +1945,24 @@ fn classify_first_simulator_inbound_from_packet(
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
                 signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
             })
         }
         num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::RegionHandshake,
                 signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
             })
         }
         num if num == lludp_low_frequency_message_number(LLUDP_ENABLE_SIMULATOR_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::EnableSimulator,
                 signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
             })
         }
         _ => None,
@@ -1820,24 +1987,33 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
         return FirstSimulatorInboundClassification {
             kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
             signal: String::from("text:agentmovementcomplete"),
+            decode_source: FirstSimulatorInboundDecodeSource::TextScan,
+            packet_message_number: None,
         };
     }
     if lowered.contains("regionhandshake") {
         return FirstSimulatorInboundClassification {
             kind: FirstSimulatorInboundMessageKind::RegionHandshake,
             signal: String::from("text:regionhandshake"),
+            decode_source: FirstSimulatorInboundDecodeSource::TextScan,
+            packet_message_number: None,
         };
     }
     if lowered.contains("enablesimulator") {
         return FirstSimulatorInboundClassification {
             kind: FirstSimulatorInboundMessageKind::EnableSimulator,
             signal: String::from("text:enablesimulator"),
+            decode_source: FirstSimulatorInboundDecodeSource::TextScan,
+            packet_message_number: None,
         };
     }
 
     FirstSimulatorInboundClassification {
         kind: FirstSimulatorInboundMessageKind::Irrelevant,
         signal: String::from("text:none"),
+        decode_source: FirstSimulatorInboundDecodeSource::Unknown,
+        packet_message_number: decode_first_simulator_packet_header(payload)
+            .map(|header| header.message_number),
     }
 }
 
@@ -1859,18 +2035,24 @@ fn classify_first_simulator_inbound_from_json(
             return Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
                 signal: format!("json:{candidate}"),
+                decode_source: FirstSimulatorInboundDecodeSource::JsonField,
+                packet_message_number: None,
             });
         }
         if lowered.contains("regionhandshake") {
             return Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::RegionHandshake,
                 signal: format!("json:{candidate}"),
+                decode_source: FirstSimulatorInboundDecodeSource::JsonField,
+                packet_message_number: None,
             });
         }
         if lowered.contains("enablesimulator") {
             return Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::EnableSimulator,
                 signal: format!("json:{candidate}"),
+                decode_source: FirstSimulatorInboundDecodeSource::JsonField,
+                packet_message_number: None,
             });
         }
     }
@@ -3667,14 +3849,29 @@ mod tests {
             FirstSimulatorInboundMessageKind::AgentMovementComplete
         );
         assert_eq!(movement.signal, "packet:0xffff00fa");
+        assert_eq!(
+            movement.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(movement.packet_message_number, Some(0xffff00fa));
 
         let region = classify_first_simulator_inbound_message(&make_low_frequency_packet(148));
         assert_eq!(region.kind, FirstSimulatorInboundMessageKind::RegionHandshake);
         assert_eq!(region.signal, "packet:0xffff0094");
+        assert_eq!(
+            region.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(region.packet_message_number, Some(0xffff0094));
 
         let enable = classify_first_simulator_inbound_message(&make_low_frequency_packet(151));
         assert_eq!(enable.kind, FirstSimulatorInboundMessageKind::EnableSimulator);
         assert_eq!(enable.signal, "packet:0xffff0097");
+        assert_eq!(
+            enable.decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(enable.packet_message_number, Some(0xffff0097));
 
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
@@ -3683,9 +3880,27 @@ mod tests {
             FirstSimulatorInboundMessageKind::AgentMovementComplete
         );
         assert_eq!(json_fallback.signal, "json:message:AgentMovementComplete");
+        assert_eq!(
+            json_fallback.decode_source,
+            FirstSimulatorInboundDecodeSource::JsonField
+        );
+        assert_eq!(json_fallback.packet_message_number, None);
 
         let irrelevant = classify_first_simulator_inbound_message(b"totally unrelated");
         assert_eq!(irrelevant.kind, FirstSimulatorInboundMessageKind::Irrelevant);
+        assert_eq!(
+            irrelevant.decode_source,
+            FirstSimulatorInboundDecodeSource::Unknown
+        );
+        assert!(irrelevant.packet_message_number.is_some());
+
+        let unknown_packet = classify_first_simulator_inbound_message(&make_low_frequency_packet(42));
+        assert_eq!(unknown_packet.kind, FirstSimulatorInboundMessageKind::Irrelevant);
+        assert_eq!(
+            unknown_packet.decode_source,
+            FirstSimulatorInboundDecodeSource::Unknown
+        );
+        assert_eq!(unknown_packet.packet_message_number, Some(0xffff002a));
     }
 
     #[tokio::test]
@@ -3764,6 +3979,11 @@ mod tests {
         let diagnostics = connection.first_simulator_handshake_receive_diagnostics();
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].advanced_stage);
+        assert_eq!(
+            diagnostics[0].decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(diagnostics[0].packet_message_number, Some(0xffff00fa));
     }
 
     #[tokio::test]
@@ -3815,6 +4035,88 @@ mod tests {
                 .expect("state should exist")
                 .stage,
             FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady
+        );
+        let diagnostics = connection.first_simulator_handshake_receive_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert!(!diagnostics[0].advanced_stage);
+    }
+
+    #[tokio::test]
+    async fn observe_json_agent_movement_complete_does_not_advance_waiting_stage() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener.local_addr().expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+        connection
+            .begin_first_simulator_handshake_scaffold()
+            .expect("scaffold should initialize");
+        connection
+            .send_first_simulator_use_circuit_code()
+            .await
+            .expect("use circuit code should succeed");
+        connection
+            .send_first_simulator_complete_agent_movement()
+            .await
+            .expect("complete movement send should succeed");
+
+        let mut buf = [0u8; 1024];
+        timeout(Duration::from_secs(1), listener.recv_from(&mut buf))
+            .await
+            .expect("first outgoing datagram should be present")
+            .expect("first outgoing datagram read should succeed");
+        timeout(Duration::from_secs(1), listener.recv_from(&mut buf))
+            .await
+            .expect("second outgoing datagram should be present")
+            .expect("second outgoing datagram read should succeed");
+
+        let classification = connection
+            .observe_first_simulator_inbound_payload(br#"{"message":"AgentMovementComplete"}"#)
+            .expect("inbound payload observation should succeed");
+        assert_eq!(
+            classification.kind,
+            FirstSimulatorInboundMessageKind::AgentMovementComplete
+        );
+        assert_eq!(
+            classification.decode_source,
+            FirstSimulatorInboundDecodeSource::JsonField
+        );
+        assert_eq!(
+            connection
+                .first_simulator_handshake_state()
+                .expect("state should exist")
+                .stage,
+            FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete
         );
         let diagnostics = connection.first_simulator_handshake_receive_diagnostics();
         assert_eq!(diagnostics.len(), 1);
@@ -3889,5 +4191,93 @@ mod tests {
             FirstSimulatorInboundMessageKind::RegionHandshake
         );
         assert!(!diagnostics[0].advanced_stage);
+        assert_eq!(
+            diagnostics[0].decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
+        assert_eq!(diagnostics[0].packet_message_number, Some(0xffff0094));
+    }
+
+    #[tokio::test]
+    async fn probe_first_simulator_handshake_once_sends_and_receives_on_same_socket() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener.local_addr().expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, first_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let (_, second_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            assert_eq!(first_sender, second_sender);
+            let _ = listener
+                .send_to(&make_low_frequency_packet(250), second_sender)
+                .await;
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let classification = connection
+            .probe_first_simulator_handshake_once("127.0.0.1:0", Duration::from_secs(1))
+            .await
+            .expect("probe should receive inbound packet");
+        assert_eq!(
+            classification.kind,
+            FirstSimulatorInboundMessageKind::AgentMovementComplete
+        );
+        assert_eq!(
+            connection
+                .first_simulator_handshake_state()
+                .expect("state should exist")
+                .stage,
+            FirstSimulatorHandshakeStage::AgentMovementComplete
+        );
+
+        let send_diagnostics = connection.first_simulator_handshake_send_diagnostics();
+        assert_eq!(send_diagnostics.len(), 2);
+        assert!(send_diagnostics.iter().all(|diag| diag.success));
+
+        let receive_diagnostics = connection.first_simulator_handshake_receive_diagnostics();
+        assert_eq!(receive_diagnostics.len(), 1);
+        assert!(receive_diagnostics[0].advanced_stage);
+        assert_eq!(
+            receive_diagnostics[0].decode_source,
+            FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        );
     }
 }

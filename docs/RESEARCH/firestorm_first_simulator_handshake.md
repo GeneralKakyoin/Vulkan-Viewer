@@ -99,6 +99,9 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
 - Exact minimum retry policy needed for first-region `UseCircuitCode`/movement completion in this rewrite.
 - How much of Firestorm's neighboring-region setup should be deferred until after first-region success is proven.
 - Whether additional startup messages are mandatory for a minimal first connected slice versus optional for richer behavior.
+- Real-live acceptance threshold for outbound handshake packet payload fidelity in this rewrite:
+  - same-socket one-shot probe now removes local receive-port continuity ambiguity,
+  - but current transport payloads still produce no observed inbound handshake response in live probing.
 
 ## Practical Next Step (Non-implementation)
 Document a minimal first-region handshake state chart for this codebase:
