@@ -4,6 +4,7 @@
 Phase C - Post-login bootstrap
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
+Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
 
 ---
 
@@ -49,6 +50,7 @@ Real login compatibility is now proven against the live Second Life endpoint. Th
 
 ### Research / Continuity
 - Firestorm login flow documented
+- Firestorm first-simulator handshake sequence documented
 - continuity-stack docs established
 - scope model established
 - workflow discipline defined in AGENTS
@@ -67,6 +69,7 @@ Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
+- Next phase blocker is handshake readiness clarity: first-region simulator bring-up ordering and prerequisites are now researched but not yet translated into typed viewer-side handshake stages.
 
 ---
 
@@ -77,6 +80,7 @@ Current concrete blocker inside bootstrap:
 - fetch and inspect early bootstrap capability responses from live login state
 - stabilize one-shot EventQueueGet transport behavior and capture first event envelope
 - stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
+- translate documented first-simulator handshake sequence into a minimal Rust-facing state model (documentation/planning first)
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -86,7 +90,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**begin seed capability bootstrap using already-proven live login results**
+**scope and document minimal first-simulator handshake stages from already-proven login/bootstrap state**
 
 ---
 

@@ -64,11 +64,24 @@ Done when:
 - `docs/MASTER_PLAN.md` updated if project priority/milestone status changes
 - relevant `docs/RESEARCH/*` updated when protocol understanding changes
 
+### T5 - First-simulator handshake research kickoff
+Why it matters:
+Bootstrap inspection is now characterized enough that the next risk is handshake sequencing ambiguity.
+
+Dependencies:
+- bootstrap capability findings
+- successful real login/session bootstrap
+
+Done when:
+- first-region handshake ordering is documented from Firestorm behavior reference
+- dependencies between seed grant, circuit setup, and movement completion are explicit
+- crate-boundary ownership is mapped without starting simulator transport implementation
+
 ---
 
 ## Next Tasks After Bootstrap Credibility
 
-### T5 - Event queue startup
+### T6 - Event queue startup
 Done when:
 - minimal `EventQueueGet` polling works
 - early live events can be received and classified
@@ -78,12 +91,12 @@ Done when:
 - stabilize one-shot `EventQueueGet` against current retryable upstream/proxy failures
 - treat `MapLayer` HTTP one-shot as classified blocker (likely legacy/non-HTTP path) unless new protocol evidence emerges
 
-### T6 - Simulator handshake preparation
+### T7 - Simulator handshake preparation
 Done when:
 - simulator handshake requirements are documented
 - handshake work is scoped without collapsing crate boundaries
 
-### T7 - First connected world slice
+### T8 - First connected world slice
 Done when:
 - world-derived placeholder state can be rendered from live connection data
 

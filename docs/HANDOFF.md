@@ -42,6 +42,13 @@
   - MapLayer: still 405, now explicitly classified as likely non-HTTP/legacy map path
   - SimulatorFeatures: still HTTP 503 Service Unavailable
   - EventQueueGet: still bounded retry failures (HTTP 500 proxy-style + occasional transport send failure)
+- Added dedicated Firestorm first-simulator handshake research note:
+  - `docs/RESEARCH/firestorm_first_simulator_handshake.md`
+  - captures ordered bring-up sequence and dependencies for:
+    - seed capability gating
+    - `UseCircuitCode` send/ack phase
+    - `CompleteAgentMovement` and `AgentMovementComplete` completion phase
+    - early `EnableSimulator` / region-seed update interactions
 - Achieved successful real Second Life login through the live endpoint
 - Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
 - Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
@@ -59,6 +66,7 @@
 - The highest-risk unknown is no longer login acceptance; it is post-login bootstrap sequencing and capability handling
 - Seed capability startup is now the critical path before any simulator/world integration work
 - MapLayer should no longer be treated as the best HTTP one-shot bootstrap candidate; immediate HTTP bootstrap evidence should prioritize SimulatorFeatures and EventQueueGet.
+- Bootstrap capability probing is now characterized enough to begin handshake-sequencing planning without starting simulator transport implementation.
 
 ---
 
@@ -74,6 +82,7 @@ This includes:
 - continue one-shot EventQueueGet transport stabilization until first parseable event envelope is observed
 - use one-shot SimulatorFeatures inspection as parallel bootstrap evidence while EventQueueGet remains unstable
 - keep MapLayer classified as likely legacy/unsupported for HTTP one-shot inspection unless new evidence suggests otherwise
+- derive minimal Rust-facing handshake stage model from documented Firestorm first-region sequence (documentation/planning only)
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 
@@ -102,6 +111,7 @@ Do not:
 - `crates/viewer_net/examples/llsd_login_attempt.rs`
 - `crates/viewer_net/examples/README.md`
 - `docs/RESEARCH/firestorm_login_flow.md`
+- `docs/RESEARCH/firestorm_first_simulator_handshake.md`
 - new capability/bootstrap research notes in `docs/RESEARCH/*`
 
 ---
