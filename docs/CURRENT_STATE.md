@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase D - Early simulator traffic observation slice (post-bootstrap boundary)
+Phase E - First live visual slice (diagnostic bridge)
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -19,6 +19,13 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 - world-axis marker
 - depth buffer
 - corrected controls
+- viewer_app now supports a bounded live visual bridge via sanitized snapshot ingest:
+  - loads `LiveVisualSnapshot` JSON (default `live_visual_snapshot.json`, overridable by `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH`)
+  - debug overlay displays live-derived connection/handshake/traffic summary fields
+  - sandbox cube color now reflects live state:
+    - default/offline: red
+    - logged-in but pre-AMC: yellow
+    - AMC reached: green
 
 ### Architecture
 - clear crate boundaries
@@ -155,6 +162,10 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - policy probe behavior is covered for:
     - post-AMC timeout override
     - optional early-stop on first observed region-transition control packet
+- sanitized live visual snapshot production now exists in the manual `viewer_net` path:
+  - `llsd_login_attempt` writes `LiveVisualSnapshot` JSON after successful login/probe
+  - output path: `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH` or default `live_visual_snapshot.json`
+  - snapshot excludes sensitive session IDs/seed URLs
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -184,7 +195,7 @@ Current concrete blocker inside bootstrap:
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
   - early simulator traffic consolidation remains stable
   - hard stop remains: no broad object/world-state decoding in current scope
-  - next gap is live-observation opportunity for region-transition-adjacent medium signals (for example `CrossedRegion`/`ConfirmEnableSimulator`) using the new policy probe controls under longer or transition-triggering runs
+  - next gap is transitioning from file-based diagnostic visual bridge to in-process live connection feed without introducing broad world/object decoding
 
 ---
 
@@ -211,7 +222,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**continue bounded region-transition control capture by observing and typing repeated `CrossedRegion` (`0x0000ff07`) / `ConfirmEnableSimulator` (`0x0000ff08`) when they appear, while keeping world/object decode explicitly out of scope**
+**stabilize the first live visual slice by preserving the diagnostic snapshot bridge and preparing a narrow in-process live-state feed path (still no world/object decoding)**
 
 ---
 

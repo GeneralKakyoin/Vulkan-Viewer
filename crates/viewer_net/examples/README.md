@@ -32,6 +32,7 @@ It is manual-only and requires environment variables. It does not store credenti
 - `VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS` (how many packets to keep after first `AgentMovementComplete`, default: `0`)
 - `VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS` (optional post-AMC receive timeout override; if unset, uses `VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS`)
 - `VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL` (`true/false`, default: `false`; stop early once first `CrossedRegion`/`ConfirmEnableSimulator` is observed)
+- `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH` (optional output path for sanitized live visual snapshot JSON; default: `live_visual_snapshot.json`)
 
 ## First-Simulator Probe Enable Rules
 - Probe runs when either:
@@ -56,8 +57,15 @@ $env:VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS="3"
 $env:VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS="2"
 $env:VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS="15"
 $env:VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL="true"
+$env:VIEWER_LIVE_VISUAL_SNAPSHOT_PATH="live_visual_snapshot.json"
 cargo run -p viewer_net --example llsd_login_attempt
 ```
+
+## Live Visual Snapshot Bridge
+- This example writes a sanitized live visual snapshot JSON after login/probe.
+- Default output path: `live_visual_snapshot.json` in the current working directory.
+- `viewer_app` can load this snapshot (same default path, or via `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH`) to show live-derived status in the on-screen debug overlay.
+- Sensitive values such as session IDs and seed URLs are intentionally not included.
 
 ## Output
 - High-level login outcome (`success`, `failed`, `requires_tos`, etc.)

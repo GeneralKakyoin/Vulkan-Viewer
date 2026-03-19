@@ -1,9 +1,16 @@
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::to_vec_pretty;
+use viewer_core::LiveVisualSnapshot;
 
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
 };
-use viewer_net::{Connection, ConnectionConfig, ConnectionError, LoginWireFormat};
+use viewer_net::{
+    Connection, ConnectionConfig, ConnectionError, FirstSimulatorInboundTrafficScope,
+    LoginWireFormat,
+};
 
 const FIRST_SIM_PROBE_CONTROL_ENVS: &[&str] = &[
     "VIEWER_FIRST_SIM_RECEIVE_BIND",
@@ -59,6 +66,9 @@ async fn run() -> Result<(), String> {
         .any(|name| std::env::var(name).is_ok());
     let inspect_first_simulator_probe =
         inspect_first_sim_handshake_once || first_sim_probe_controls_set;
+    let live_visual_snapshot_path = std::env::var("VIEWER_LIVE_VISUAL_SNAPSHOT_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("live_visual_snapshot.json"));
 
     let intent = LoginIntent {
         username,
@@ -98,6 +108,7 @@ Set VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE=true to enable explicitly."
 or set any VIEWER_FIRST_SIM_* control variable to auto-enable it."
                 );
             }
+            let mut live_visual = build_base_live_visual_snapshot(&result);
             if fetch_seed_caps && matches!(result, GridLoginResult::Success(_)) {
                 let caps = connection
                     .fetch_seed_capabilities()
@@ -197,6 +208,19 @@ or set any VIEWER_FIRST_SIM_* control variable to auto-enable it."
                 )
                 .await?;
             }
+            update_live_visual_from_connection(&mut live_visual, &connection);
+            if let Err(err) = write_live_visual_snapshot(&live_visual_snapshot_path, &live_visual)
+            {
+                eprintln!(
+                    "failed to write live visual snapshot to {}: {err}",
+                    live_visual_snapshot_path.display()
+                );
+            } else {
+                println!(
+                    "Live visual snapshot written: {}",
+                    live_visual_snapshot_path.display()
+                );
+            }
             Ok(())
         }
         Err(err) => {
@@ -205,6 +229,77 @@ or set any VIEWER_FIRST_SIM_* control variable to auto-enable it."
             Err(String::from("login did not complete successfully"))
         }
     }
+}
+
+fn build_base_live_visual_snapshot(result: &GridLoginResult) -> LiveVisualSnapshot {
+    let mut snapshot = LiveVisualSnapshot {
+        source: String::from("viewer_net_manual_example"),
+        logged_in: false,
+        first_sim_endpoint: None,
+        first_sim_region_x: None,
+        first_sim_region_y: None,
+        handshake_agent_movement_complete: false,
+        traffic_summary_available: false,
+        post_boundary_observations: 0,
+        region_transition_control_observations: 0,
+        crossed_region: 0,
+        confirm_enable_simulator: 0,
+        likely_broader_traffic: 0,
+        unknown: 0,
+        observed_at_unix_ms: now_unix_ms(),
+    };
+
+    if let GridLoginResult::Success(bootstrap) = result {
+        snapshot.logged_in = true;
+        snapshot.first_sim_endpoint = Some(format!(
+            "{}:{}",
+            bootstrap.first_sim.sim_ip, bootstrap.first_sim.sim_port
+        ));
+        snapshot.first_sim_region_x = Some(bootstrap.first_sim.region_x);
+        snapshot.first_sim_region_y = Some(bootstrap.first_sim.region_y);
+    }
+
+    snapshot
+}
+
+fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connection: &Connection) {
+    snapshot.observed_at_unix_ms = now_unix_ms();
+    snapshot.handshake_agent_movement_complete = connection
+        .first_simulator_handshake_state()
+        .map(|state| {
+            state.stage == viewer_net::FirstSimulatorHandshakeStage::AgentMovementComplete
+        })
+        .unwrap_or(false);
+
+    let region_control = connection.summarize_region_transition_control();
+    snapshot.region_transition_control_observations = region_control.observations as u32;
+    snapshot.crossed_region = region_control.crossed_region as u32;
+    snapshot.confirm_enable_simulator = region_control.confirm_enable_simulator as u32;
+
+    let receive_diagnostics = connection.first_simulator_handshake_receive_diagnostics();
+    snapshot.traffic_summary_available = !receive_diagnostics.is_empty();
+    snapshot.post_boundary_observations = receive_diagnostics.len() as u32;
+    snapshot.likely_broader_traffic = receive_diagnostics
+        .iter()
+        .filter(|diag| diag.scope == FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic)
+        .count() as u32;
+    snapshot.unknown = receive_diagnostics
+        .iter()
+        .filter(|diag| diag.scope == FirstSimulatorInboundTrafficScope::Unknown)
+        .count() as u32;
+}
+
+fn write_live_visual_snapshot(path: &PathBuf, snapshot: &LiveVisualSnapshot) -> Result<(), String> {
+    let bytes = to_vec_pretty(snapshot).map_err(|err| err.to_string())?;
+    std::fs::write(path, bytes)
+        .map_err(|err| format!("write {} failed: {err}", path.display()))
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn required_env(name: &str) -> Result<String, String> {

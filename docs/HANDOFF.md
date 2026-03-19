@@ -2,6 +2,29 @@
 
 ## Last Completed Work
 
+- Implemented first live visual slice bridge (diagnostic-first, reversible):
+  - added shared `viewer_core::LiveVisualSnapshot` model for minimal live-derived visual state
+  - manual `viewer_net` example now writes sanitized snapshot JSON after login/probe:
+    - default path `live_visual_snapshot.json`
+    - overridable by `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH`
+  - `viewer_app` now ingests snapshot file and refreshes when modified
+  - `viewer_ui` now renders a dedicated "Live Visual" debug section from snapshot fields
+  - sandbox cube now reflects live state color:
+    - red = no live state/offline
+    - yellow = logged in, AMC not confirmed
+    - green = handshake reached `AgentMovementComplete`
+- Manual validation in this run:
+  - real login: success
+  - seed capability fetch: success
+  - first-simulator probe: success
+  - snapshot file written and verified:
+    - `logged_in=true`
+    - `handshake_agent_movement_complete=true`
+    - region-transition control counts still zero in bounded run
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Added bounded policy controls for targeted live handoff/control visibility in `viewer_net`:
   - new probe API:
     - `Connection::probe_first_simulator_handshake_window_with_policy(...)`

@@ -1,6 +1,6 @@
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
-use viewer_core::Camera;
+use viewer_core::{Camera, LiveVisualSnapshot};
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, StoreOp, TextureFormat, TextureView,
@@ -52,6 +52,7 @@ impl UiSystem {
         target_view: &TextureView,
         surface_size: PhysicalSize<u32>,
         camera: &Camera,
+        live_visual: Option<&LiveVisualSnapshot>,
     ) {
         if surface_size.width == 0 || surface_size.height == 0 {
             return;
@@ -83,6 +84,47 @@ impl UiSystem {
                         "Camera yaw/pitch: {:.2} / {:.2} rad",
                         camera.yaw, camera.pitch
                     ));
+                    ui.separator();
+                    ui.heading("Live Visual");
+                    match live_visual {
+                        Some(snapshot) => {
+                            ui.label(format!("Source: {}", snapshot.source));
+                            ui.label(format!("Logged in: {}", snapshot.logged_in));
+                            ui.label(format!(
+                                "Handshake AMC reached: {}",
+                                snapshot.handshake_agent_movement_complete
+                            ));
+                            ui.label(format!(
+                                "First sim: {} ({:?}, {:?})",
+                                snapshot
+                                    .first_sim_endpoint
+                                    .as_deref()
+                                    .unwrap_or("n/a"),
+                                snapshot.first_sim_region_x,
+                                snapshot.first_sim_region_y
+                            ));
+                            if snapshot.traffic_summary_available {
+                                ui.label(format!(
+                                    "Post-boundary: obs={}, region_ctrl={}, broader={}, unknown={}",
+                                    snapshot.post_boundary_observations,
+                                    snapshot.region_transition_control_observations,
+                                    snapshot.likely_broader_traffic,
+                                    snapshot.unknown
+                                ));
+                                ui.label(format!(
+                                    "CrossedRegion={}, ConfirmEnableSimulator={}",
+                                    snapshot.crossed_region,
+                                    snapshot.confirm_enable_simulator
+                                ));
+                            } else {
+                                ui.label("Traffic summary: unavailable");
+                            }
+                        }
+                        None => {
+                            ui.label("No live snapshot loaded.");
+                            ui.label("Run viewer_net example to write live_visual_snapshot.json");
+                        }
+                    }
                 });
         });
 

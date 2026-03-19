@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     pub position: [f32; 3],
@@ -5,7 +7,7 @@ pub struct Camera {
     pub pitch: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshKind {
     AxisMarker,
     GroundPlane,
@@ -39,6 +41,24 @@ pub struct Scene {
     pub instances: Vec<RenderableInstance>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveVisualSnapshot {
+    pub source: String,
+    pub logged_in: bool,
+    pub first_sim_endpoint: Option<String>,
+    pub first_sim_region_x: Option<u32>,
+    pub first_sim_region_y: Option<u32>,
+    pub handshake_agent_movement_complete: bool,
+    pub traffic_summary_available: bool,
+    pub post_boundary_observations: u32,
+    pub region_transition_control_observations: u32,
+    pub crossed_region: u32,
+    pub confirm_enable_simulator: u32,
+    pub likely_broader_traffic: u32,
+    pub unknown: u32,
+    pub observed_at_unix_ms: u64,
+}
+
 impl Scene {
     pub fn prototype() -> Self {
         Self {
@@ -66,6 +86,24 @@ impl Scene {
                 },
             ],
         }
+    }
+
+    pub fn apply_live_visual_snapshot(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
+        let Some(cube) = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.mesh == MeshKind::Cube)
+        else {
+            return;
+        };
+
+        cube.color = match snapshot {
+            Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
+                [0.20, 0.82, 0.34]
+            }
+            Some(state) if state.logged_in => [0.94, 0.74, 0.20],
+            _ => [0.85, 0.35, 0.25],
+        };
     }
 }
 

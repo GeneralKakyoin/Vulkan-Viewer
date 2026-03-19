@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing_subscriber::FmtSubscriber;
-use viewer_core::{Camera, Scene};
+use viewer_core::{Camera, LiveVisualSnapshot, Scene};
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
 use winit::{
@@ -36,6 +38,7 @@ struct AppState {
     camera: Camera,
     scene: Scene,
     input: InputState,
+    live_visual_state: LiveVisualState,
     last_frame_time: Instant,
 }
 
@@ -50,6 +53,49 @@ struct InputState {
     mouse_look_active: bool,
     pending_look_delta: [f32; 2],
     last_cursor_pos: Option<PhysicalPosition<f64>>,
+}
+
+struct LiveVisualState {
+    path: PathBuf,
+    last_modified: Option<std::time::SystemTime>,
+    snapshot: Option<LiveVisualSnapshot>,
+}
+
+impl LiveVisualState {
+    fn from_env() -> Self {
+        let path = std::env::var("VIEWER_LIVE_VISUAL_SNAPSHOT_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("live_visual_snapshot.json"));
+
+        Self {
+            path,
+            last_modified: None,
+            snapshot: None,
+        }
+    }
+
+    fn refresh(&mut self) {
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            self.last_modified = None;
+            self.snapshot = None;
+            return;
+        };
+
+        let modified = metadata.modified().ok();
+        if modified.is_some() && self.last_modified == modified {
+            return;
+        }
+
+        let Ok(contents) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        let Ok(snapshot) = serde_json::from_str::<LiveVisualSnapshot>(&contents) else {
+            return;
+        };
+
+        self.snapshot = Some(snapshot);
+        self.last_modified = modified;
+    }
 }
 
 impl ViewerApp {
@@ -77,6 +123,7 @@ impl ViewerApp {
             camera: Camera::default(),
             scene: Scene::prototype(),
             input: InputState::default(),
+            live_visual_state: LiveVisualState::from_env(),
             last_frame_time: Instant::now(),
         })
     }
@@ -95,10 +142,14 @@ impl AppState {
         let [look_x, look_y] = self.input.take_look_delta();
         self.camera.add_look_delta(look_x, look_y);
         self.input.update_camera(&mut self.camera, dt_seconds);
+        self.live_visual_state.refresh();
+        self.scene
+            .apply_live_visual_snapshot(self.live_visual_state.snapshot.as_ref());
 
         let window = self.window.clone();
         let ui = &mut self.ui;
         let camera = self.camera;
+        let live_visual = self.live_visual_state.snapshot.clone();
 
         self.renderer.render_frame(
             &camera,
@@ -112,6 +163,7 @@ impl AppState {
                     target_view,
                     surface_size,
                     &camera,
+                    live_visual.as_ref(),
                 );
             },
         )

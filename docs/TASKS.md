@@ -165,6 +165,16 @@ Status update:
 Done when:
 - world-derived placeholder state can be rendered from live connection data
 
+Status update:
+- materially advanced with first live visual slice bridge:
+  - shared minimal live visual state model now exists (`LiveVisualSnapshot`)
+  - manual `viewer_net` example emits sanitized live snapshot JSON after real login/probe
+  - `viewer_app` + `viewer_ui` consume and display this live-derived state
+  - sandbox visual indicator now reflects live handshake status (no world/object decoding)
+- remaining to complete T8:
+  - replace file-based bridge with narrow in-process live-state feed
+  - keep scope diagnostic-first and stop before broad object/world-state rendering
+
 ---
 
 ## Explicitly Deferred
