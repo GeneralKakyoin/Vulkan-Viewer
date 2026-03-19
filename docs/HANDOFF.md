@@ -2,6 +2,30 @@
 
 ## Last Completed Work
 
+- Extended post-AMC typed map in `viewer_net` for repeated early-tail packet IDs:
+  - added `OnlineNotification` typing (`0xFFFF0142`, low 322) as `LikelyBroaderTraffic`
+  - added `ViewerEffect` typing (`0x0000FF11`, medium 17) as `LikelyBroaderTraffic`
+  - retained `PacketAck` (`0xFFFFFFFB`) as `TransportControl`
+  - unknown medium IDs (for example `0x0000FF06`) remain explicitly `Unknown`
+- Strengthened classifier tests/fixtures:
+  - packet classifier now covers:
+    - `PacketAck`
+    - `OnlineNotification`
+    - `ViewerEffect`
+    - unknown medium fallback (`0x0000FF06`)
+  - bounded post-AMC order fixture now preserves a fuller early-tail sequence:
+    - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `PacketAck` -> `HealthMessage` -> `OnlineNotification` -> `ViewerEffect`
+- Live multi-run/manual validation now shows:
+  - stable early bootstrap/control prefix:
+    - `AgentDataUpdate`, `TestMessage`, `AgentMovementComplete`, `PacketAck`
+  - broader tail traffic after completion:
+    - `HealthMessage`
+    - `OnlineNotification`
+    - variable medium IDs (`ViewerEffect` and/or unknown medium IDs)
+- Added durable boundary research note:
+  - `docs/RESEARCH/post_amc_bootstrap_boundary_map.md`
+  - records typed IDs/scopes and explicit stop-line for this phase
+
 - Classified repeated unmapped post-AMC packet `0xfffffffb` as typed `PacketAck` in `viewer_net`:
   - added `FirstSimulatorInboundMessageKind::PacketAck`
   - mapped LLUDP fixed low id `0xFFFB` to typed packet classification
@@ -237,6 +261,7 @@
 - Current risk shifted to narrow typed coverage expansion after initial movement completion (still within handshake/bootstrap scope).
 - Immediate post-movement packet window is now directly observable with bounded tail capture; the next risk is minimal mapping of repeated unmapped packet IDs (starting with `0xfffffffb`) without broad world-state decode.
 - Immediate post-movement boundary is now clearer: `PacketAck` is transport-control, not world-state/bootstrap payload; next risk is identifying the next repeated bootstrap-relevant IDs after this control/message baseline.
+- Immediate post-movement boundary is now materially consolidated: additional repeated packets in the short tail are currently broader-traffic (or explicit unknown), not bootstrap-gating.
 
 ---
 
@@ -262,6 +287,7 @@ This includes:
 - extend typed inbound coverage for the next early post-movement packets and add minimal field-level decode where it most helps diagnostics
 - classify repeated unmapped post-movement packet IDs observed in bounded-tail runs and add the smallest bootstrap-relevant typed mappings
 - classify only repeated bootstrap-relevant post-AMC packet IDs, while leaving transport-control (`PacketAck`) and likely broader traffic explicitly categorized
+- hold the bootstrap boundary and plan the first bounded post-bootstrap simulator-traffic slice without starting broad world-state implementation
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

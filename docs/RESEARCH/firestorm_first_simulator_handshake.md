@@ -75,6 +75,10 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
 - For post-`AgentMovementComplete` control traffic seen in live bounded-tail probes:
   - `PacketAck` = fixed low `0xFFFB` (`0xFFFFFFFB` full number)
   - classification implication: `TransportControl` instead of bootstrap/world-state semantic message
+- Additional post-`AgentMovementComplete` IDs now observed in bounded tails:
+  - `OnlineNotification` = low `322` (`0xFFFF0142`) -> likely broader traffic
+  - `ViewerEffect` = medium `17` (`0x0000FF11`) -> likely broader traffic
+  - implication: these are not required bootstrap gates in this phase
 - Practical translation for this rewrite:
   - minimal receive classifier can be protocol-aware by decoding message number first,
   - then mapping those low IDs before any heuristic text/JSON fallback.

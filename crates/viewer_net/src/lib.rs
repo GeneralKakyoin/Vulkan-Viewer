@@ -37,6 +37,8 @@ const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
 const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
 const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
 const LLUDP_PACKET_ACK_LOW_ID: u16 = 0xFFFB;
+const LLUDP_ONLINE_NOTIFICATION_LOW_ID: u16 = 322;
+const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -805,6 +807,8 @@ pub enum FirstSimulatorInboundMessageKind {
     SimulatorViewerTimeMessage,
     EnableSimulator,
     AgentDataUpdate,
+    OnlineNotification,
+    ViewerEffect,
     Irrelevant,
 }
 
@@ -2114,6 +2118,10 @@ fn lludp_low_frequency_message_number(message_id: u16) -> u32 {
     LLUDP_LOW_FREQUENCY_PREFIX | u32::from(message_id)
 }
 
+fn lludp_medium_frequency_message_number(message_id: u8) -> u32 {
+    (u32::from(LLUDP_MESSAGE_PREFIX) << 8) | u32::from(message_id)
+}
+
 fn decode_first_simulator_packet_header(payload: &[u8]) -> Option<FirstSimulatorPacketHeader> {
     if payload.len() < LLUDP_MINIMUM_VALID_PACKET_SIZE {
         return None;
@@ -2218,6 +2226,24 @@ fn classify_first_simulator_inbound_from_packet(
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentDataUpdate,
                 scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_ONLINE_NOTIFICATION_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::OnlineNotification,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_medium_frequency_message_number(LLUDP_VIEWER_EFFECT_MEDIUM_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ViewerEffect,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2744,6 +2770,15 @@ mod tests {
             0x00, 0x00, 0x00, 0x01, // packet sequence
             0x00, // extra header offset
             0xFF, 0xFF, high, low, // low-frequency message number
+        ]
+    }
+
+    fn make_medium_frequency_packet(medium_id: u8) -> Vec<u8> {
+        vec![
+            0x00, // flags
+            0x00, 0x00, 0x00, 0x01, // packet sequence
+            0x00, // extra header offset
+            0xFF, medium_id, // medium-frequency message number
         ]
     }
 
@@ -4259,6 +4294,36 @@ mod tests {
         assert_eq!(packet_ack.signal, "packet:0xfffffffb");
         assert_eq!(packet_ack.packet_message_number, Some(0xfffffffb));
 
+        let online_notification =
+            classify_first_simulator_inbound_message(&make_low_frequency_packet(322));
+        assert_eq!(
+            online_notification.kind,
+            FirstSimulatorInboundMessageKind::OnlineNotification
+        );
+        assert_eq!(
+            online_notification.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(online_notification.signal, "packet:0xffff0142");
+        assert_eq!(online_notification.packet_message_number, Some(0xffff0142));
+
+        let viewer_effect =
+            classify_first_simulator_inbound_message(&make_medium_frequency_packet(17));
+        assert_eq!(viewer_effect.kind, FirstSimulatorInboundMessageKind::ViewerEffect);
+        assert_eq!(
+            viewer_effect.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(viewer_effect.signal, "packet:0x0000ff11");
+        assert_eq!(viewer_effect.packet_message_number, Some(0x0000ff11));
+
+        let unknown_medium =
+            classify_first_simulator_inbound_message(&make_medium_frequency_packet(6));
+        assert_eq!(unknown_medium.kind, FirstSimulatorInboundMessageKind::Irrelevant);
+        assert_eq!(unknown_medium.scope, FirstSimulatorInboundTrafficScope::Unknown);
+        assert_eq!(unknown_medium.signal, "packet:0x0000ff06:unmapped");
+        assert_eq!(unknown_medium.packet_message_number, Some(0x0000ff06));
+
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
         assert_eq!(
@@ -4824,6 +4889,12 @@ mod tests {
             let _ = listener
                 .send_to(&make_low_frequency_packet(138), sender)
                 .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(322), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_medium_frequency_packet(17), sender)
+                .await;
         });
 
         let mut connection = Connection::new(ConnectionConfig {
@@ -4842,15 +4913,15 @@ mod tests {
             .probe_first_simulator_handshake_window_with_tail(
                 "127.0.0.1:0",
                 Duration::from_secs(1),
-                8,
-                2,
+                10,
+                4,
             )
             .await
             .expect("probe window with tail should succeed");
-        assert_eq!(report.observations.len(), 5);
+        assert_eq!(report.observations.len(), 7);
         assert!(!report.timed_out);
         assert_eq!(report.agent_movement_complete_observation_index, Some(3));
-        assert_eq!(report.post_movement_observations, 2);
+        assert_eq!(report.post_movement_observations, 4);
         assert_eq!(
             report.observations[0].classification.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
@@ -4872,6 +4943,14 @@ mod tests {
             FirstSimulatorInboundMessageKind::HealthMessage
         );
         assert_eq!(
+            report.observations[5].classification.kind,
+            FirstSimulatorInboundMessageKind::OnlineNotification
+        );
+        assert_eq!(
+            report.observations[6].classification.kind,
+            FirstSimulatorInboundMessageKind::ViewerEffect
+        );
+        assert_eq!(
             report.observations[2].classification.scope,
             FirstSimulatorInboundTrafficScope::BootstrapRelevant
         );
@@ -4881,6 +4960,14 @@ mod tests {
         );
         assert_eq!(
             report.observations[4].classification.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(
+            report.observations[5].classification.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(
+            report.observations[6].classification.scope,
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
         );
     }

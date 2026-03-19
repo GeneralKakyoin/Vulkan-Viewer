@@ -137,7 +137,11 @@ Status update:
   - bootstrap-relevant traffic
   - transport-control traffic
   - likely broader traffic
-- next narrow step: map only repeated post-AMC packet IDs that are clearly bootstrap-relevant (now that `PacketAck` is no longer in unknowns)
+- additional repeated post-AMC IDs are now typed where justified:
+  - `OnlineNotification` (`0xffff0142`) as likely broader traffic
+  - `ViewerEffect` (`0x0000ff11`) as likely broader traffic
+- unknown medium IDs (for example `0x0000ff06`) remain explicit `Unknown` diagnostics
+- next narrow step: treat bootstrap boundary as consolidated and define the first bounded post-bootstrap simulator-traffic slice without broad world-state implementation
 
 ### T8 - First connected world slice
 Done when:

@@ -108,8 +108,12 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `HealthMessage` (low 138)
     - `SimulatorViewerTimeMessage` (low 150)
 - live bounded post-movement tail probe now captures immediate post-movement traffic:
-  - with `post_movement_tail_packets=2`, observed:
+  - with bounded post-AMC tails (`tail=2..4`), observed sequence examples include:
     - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `PacketAck` -> `HealthMessage`
+    - additional early post-AMC traffic now typed as likely broader traffic:
+      - `OnlineNotification` (`0xFFFF0142`, low 322)
+      - `ViewerEffect` (`0x0000FF11`, medium 17)
+    - medium unknowns can still appear in this window (for example `0x0000FF06`) and remain explicitly `Unknown`
   - `0xfffffffb` is now typed as `PacketAck` (transport-control) instead of unmapped traffic
   - known typed packets are now explicitly separated from likely broader traffic in diagnostics
 
@@ -138,7 +142,7 @@ Current concrete blocker inside bootstrap:
   - first inbound progression to `AgentMovementComplete` is now observed and classified
   - immediate post-movement tail is now observable in bounded live runs
   - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
-  - next gap is typing only the next repeated post-AMC packet IDs that are still bootstrap-relevant, while treating transport-control and broader-traffic separately
+  - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far; next gap is transition planning from bootstrap observation into a bounded broader-simulator traffic phase
 
 ---
 
@@ -165,7 +169,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**type the next repeated bootstrap-relevant post-`AgentMovementComplete` packet IDs now that `PacketAck (0xfffffffb)` is classified as transport-control**
+**treat bootstrap boundary as consolidated and define the first bounded post-bootstrap simulator-traffic slice (without broad world-state implementation yet)**
 
 ---
 
