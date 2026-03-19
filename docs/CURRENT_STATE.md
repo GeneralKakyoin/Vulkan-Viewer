@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase C - Post-login bootstrap
+Phase C - First-simulator handshake scaffolding
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -47,6 +47,14 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 - one-shot MapLayer inspection path implemented in `viewer_net`
 - capability one-shot requests now send explicit LLSD `Accept` headers
 - MapLayer HTTP 405 is now classified explicitly as likely non-HTTP/legacy-UDP semantics in this one-shot transport path
+- typed first-simulator handshake scaffold is now implemented in `viewer_net`:
+  - bootstrap prerequisites ready
+  - first region target known
+  - `UseCircuitCode` stage
+  - `CompleteAgentMovement` stage
+  - waiting-for-`AgentMovementComplete` stage
+  - terminal `AgentMovementComplete` stage
+- strict ordered handshake-stage transition API exists with focused test coverage
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -69,7 +77,7 @@ Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
-- Next phase blocker is handshake readiness clarity: first-region simulator bring-up ordering and prerequisites are now researched but not yet translated into typed viewer-side handshake stages.
+- Current handshake blocker is transport binding: typed first-simulator stages now exist, but `UseCircuitCode` / `CompleteAgentMovement` are not yet wired to simulator transport send/ack mechanics.
 
 ---
 
@@ -80,7 +88,7 @@ Current concrete blocker inside bootstrap:
 - fetch and inspect early bootstrap capability responses from live login state
 - stabilize one-shot EventQueueGet transport behavior and capture first event envelope
 - stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
-- translate documented first-simulator handshake sequence into a minimal Rust-facing state model (documentation/planning first)
+- bind first-simulator handshake scaffold stages to minimal transport-side send/ack stubs in `viewer_net`
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -90,7 +98,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**scope and document minimal first-simulator handshake stages from already-proven login/bootstrap state**
+**add minimal transport-bound handshake actions for `UseCircuitCode` and `CompleteAgentMovement` using the existing typed scaffold**
 
 ---
 

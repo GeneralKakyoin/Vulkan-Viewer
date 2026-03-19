@@ -726,6 +726,39 @@ pub struct Session {
     pub seed_capability: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorTarget {
+    pub sim_ip: String,
+    pub sim_port: u16,
+    pub region_x: u32,
+    pub region_y: u32,
+    pub seed_capability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorHandshakePrerequisites {
+    pub agent_id: String,
+    pub session_id: String,
+    pub circuit_code: u32,
+    pub target: FirstSimulatorTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FirstSimulatorHandshakeStage {
+    BootstrapPrerequisitesReady,
+    FirstRegionTargetKnown,
+    UseCircuitCode,
+    CompleteAgentMovement,
+    WaitingForAgentMovementComplete,
+    AgentMovementComplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorHandshakeState {
+    pub stage: FirstSimulatorHandshakeStage,
+    pub prerequisites: FirstSimulatorHandshakePrerequisites,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SeedCapabilityMap {
     pub entries: BTreeMap<String, String>,
@@ -787,6 +820,15 @@ pub enum ConnectionError {
     Codec(#[from] CodecError),
     #[error("seed capability URL is unavailable in current session")]
     MissingSeedCapability,
+    #[error("first-simulator handshake prerequisites are unavailable in current session")]
+    MissingFirstSimulatorHandshakePrerequisites,
+    #[error("first-simulator handshake is not initialized")]
+    FirstSimulatorHandshakeNotInitialized,
+    #[error("invalid first-simulator handshake transition from {from:?} to {to:?}")]
+    InvalidFirstSimulatorHandshakeTransition {
+        from: FirstSimulatorHandshakeStage,
+        to: FirstSimulatorHandshakeStage,
+    },
     #[error("capability response decode error: {0}")]
     CapabilityDecode(String),
     #[error(
@@ -807,6 +849,8 @@ pub struct Connection {
     config: ConnectionConfig,
     state: ConnectionState,
     session: Option<Session>,
+    first_simulator_handshake_prerequisites: Option<FirstSimulatorHandshakePrerequisites>,
+    first_simulator_handshake_state: Option<FirstSimulatorHandshakeState>,
 }
 
 impl Connection {
@@ -815,6 +859,8 @@ impl Connection {
             config,
             state: ConnectionState::Disconnected,
             session: None,
+            first_simulator_handshake_prerequisites: None,
+            first_simulator_handshake_state: None,
         }
     }
 
@@ -828,6 +874,10 @@ impl Connection {
 
     pub fn config(&self) -> &ConnectionConfig {
         &self.config
+    }
+
+    pub fn first_simulator_handshake_state(&self) -> Option<&FirstSimulatorHandshakeState> {
+        self.first_simulator_handshake_state.as_ref()
     }
 
     pub async fn connect(&mut self) -> Result<(), ConnectionError> {
@@ -857,6 +907,8 @@ impl Connection {
             session_token: String::from("placeholder-session-token"),
             seed_capability: None,
         });
+        self.first_simulator_handshake_prerequisites = None;
+        self.first_simulator_handshake_state = None;
         self.state = ConnectionState::LoggedIn;
         Ok(())
     }
@@ -962,8 +1014,82 @@ impl Connection {
         tokio::task::yield_now().await;
 
         self.session = None;
+        self.first_simulator_handshake_prerequisites = None;
+        self.first_simulator_handshake_state = None;
         self.state = ConnectionState::Disconnected;
         Ok(())
+    }
+
+    pub fn begin_first_simulator_handshake_scaffold(
+        &mut self,
+    ) -> Result<&FirstSimulatorHandshakeState, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        self.first_simulator_handshake_state = Some(FirstSimulatorHandshakeState {
+            stage: FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady,
+            prerequisites,
+        });
+        Ok(self
+            .first_simulator_handshake_state
+            .as_ref()
+            .expect("handshake state just initialized"))
+    }
+
+    pub fn advance_first_simulator_handshake_scaffold(
+        &mut self,
+        to: FirstSimulatorHandshakeStage,
+    ) -> Result<&FirstSimulatorHandshakeState, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let current = self
+            .first_simulator_handshake_state
+            .as_mut()
+            .ok_or(ConnectionError::FirstSimulatorHandshakeNotInitialized)?;
+
+        let expected_next = match current.stage {
+            FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady => {
+                FirstSimulatorHandshakeStage::FirstRegionTargetKnown
+            }
+            FirstSimulatorHandshakeStage::FirstRegionTargetKnown => {
+                FirstSimulatorHandshakeStage::UseCircuitCode
+            }
+            FirstSimulatorHandshakeStage::UseCircuitCode => {
+                FirstSimulatorHandshakeStage::CompleteAgentMovement
+            }
+            FirstSimulatorHandshakeStage::CompleteAgentMovement => {
+                FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete
+            }
+            FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete => {
+                FirstSimulatorHandshakeStage::AgentMovementComplete
+            }
+            FirstSimulatorHandshakeStage::AgentMovementComplete => {
+                return Err(ConnectionError::InvalidFirstSimulatorHandshakeTransition {
+                    from: current.stage,
+                    to,
+                });
+            }
+        };
+
+        if to != expected_next {
+            return Err(ConnectionError::InvalidFirstSimulatorHandshakeTransition {
+                from: current.stage,
+                to,
+            });
+        }
+
+        current.stage = to;
+        Ok(self
+            .first_simulator_handshake_state
+            .as_ref()
+            .expect("handshake state should remain initialized"))
     }
 
     pub async fn fetch_seed_capabilities(&self) -> Result<SeedCapabilityMap, ConnectionError> {
@@ -1218,6 +1344,19 @@ impl Connection {
             session_token: bootstrap.session_id.clone(),
             seed_capability: Some(bootstrap.seed_capability.clone()),
         });
+        self.first_simulator_handshake_prerequisites = Some(FirstSimulatorHandshakePrerequisites {
+            agent_id: bootstrap.agent_id.clone(),
+            session_id: bootstrap.session_id.clone(),
+            circuit_code: bootstrap.circuit_code,
+            target: FirstSimulatorTarget {
+                sim_ip: bootstrap.first_sim.sim_ip.clone(),
+                sim_port: bootstrap.first_sim.sim_port,
+                region_x: bootstrap.first_sim.region_x,
+                region_y: bootstrap.first_sim.region_y,
+                seed_capability: bootstrap.seed_capability.clone(),
+            },
+        });
+        self.first_simulator_handshake_state = None;
     }
 }
 
@@ -2668,6 +2807,149 @@ mod tests {
                 assert!(body.contains("Method Not Allowed"));
             }
             other => panic!("expected MapLayerLikelyLegacyUdp, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_simulator_handshake_scaffold_advances_in_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": 13000,
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        let result = connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+        assert!(matches!(result, GridLoginResult::Success(_)));
+
+        let state = connection
+            .begin_first_simulator_handshake_scaffold()
+            .expect("handshake scaffold should initialize");
+        assert_eq!(
+            state.stage,
+            FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady
+        );
+        assert_eq!(state.prerequisites.target.sim_ip, "127.0.0.1");
+        assert_eq!(state.prerequisites.target.region_x, 1000);
+
+        let state = connection
+            .advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::FirstRegionTargetKnown,
+            )
+            .expect("stage should advance to first region target known");
+        assert_eq!(
+            state.stage,
+            FirstSimulatorHandshakeStage::FirstRegionTargetKnown
+        );
+
+        let state = connection
+            .advance_first_simulator_handshake_scaffold(FirstSimulatorHandshakeStage::UseCircuitCode)
+            .expect("stage should advance to use circuit code");
+        assert_eq!(state.stage, FirstSimulatorHandshakeStage::UseCircuitCode);
+
+        let state = connection
+            .advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::CompleteAgentMovement,
+            )
+            .expect("stage should advance to complete agent movement");
+        assert_eq!(
+            state.stage,
+            FirstSimulatorHandshakeStage::CompleteAgentMovement
+        );
+
+        let state = connection
+            .advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete,
+            )
+            .expect("stage should advance to waiting for movement complete");
+        assert_eq!(
+            state.stage,
+            FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete
+        );
+    }
+
+    #[tokio::test]
+    async fn first_simulator_handshake_scaffold_rejects_out_of_order_transition() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": 13000,
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        let result = connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+        assert!(matches!(result, GridLoginResult::Success(_)));
+
+        connection
+            .begin_first_simulator_handshake_scaffold()
+            .expect("handshake scaffold should initialize");
+        let err = connection
+            .advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::CompleteAgentMovement,
+            )
+            .expect_err("out-of-order transition should fail");
+        match err {
+            ConnectionError::InvalidFirstSimulatorHandshakeTransition { from, to } => {
+                assert_eq!(from, FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady);
+                assert_eq!(to, FirstSimulatorHandshakeStage::CompleteAgentMovement);
+            }
+            other => panic!("expected InvalidFirstSimulatorHandshakeTransition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_simulator_handshake_scaffold_requires_logged_in_state() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let err = connection
+            .begin_first_simulator_handshake_scaffold()
+            .expect_err("non-logged-in handshake init should fail");
+        match err {
+            ConnectionError::InvalidState(ConnectionState::Disconnected) => {}
+            other => panic!("expected InvalidState(Disconnected), got {other:?}"),
         }
     }
 }

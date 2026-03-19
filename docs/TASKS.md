@@ -76,6 +76,7 @@ Done when:
 - first-region handshake ordering is documented from Firestorm behavior reference
 - dependencies between seed grant, circuit setup, and movement completion are explicit
 - crate-boundary ownership is mapped without starting simulator transport implementation
+- typed handshake-stage scaffold exists in `viewer_net` with focused transition tests
 
 ---
 
@@ -94,6 +95,7 @@ Done when:
 ### T7 - Simulator handshake preparation
 Done when:
 - simulator handshake requirements are documented
+- typed first-simulator handshake stages are bound to minimal transport send/ack actions in `viewer_net`
 - handshake work is scoped without collapsing crate boundaries
 
 ### T8 - First connected world slice
