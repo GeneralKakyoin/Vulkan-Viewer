@@ -263,9 +263,10 @@ async fn inspect_first_simulator_handshake_once(
             );
             for obs in &report.observations {
                 println!(
-                    "Observation {}: kind={:?}, source={:?}, signal={}, packet_message_number={:?}, payload_len={}",
+                    "Observation {}: kind={:?}, scope={:?}, source={:?}, signal={}, packet_message_number={:?}, payload_len={}",
                     obs.observation_index,
                     obs.classification.kind,
+                    obs.classification.scope,
                     obs.classification.decode_source,
                     obs.classification.signal,
                     obs.classification.packet_message_number,
@@ -305,8 +306,9 @@ async fn inspect_first_simulator_handshake_once(
     );
     for diag in receive_diagnostics {
         println!(
-            "Receive diag: kind={:?}, source={:?}, packet_message_number={:?}, payload_len={}, stage_before={:?}, stage_after={:?}, advanced_stage={}, signal={}",
+            "Receive diag: kind={:?}, scope={:?}, source={:?}, packet_message_number={:?}, payload_len={}, stage_before={:?}, stage_after={:?}, advanced_stage={}, signal={}",
             diag.kind,
+            diag.scope,
             diag.decode_source,
             diag.packet_message_number,
             diag.payload_len,

@@ -36,6 +36,7 @@ const LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID: u16 = 150;
 const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
 const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
 const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
+const LLUDP_PACKET_ACK_LOW_ID: u16 = 0xFFFB;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -797,6 +798,7 @@ pub struct FirstSimulatorHandshakeSendDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FirstSimulatorInboundMessageKind {
     TestMessage,
+    PacketAck,
     AgentMovementComplete,
     RegionHandshake,
     HealthMessage,
@@ -814,9 +816,18 @@ pub enum FirstSimulatorInboundDecodeSource {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FirstSimulatorInboundTrafficScope {
+    BootstrapRelevant,
+    TransportControl,
+    LikelyBroaderTraffic,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorInboundClassification {
     pub kind: FirstSimulatorInboundMessageKind,
+    pub scope: FirstSimulatorInboundTrafficScope,
     pub signal: String,
     pub decode_source: FirstSimulatorInboundDecodeSource,
     pub packet_message_number: Option<u32>,
@@ -826,6 +837,7 @@ pub struct FirstSimulatorInboundClassification {
 pub struct FirstSimulatorHandshakeReceiveDiagnostic {
     pub observation_index: usize,
     pub kind: FirstSimulatorInboundMessageKind,
+    pub scope: FirstSimulatorInboundTrafficScope,
     pub payload_len: usize,
     pub stage_before: Option<FirstSimulatorHandshakeStage>,
     pub stage_after: Option<FirstSimulatorHandshakeStage>,
@@ -1343,6 +1355,7 @@ impl Connection {
             .push(FirstSimulatorHandshakeReceiveDiagnostic {
                 observation_index,
                 kind: classification.kind,
+                scope: classification.scope,
                 payload_len: payload.len(),
                 stage_before,
                 stage_after,
@@ -2141,6 +2154,7 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2149,6 +2163,16 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_TEST_MESSAGE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::TestMessage,
+                scope: FirstSimulatorInboundTrafficScope::TransportControl,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::PacketAck,
+                scope: FirstSimulatorInboundTrafficScope::TransportControl,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2157,6 +2181,7 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::RegionHandshake,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2165,6 +2190,7 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::HealthMessage,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2173,6 +2199,7 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2181,6 +2208,7 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_ENABLE_SIMULATOR_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::EnableSimulator,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2189,6 +2217,7 @@ fn classify_first_simulator_inbound_from_packet(
         num if num == lludp_low_frequency_message_number(LLUDP_AGENT_DATA_UPDATE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentDataUpdate,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal,
                 decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
                 packet_message_number: Some(header.message_number),
@@ -2215,6 +2244,7 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
     if lowered.contains("agentmovementcomplete") {
         return FirstSimulatorInboundClassification {
             kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
+            scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
             signal: String::from("text:agentmovementcomplete"),
             decode_source: FirstSimulatorInboundDecodeSource::TextScan,
             packet_message_number: None,
@@ -2223,6 +2253,7 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
     if lowered.contains("regionhandshake") {
         return FirstSimulatorInboundClassification {
             kind: FirstSimulatorInboundMessageKind::RegionHandshake,
+            scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
             signal: String::from("text:regionhandshake"),
             decode_source: FirstSimulatorInboundDecodeSource::TextScan,
             packet_message_number: None,
@@ -2231,6 +2262,7 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
     if lowered.contains("enablesimulator") {
         return FirstSimulatorInboundClassification {
             kind: FirstSimulatorInboundMessageKind::EnableSimulator,
+            scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
             signal: String::from("text:enablesimulator"),
             decode_source: FirstSimulatorInboundDecodeSource::TextScan,
             packet_message_number: None,
@@ -2245,6 +2277,7 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
 
     FirstSimulatorInboundClassification {
         kind: FirstSimulatorInboundMessageKind::Irrelevant,
+        scope: FirstSimulatorInboundTrafficScope::Unknown,
         signal,
         decode_source: FirstSimulatorInboundDecodeSource::Unknown,
         packet_message_number,
@@ -2268,6 +2301,7 @@ fn classify_first_simulator_inbound_from_json(
         if lowered.contains("agentmovementcomplete") {
             return Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal: format!("json:{candidate}"),
                 decode_source: FirstSimulatorInboundDecodeSource::JsonField,
                 packet_message_number: None,
@@ -2276,6 +2310,7 @@ fn classify_first_simulator_inbound_from_json(
         if lowered.contains("regionhandshake") {
             return Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::RegionHandshake,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal: format!("json:{candidate}"),
                 decode_source: FirstSimulatorInboundDecodeSource::JsonField,
                 packet_message_number: None,
@@ -2284,6 +2319,7 @@ fn classify_first_simulator_inbound_from_json(
         if lowered.contains("enablesimulator") {
             return Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::EnableSimulator,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
                 signal: format!("json:{candidate}"),
                 decode_source: FirstSimulatorInboundDecodeSource::JsonField,
                 packet_message_number: None,
@@ -4115,6 +4151,10 @@ mod tests {
             movement.kind,
             FirstSimulatorInboundMessageKind::AgentMovementComplete
         );
+        assert_eq!(
+            movement.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+        );
         assert_eq!(movement.signal, "packet:0xffff00fa");
         assert_eq!(
             movement.decode_source,
@@ -4127,6 +4167,10 @@ mod tests {
             test_message.kind,
             FirstSimulatorInboundMessageKind::TestMessage
         );
+        assert_eq!(
+            test_message.scope,
+            FirstSimulatorInboundTrafficScope::TransportControl
+        );
         assert_eq!(test_message.signal, "packet:0xffff0001");
         assert_eq!(
             test_message.decode_source,
@@ -4136,6 +4180,10 @@ mod tests {
 
         let region = classify_first_simulator_inbound_message(&make_low_frequency_packet(148));
         assert_eq!(region.kind, FirstSimulatorInboundMessageKind::RegionHandshake);
+        assert_eq!(
+            region.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+        );
         assert_eq!(region.signal, "packet:0xffff0094");
         assert_eq!(
             region.decode_source,
@@ -4145,6 +4193,10 @@ mod tests {
 
         let health = classify_first_simulator_inbound_message(&make_low_frequency_packet(138));
         assert_eq!(health.kind, FirstSimulatorInboundMessageKind::HealthMessage);
+        assert_eq!(
+            health.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
         assert_eq!(health.signal, "packet:0xffff008a");
         assert_eq!(
             health.decode_source,
@@ -4157,6 +4209,10 @@ mod tests {
             sim_time.kind,
             FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage
         );
+        assert_eq!(
+            sim_time.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
         assert_eq!(sim_time.signal, "packet:0xffff0096");
         assert_eq!(
             sim_time.decode_source,
@@ -4166,6 +4222,10 @@ mod tests {
 
         let enable = classify_first_simulator_inbound_message(&make_low_frequency_packet(151));
         assert_eq!(enable.kind, FirstSimulatorInboundMessageKind::EnableSimulator);
+        assert_eq!(
+            enable.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+        );
         assert_eq!(enable.signal, "packet:0xffff0097");
         assert_eq!(
             enable.decode_source,
@@ -4179,6 +4239,10 @@ mod tests {
             agent_data.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
         );
+        assert_eq!(
+            agent_data.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+        );
         assert_eq!(agent_data.signal, "packet:0xffff0183");
         assert_eq!(
             agent_data.decode_source,
@@ -4186,11 +4250,24 @@ mod tests {
         );
         assert_eq!(agent_data.packet_message_number, Some(0xffff0183));
 
+        let packet_ack = classify_first_simulator_inbound_message(&make_low_frequency_packet(0xFFFB));
+        assert_eq!(packet_ack.kind, FirstSimulatorInboundMessageKind::PacketAck);
+        assert_eq!(
+            packet_ack.scope,
+            FirstSimulatorInboundTrafficScope::TransportControl
+        );
+        assert_eq!(packet_ack.signal, "packet:0xfffffffb");
+        assert_eq!(packet_ack.packet_message_number, Some(0xfffffffb));
+
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
         assert_eq!(
             json_fallback.kind,
             FirstSimulatorInboundMessageKind::AgentMovementComplete
+        );
+        assert_eq!(
+            json_fallback.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
         );
         assert_eq!(json_fallback.signal, "json:message:AgentMovementComplete");
         assert_eq!(
@@ -4201,6 +4278,7 @@ mod tests {
 
         let irrelevant = classify_first_simulator_inbound_message(b"totally unrelated");
         assert_eq!(irrelevant.kind, FirstSimulatorInboundMessageKind::Irrelevant);
+        assert_eq!(irrelevant.scope, FirstSimulatorInboundTrafficScope::Unknown);
         assert_eq!(
             irrelevant.decode_source,
             FirstSimulatorInboundDecodeSource::Unknown
@@ -4210,6 +4288,7 @@ mod tests {
 
         let unknown_packet = classify_first_simulator_inbound_message(&make_low_frequency_packet(42));
         assert_eq!(unknown_packet.kind, FirstSimulatorInboundMessageKind::Irrelevant);
+        assert_eq!(unknown_packet.scope, FirstSimulatorInboundTrafficScope::Unknown);
         assert_eq!(
             unknown_packet.decode_source,
             FirstSimulatorInboundDecodeSource::Unknown
@@ -4695,7 +4774,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_first_simulator_handshake_window_with_tail_collects_post_movement_packets() {
+    async fn probe_first_simulator_handshake_window_with_tail_preserves_observed_post_amc_order() {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
@@ -4734,10 +4813,16 @@ mod tests {
                 .send_to(&make_low_frequency_packet(387), sender)
                 .await;
             let _ = listener
+                .send_to(&make_low_frequency_packet(1), sender)
+                .await;
+            let _ = listener
                 .send_to(&make_low_frequency_packet(250), sender)
                 .await;
             let _ = listener
-                .send_to(&make_low_frequency_packet(1), sender)
+                .send_to(&make_low_frequency_packet(0xFFFB), sender)
+                .await;
+            let _ = listener
+                .send_to(&make_low_frequency_packet(138), sender)
                 .await;
         });
 
@@ -4757,18 +4842,46 @@ mod tests {
             .probe_first_simulator_handshake_window_with_tail(
                 "127.0.0.1:0",
                 Duration::from_secs(1),
-                5,
-                1,
+                8,
+                2,
             )
             .await
             .expect("probe window with tail should succeed");
-        assert_eq!(report.observations.len(), 3);
+        assert_eq!(report.observations.len(), 5);
         assert!(!report.timed_out);
-        assert_eq!(report.agent_movement_complete_observation_index, Some(2));
-        assert_eq!(report.post_movement_observations, 1);
+        assert_eq!(report.agent_movement_complete_observation_index, Some(3));
+        assert_eq!(report.post_movement_observations, 2);
+        assert_eq!(
+            report.observations[0].classification.kind,
+            FirstSimulatorInboundMessageKind::AgentDataUpdate
+        );
+        assert_eq!(
+            report.observations[1].classification.kind,
+            FirstSimulatorInboundMessageKind::TestMessage
+        );
         assert_eq!(
             report.observations[2].classification.kind,
-            FirstSimulatorInboundMessageKind::TestMessage
+            FirstSimulatorInboundMessageKind::AgentMovementComplete
+        );
+        assert_eq!(
+            report.observations[3].classification.kind,
+            FirstSimulatorInboundMessageKind::PacketAck
+        );
+        assert_eq!(
+            report.observations[4].classification.kind,
+            FirstSimulatorInboundMessageKind::HealthMessage
+        );
+        assert_eq!(
+            report.observations[2].classification.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+        );
+        assert_eq!(
+            report.observations[3].classification.scope,
+            FirstSimulatorInboundTrafficScope::TransportControl
+        );
+        assert_eq!(
+            report.observations[4].classification.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
         );
     }
 }

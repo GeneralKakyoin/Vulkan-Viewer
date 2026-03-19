@@ -61,6 +61,7 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
 - `EnableSimulator`: sim -> viewer instruction to prepare another simulator circuit.
 - `CompleteAgentMovement`: viewer -> sim finalizes entering the region.
 - `AgentMovementComplete`: sim -> viewer confirms movement completion with position/look-at data.
+- `PacketAck` (fixed `0xFFFFFFFB`): transport-control ack for reliable packets; should be treated as UDP reliability-plane traffic, not bootstrap/world-state payload.
 
 ### Packet Identity Decode Details (for receive-side classification)
 - Firestorm template reader (`lltemplatemessagereader.cpp`) decodes message identity from bytes after the LL packet ID header (`LL_PACKET_ID_SIZE = 6`):
@@ -71,6 +72,9 @@ After successful login, what is the minimal ordered sequence Firestorm uses to b
   - `RegionHandshake` = low `148`
   - `EnableSimulator` = low `151`
   - `AgentMovementComplete` = low `250`
+- For post-`AgentMovementComplete` control traffic seen in live bounded-tail probes:
+  - `PacketAck` = fixed low `0xFFFB` (`0xFFFFFFFB` full number)
+  - classification implication: `TransportControl` instead of bootstrap/world-state semantic message
 - Practical translation for this rewrite:
   - minimal receive classifier can be protocol-aware by decoding message number first,
   - then mapping those low IDs before any heuristic text/JSON fallback.

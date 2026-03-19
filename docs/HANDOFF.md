@@ -2,6 +2,27 @@
 
 ## Last Completed Work
 
+- Classified repeated unmapped post-AMC packet `0xfffffffb` as typed `PacketAck` in `viewer_net`:
+  - added `FirstSimulatorInboundMessageKind::PacketAck`
+  - mapped LLUDP fixed low id `0xFFFB` to typed packet classification
+  - removed this live signal from the generic unmapped bucket
+- Added explicit inbound traffic-scope typing for early post-bootstrap diagnostics:
+  - `BootstrapRelevant`
+  - `TransportControl`
+  - `LikelyBroaderTraffic`
+  - `Unknown`
+- Updated receive diagnostics and manual example output to include traffic scope.
+- Strengthened fixtures/tests for post-AMC sequence durability:
+  - packet classification tests now cover `PacketAck`
+  - bounded-tail probe test now preserves the observed ordered sequence:
+    - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `PacketAck` -> `HealthMessage`
+  - added assertions for scope classification in ordered observations
+- Live manual validation confirms new typed boundary:
+  - login success
+  - seed capability fetch success
+  - post-AMC tail includes typed `PacketAck` (`0xfffffffb`) as transport-control
+  - `HealthMessage` remains typed and marked `LikelyBroaderTraffic`
+
 - Extended first-simulator bounded probe with optional post-movement tail capture:
   - added `probe_first_simulator_handshake_window_with_tail(bind, timeout, max_packets, post_movement_tail_packets)`
   - preserved existing behavior for `probe_first_simulator_handshake_window(...)` via wrapper (`tail=0`)
@@ -215,6 +236,7 @@
 - Early inbound progression through `AgentMovementComplete` is now observed.
 - Current risk shifted to narrow typed coverage expansion after initial movement completion (still within handshake/bootstrap scope).
 - Immediate post-movement packet window is now directly observable with bounded tail capture; the next risk is minimal mapping of repeated unmapped packet IDs (starting with `0xfffffffb`) without broad world-state decode.
+- Immediate post-movement boundary is now clearer: `PacketAck` is transport-control, not world-state/bootstrap payload; next risk is identifying the next repeated bootstrap-relevant IDs after this control/message baseline.
 
 ---
 
@@ -239,6 +261,7 @@ This includes:
 - continue typed inbound expansion/progression analysis from `AgentDataUpdate` toward first observed `AgentMovementComplete`
 - extend typed inbound coverage for the next early post-movement packets and add minimal field-level decode where it most helps diagnostics
 - classify repeated unmapped post-movement packet IDs observed in bounded-tail runs and add the smallest bootstrap-relevant typed mappings
+- classify only repeated bootstrap-relevant post-AMC packet IDs, while leaving transport-control (`PacketAck`) and likely broader traffic explicitly categorized
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

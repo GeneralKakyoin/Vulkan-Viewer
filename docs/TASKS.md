@@ -131,9 +131,13 @@ Done when:
 Status update:
 - materially advanced: bounded post-movement tail capture now exists (`probe_first_simulator_handshake_window_with_tail`)
 - live tail run (`tail=2`) observed post-movement packets beyond handshake completion, including:
-  - `HealthMessage` (typed)
-  - one unmapped packet-shaped ID (`0xfffffffb`) now surfaced explicitly in diagnostics
-- next narrow step: map repeated unmapped post-movement IDs into the smallest bootstrap-relevant typed set
+  - `PacketAck` (`0xfffffffb`) now typed as transport-control
+  - `HealthMessage` (typed, likely broader traffic)
+- diagnostics now separate:
+  - bootstrap-relevant traffic
+  - transport-control traffic
+  - likely broader traffic
+- next narrow step: map only repeated post-AMC packet IDs that are clearly bootstrap-relevant (now that `PacketAck` is no longer in unknowns)
 
 ### T8 - First connected world slice
 Done when:

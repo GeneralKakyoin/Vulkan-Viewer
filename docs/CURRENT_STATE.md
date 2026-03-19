@@ -75,6 +75,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 - receive-side diagnostics now include decode evidence details:
   - decode source (`PacketMessageNumber`, `JsonField`, `TextScan`, `Unknown`)
   - optional decoded packet message number for unknown packet-shaped traffic
+- receive-side diagnostics now include explicit traffic-scope classification:
+  - `BootstrapRelevant`
+  - `TransportControl`
+  - `LikelyBroaderTraffic`
+  - `Unknown`
 - handshake-stage confirmation was tightened:
   - `AgentMovementComplete` stage advancement now requires packet-message decode evidence (not JSON/text fallback alone)
 - one-shot probe path now exists to send `UseCircuitCode` + `CompleteAgentMovement` and wait on the same UDP socket:
@@ -104,9 +109,9 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `SimulatorViewerTimeMessage` (low 150)
 - live bounded post-movement tail probe now captures immediate post-movement traffic:
   - with `post_movement_tail_packets=2`, observed:
-    - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `Irrelevant(unmapped)` -> `HealthMessage`
-  - unmapped packet-shaped traffic now surfaces explicit signal form:
-    - `packet:0x........:unmapped`
+    - `AgentDataUpdate` -> `TestMessage` -> `AgentMovementComplete` -> `PacketAck` -> `HealthMessage`
+  - `0xfffffffb` is now typed as `PacketAck` (transport-control) instead of unmapped traffic
+  - known typed packets are now explicitly separated from likely broader traffic in diagnostics
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -132,7 +137,8 @@ Current concrete blocker inside bootstrap:
 - Current handshake blocker narrowed to post-movement inbound coverage:
   - first inbound progression to `AgentMovementComplete` is now observed and classified
   - immediate post-movement tail is now observable in bounded live runs
-  - next gap is mapping the repeated unmapped post-movement packet ID(s) (currently including `0xfffffffb`) into the smallest bootstrap-relevant typed set
+  - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
+  - next gap is typing only the next repeated post-AMC packet IDs that are still bootstrap-relevant, while treating transport-control and broader-traffic separately
 
 ---
 
@@ -149,7 +155,7 @@ Current concrete blocker inside bootstrap:
 - extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
 - classify and observe additional early inbound low-frequency packets that appear before `AgentMovementComplete` in live traffic
 - expand typed coverage for additional early post-movement inbound traffic while keeping handshake scope bounded
-- map and type the first repeated unmapped post-movement packet IDs without drifting into broad world-state decode
+- map and type only repeated bootstrap-relevant post-movement packet IDs; keep transport-control and broader-traffic diagnostics explicit
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -159,7 +165,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**map and type the first repeated unmapped post-`AgentMovementComplete` packet IDs (starting with `0xfffffffb`) while keeping decode scope handshake/bootstrap-only**
+**type the next repeated bootstrap-relevant post-`AgentMovementComplete` packet IDs now that `PacketAck (0xfffffffb)` is classified as transport-control**
 
 ---
 
