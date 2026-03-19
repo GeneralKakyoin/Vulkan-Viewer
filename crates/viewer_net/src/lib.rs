@@ -13,6 +13,7 @@ use viewer_grid::{
 };
 
 const MAX_LOGIN_REDIRECTS: usize = 4;
+const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "SimulatorFeatures",
@@ -980,8 +981,12 @@ impl Connection {
             return Err(ConnectionError::InvalidState(self.state));
         }
 
+        let timeout = self
+            .config
+            .connect_timeout
+            .max(EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT);
         let client = reqwest::Client::builder()
-            .timeout(self.config.connect_timeout)
+            .timeout(timeout)
             .build()?;
 
         let request_body = llsd_event_queue_request(0, false);
@@ -1327,6 +1332,7 @@ fn trace_result(result: &GridLoginResult, response: &LoginTraceResponse) -> Logi
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration as StdDuration;
     use viewer_grid::{GridLoginResult, SecondLifeAdapter, StartLocation, StartLocationIntent};
     use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2133,5 +2139,43 @@ mod tests {
         );
         assert!(inspection.top_level_keys.iter().any(|key| key == "events"));
         assert!(inspection.top_level_keys.iter().any(|key| key == "id"));
+    }
+
+    #[tokio::test]
+    async fn fetch_event_queue_once_uses_extended_timeout_window() {
+        let server = MockServer::start().await;
+
+        let event_response = r#"<llsd><map>
+            <key>events</key><array></array>
+            <key>id</key><integer>42</integer>
+        </map></llsd>"#;
+
+        Mock::given(method("POST"))
+            .and(path("/eventqueue"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(StdDuration::from_secs(2))
+                    .insert_header("content-type", "application/llsd+xml")
+                    .set_body_string(event_response),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(1),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_event_queue_once(&format!("{}/eventqueue", server.uri()))
+            .await
+            .expect("event queue one-shot should succeed despite short login timeout");
+
+        assert!(inspection.has_events_array);
+        assert!(inspection.has_id);
+        assert_eq!(inspection.event_count, 0);
     }
 }

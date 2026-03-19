@@ -41,6 +41,7 @@ Real login compatibility is now proven against the live Second Life endpoint. Th
 - manual login attempt example
 - successful real live login achieved
 - minimal seed capability fetch transport path implemented in `viewer_net`
+- one-shot EventQueueGet inspection path implemented in `viewer_net`
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -54,6 +55,9 @@ Real login compatibility is now proven against the live Second Life endpoint. Th
 
 Login payload compatibility is no longer the primary blocker. The immediate blocker is implementing post-login bootstrap safely while preserving crate boundaries and avoiding premature simulator/world integration.
 
+Current concrete blocker inside bootstrap:
+- EventQueueGet one-shot now reaches the service path but currently returns upstream proxy/server failure in live conditions (no event payload yet).
+
 ---
 
 ## Most Likely Immediate Work
@@ -61,6 +65,7 @@ Login payload compatibility is no longer the primary blocker. The immediate bloc
 - seed capability bootstrap kickoff
 - expand capability interpretation typing in `viewer_grid` while keeping transport in `viewer_net`
 - fetch and inspect early bootstrap capability responses from live login state
+- stabilize one-shot EventQueueGet transport behavior and capture first event envelope
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
