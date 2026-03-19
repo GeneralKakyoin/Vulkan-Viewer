@@ -2,40 +2,20 @@
 
 ## Last Completed Work
 
-- Added configurable login wire-format selection
-- Added minimal LLSD codec support
-- Added a manual LLSD login attempt path outside `viewer_app`
-- Proved that the live Second Life login endpoint is reachable with the current stack
-- Proved that the response is structured and decoded correctly
-- Began auth-field compatibility correction work
-- Confirmed the current blocker is payload/auth compatibility, not transport failure
-- Corrected LLSD `passwd` semantics to legacy `$1$<md5>` encoding with idempotent handling for already-prefixed values
-- Added focused tests for LLSD `passwd` encoding behavior
-- Added an experimental XML-RPC `login_to_simulator` wire format path in `viewer_net`
-- Added XML-RPC request/response codec tests and wire-format transport test
-- Verified live endpoint behavior shift on 2026-03-19:
-  - LLSD attempt still returns `reason=viewer-data`, `message=Missing password`
-  - XML-RPC attempt returns `reason=key` (credential/auth failure), indicating the envelope is recognized
-- Refined XML-RPC credential field semantics:
-  - XML-RPC now sends normalized legacy `first`/`last` fields (dot-separated and single-identifier forms)
-  - XML-RPC no longer sends `username` field in request struct
-- Verified on 2026-03-19 that XML-RPC outcome remains `reason=key` (auth failure style) after this correction
+- Achieved successful real Second Life login through the live endpoint
+- Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
+- Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
+- Preserved crate boundaries while reaching live login:
+  - `viewer_net` remained transport/codec/session lifecycle
+  - `viewer_grid` remained request shaping and response interpretation
 
 ---
 
-## What This Means
+## What Changed In Project Understanding
 
-The architecture is holding.
-
-Specifically:
-- renderer foundation is working
-- network/grid separation is working
-- real HTTP login transport is working
-- redirect handling is working
-- diagnostics are working
-- codec evolution is working
-
-The project is no longer blocked on broad architecture. It is blocked on protocol correctness.
+- Login compatibility is now credible and proven in live conditions
+- The highest-risk unknown is no longer login acceptance; it is post-login bootstrap sequencing and capability handling
+- Seed capability startup is now the critical path before any simulator/world integration work
 
 ---
 
@@ -43,47 +23,46 @@ The project is no longer blocked on broad architecture. It is blocked on protoco
 
 Focus only on:
 
-**real login compatibility alignment for the LLSD request payload**
+**seed capability bootstrap using successful login output already available in-session**
 
 This includes:
-- auth field semantics
-- identifier handling
-- exact top-level request envelope
-- live compatibility verification through the manual login path
+- define minimal capability client boundary
+- perform first seed capability request
+- capture and classify early bootstrap capability payloads
+- keep bootstrap diagnostics explicit and sanitized
 
 Keep the current boundaries intact:
-- `viewer_net` = transport/session/codec selection
-- `viewer_grid` = shaping/interpretation/policy
+- `viewer_net` = transport/session/codec and capability HTTP mechanics
+- `viewer_grid` = grid-specific meaning and typed interpretation
 
 ---
 
 ## Constraints
 
 Do not:
-- start simulator work
-- start capability/bootstrap work
-- integrate login into `viewer_app`
+- start simulator connection work
+- start world streaming/integration
+- integrate login/bootstrap into `viewer_app`
 - do broad refactors
-- break the JSON path
+- break JSON or LLSD compatibility paths
 - copy Firestorm code
 
 ---
 
 ## Files Most Likely Involved Next
 
-- `crates/viewer_grid/src/lib.rs`
 - `crates/viewer_net/src/lib.rs`
+- `crates/viewer_grid/src/lib.rs`
 - `crates/viewer_net/examples/llsd_login_attempt.rs`
 - `docs/RESEARCH/firestorm_login_flow.md`
-- any new login compatibility research notes
+- new capability/bootstrap research notes in `docs/RESEARCH/*`
 
 ---
 
 ## What To Check After The Next Change
 
-- did the live endpoint response change meaningfully?
-- is the failure still structural or now an auth-state outcome?
-- does `LoginTrace` show a clearer progression?
+- does seed capability fetch return a valid, parseable response?
+- are capability responses logged in a sanitized way?
+- are capability/bootstrap interpretations staying in `viewer_grid`?
 - do automated tests still pass?
-- were `CURRENT_STATE.md` and `HANDOFF.md` updated?
-- does the endpoint move past the prior "missing password" behavior after legacy `passwd` formatting?
+- were `CURRENT_STATE.md`, `HANDOFF.md`, `MASTER_PLAN.md`, and `TASKS.md` updated when project state changed?

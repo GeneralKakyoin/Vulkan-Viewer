@@ -1,9 +1,9 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase B — Credible login
+Phase C - Post-login bootstrap
 
-The foundation and architecture-proof work are complete enough to support real login compatibility work. The active focus is making the live LLSD login request acceptable to the real endpoint without breaking crate boundaries.
+Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 
 ---
 
@@ -38,7 +38,8 @@ The foundation and architecture-proof work are complete enough to support real l
 - LLSD `passwd` normalization to legacy `$1$<md5>` form
 - XML-RPC credential shaping normalized to legacy `first`/`last` semantics
 - configurable wire format
-- manual LLSD login attempt example
+- manual login attempt example
+- successful real live login achieved
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -50,20 +51,17 @@ The foundation and architecture-proof work are complete enough to support real l
 
 ## Current Blocker
 
-The real LLSD login request reaches the live Second Life login endpoint, but the endpoint still does not accept the credential/payload shape as valid enough for successful login progression.
-
-This is now a protocol-compatibility problem, not a transport-architecture problem.
+Login payload compatibility is no longer the primary blocker. The immediate blocker is implementing post-login bootstrap safely while preserving crate boundaries and avoiding premature simulator/world integration.
 
 ---
 
 ## Most Likely Immediate Work
 
-- continue LLSD auth/payload alignment
-- verify XML-RPC field-level compatibility (not just envelope) using controlled live attempts
-- compare XML-RPC auth outcomes with real credentials after first/last normalization
-- verify account identifier handling
-- improve live-compatibility fixtures
-- rerun controlled real login attempts with sanitized trace inspection
+- seed capability bootstrap kickoff
+- document and implement minimal capability client boundary
+- fetch and inspect early bootstrap capability responses
+- keep capability/bootstrap logic separate from simulator transport
+- expand diagnostics for post-login bootstrap flow
 
 ---
 
@@ -71,7 +69,7 @@ This is now a protocol-compatibility problem, not a transport-architecture probl
 
 The smallest correct next step is:
 
-**continue aligning auth payload semantics and exact LLSD request structure until the real endpoint recognizes credentials correctly**
+**begin seed capability bootstrap using already-proven live login results**
 
 ---
 
@@ -80,6 +78,5 @@ The smallest correct next step is:
 - simulator connection
 - event queue
 - world streaming
-- capability bootstrap
 - login UI integration
 - broad viewer feature work

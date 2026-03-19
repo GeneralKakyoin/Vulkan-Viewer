@@ -149,3 +149,9 @@
 ## Notes
 - Firestorm combines transport, startup, and UI reaction through a large state machine and event pumps.
 - For this Rust rewrite, keep the same external behavior ordering, but split boundaries earlier to avoid coupling `viewer_net` to startup/UI concerns.
+
+### Live login milestone update (2026-03-19)
+- Successful real Second Life login has now been achieved.
+- This confirms login compatibility milestones are materially complete for current scope.
+- Protocol priority has shifted from auth-envelope correction to post-login seed capability bootstrap sequencing.
+- Sensitive live values (session IDs, secure session IDs, circuit codes, full capability URLs) must remain out of continuity docs.

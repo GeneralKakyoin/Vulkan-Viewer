@@ -1,101 +1,94 @@
 # TASKS.md
 
 ## Current Focus
-Only work on the smallest steps that improve real login compatibility without breaking architecture boundaries.
+Only work on the smallest steps that advance post-login bootstrap while preserving crate boundaries.
 
 ---
 
 ## Active Tasks
 
-### T1 — Verify auth payload semantics
+### T1 - Seed capability bootstrap kickoff
 Why it matters:
-The live endpoint is still rejecting the current auth payload shape.
+Live login is proven; seed capability bootstrap is now the critical path.
 
 Dependencies:
-- working LLSD codec
-- manual login attempt path
-- live trace output
+- successful real login path
+- existing transport/session diagnostics
 
 Done when:
-- request field semantics are better aligned
-- live endpoint response changes meaningfully
-- tests still pass
+- first seed capability request is issued safely
+- response is captured and sanitized
+- response is parseable and classified at the correct boundary
 
 ---
 
-### T2 — Verify exact LLSD request envelope
+### T2 - Define capability boundary ownership
 Why it matters:
-The payload may still be structurally valid LLSD but wrong for the endpoint’s expected request shape.
+Bootstrap logic can easily erode `viewer_net` vs `viewer_grid` boundaries.
 
 Dependencies:
 - T1
-- Firestorm/SL behavior research
+- Firestorm behavior reference for ordering only
 
 Done when:
-- request envelope is explicitly documented
-- compatibility corrections are implemented
-- manual live attempt shows a changed result or a more precise blocker
+- transport mechanics stay in `viewer_net`
+- capability meaning/typing stays in `viewer_grid`
+- boundary is documented clearly
 
 ---
 
-### T3 — Improve compatibility fixtures
+### T3 - Bootstrap diagnostics and fixtures
 Why it matters:
-The live request path is ahead of fixture coverage.
+Post-login work needs reproducible traces and tests.
 
 Dependencies:
 - T1/T2 findings
 
 Done when:
-- LLSD fixtures cover the currently understood auth/request cases
-- tests validate the current encoding assumptions
+- capability/bootstrap traces are sanitized and useful
+- focused tests/fixtures cover current bootstrap assumptions
 
 ---
 
-### T4 — Document live-login compatibility findings
+### T4 - Continuity updates for bootstrap phase
 Why it matters:
-Protocol alignment work is brittle unless continuity docs stay current.
+Milestone transition must be obvious to future agents.
 
 Dependencies:
-- every meaningful auth/payload change
+- every meaningful bootstrap change
 
 Done when:
-- `docs/RESEARCH/*` updated
 - `docs/CURRENT_STATE.md` updated
 - `docs/HANDOFF.md` updated
+- `docs/MASTER_PLAN.md` updated if project priority/milestone status changes
+- relevant `docs/RESEARCH/*` updated when protocol understanding changes
 
 ---
 
-## Next Tasks After Login Acceptance
+## Next Tasks After Bootstrap Credibility
 
-### T5 — Validate successful real login
+### T5 - Event queue startup
 Done when:
-- `GridLoginResult::Success` is achieved
-- session/bootstrap fields are real and populated
-
-### T6 — Seed capability bootstrap
-Done when:
-- seed capability can be queried safely
-- bootstrap data is logged and interpreted
-
-### T7 — Event queue startup
-Done when:
-- minimal event queue polling works
+- minimal `EventQueueGet` polling works
 - early live events can be received and classified
 
-### T8 — Simulator handshake
+### T6 - Simulator handshake preparation
 Done when:
-- first region connection is established
-- first meaningful world-state data arrives
+- simulator handshake requirements are documented
+- handshake work is scoped without collapsing crate boundaries
+
+### T7 - First connected world slice
+Done when:
+- world-derived placeholder state can be rendered from live connection data
 
 ---
 
 ## Explicitly Deferred
 
 Do not work on these yet unless the plan changes:
-- viewer login UI
-- simulator rendering integration
+- simulator/world integration implementation beyond bootstrap staging
+- viewer login UI integration
 - asset-backed world rendering
-- inventory workflows
-- chat/map/teleport shells
+- inventory/chat/map shells
 - media/voice
-- OpenSim divergence support
+- broad OpenSim divergence support
