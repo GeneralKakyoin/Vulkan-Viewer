@@ -78,6 +78,26 @@
     - `UseCircuitCode` send success + stage advancement + diagnostic capture
     - `CompleteAgentMovement` send success + waiting stage advancement + diagnostic capture
     - out-of-order send rejection
+- Implemented substantial receive-side handshake observation/classification slice in `viewer_net`:
+  - added `receive_first_simulator_handshake_datagram_once()` one-shot UDP receive hook
+  - added `observe_first_simulator_inbound_payload()` reusable receive-observation path
+  - added typed inbound message classification model for early handshake-relevant traffic:
+    - `AgentMovementComplete`
+    - `RegionHandshake`
+    - `EnableSimulator`
+    - `Irrelevant`
+  - added typed receive diagnostics:
+    - payload length
+    - classification signal
+    - stage before/after
+    - whether stage was advanced
+  - explicit receive-side handshake effect:
+    - when waiting for movement complete, inbound `AgentMovementComplete` advances stage to terminal handshake completion
+  - added focused tests for:
+    - classification behavior
+    - receive-side stage advancement
+    - out-of-order/no-advance handling
+    - one-shot UDP receive + diagnostics capture
 - Achieved successful real Second Life login through the live endpoint
 - Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
 - Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
@@ -98,6 +118,7 @@
 - Bootstrap capability probing is now characterized enough to begin handshake-sequencing planning without starting simulator transport implementation.
 - Handshake sequencing is now represented in typed Rust state in `viewer_net`; the next risk moved from sequencing ambiguity to transport binding of the scaffold stages.
 - Handshake transport binding for send actions is now in place; next risk is ack/receive-side classification and integration.
+- Receive-side handshake observation/classification is now in place; next risk is protocol-level fidelity (actual UDP packet decoding semantics).
 
 ---
 
@@ -116,6 +137,7 @@ This includes:
 - derive minimal Rust-facing handshake stage model from documented Firestorm first-region sequence (documentation/planning only)
 - wire `UseCircuitCode` and `CompleteAgentMovement` scaffold stages to minimal transport send/ack mechanics in `viewer_net` (without world integration)
 - add bounded ack/receive diagnostics and transition classification for first-simulator handshake actions
+- improve receive classification from heuristic signal matching to a minimal typed decoder aligned to real packet schema
 - capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 

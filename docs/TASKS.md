@@ -97,6 +97,7 @@ Done when:
 - simulator handshake requirements are documented
 - typed first-simulator handshake stages are bound to minimal transport send/ack actions in `viewer_net`
 - send-side handshake diagnostics exist for attempts/success/failure
+- receive-side handshake observation/classification exists and can drive `AgentMovementComplete` stage confirmation
 - handshake work is scoped without collapsing crate boundaries
 
 ### T8 - First connected world slice

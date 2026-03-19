@@ -60,6 +60,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - real `CompleteAgentMovement` send action (UDP datagram transport scaffold)
   - ordered send flow enforced by stage-aware send APIs
   - per-send diagnostics captured for attempts/success/failure
+- receive-side handshake observation/classification slice is now implemented in `viewer_net`:
+  - one-shot UDP receive hook for handshake datagrams
+  - typed inbound message classification (`AgentMovementComplete`, `RegionHandshake`, `EnableSimulator`, `Irrelevant`)
+  - typed receive diagnostics (classification signal, stage before/after, stage advancement flag)
+  - explicit `AgentMovementComplete` receive-side stage confirmation when waiting
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -82,7 +87,7 @@ Current concrete blocker inside bootstrap:
 - EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
 - SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
 - MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
-- Current handshake blocker moved to ack/receive semantics: transport sends now exist, but real simulator-side ack/response handling (including `AgentMovementComplete` receive path integration) is not yet implemented.
+- Current handshake blocker narrowed to protocol payload fidelity: receive-side observation/classification exists, but message decoding is still heuristic and not yet bound to real SL UDP packet schema.
 
 ---
 
@@ -95,6 +100,7 @@ Current concrete blocker inside bootstrap:
 - stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
 - bind first-simulator handshake scaffold stages to minimal transport-side send/ack stubs in `viewer_net`
 - add bounded receive/ack classification for first-simulator handshake transport actions without starting world integration
+- improve first-simulator UDP payload decode fidelity so receive classification relies on actual packet structure rather than heuristic string matching
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 
@@ -104,7 +110,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**add minimal ack/response-side handshake diagnostics and classification on top of the new `UseCircuitCode` / `CompleteAgentMovement` transport sends**
+**replace heuristic first-simulator receive classification with a minimal typed decoder aligned to actual handshake packet structure**
 
 ---
 
