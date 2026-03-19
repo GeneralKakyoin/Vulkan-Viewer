@@ -26,6 +26,7 @@ async fn run() -> Result<(), String> {
     let connect_timeout_secs = parse_u64_env("VIEWER_LOGIN_TIMEOUT_SECS", 15);
     let mfa_token = std::env::var("VIEWER_LOGIN_MFA_TOKEN").ok();
     let wire_format = parse_wire_format_env("VIEWER_LOGIN_WIRE_FORMAT", LoginWireFormat::Llsd);
+    let fetch_seed_caps = parse_bool_env("VIEWER_FETCH_SEED_CAPS", false);
 
     let intent = LoginIntent {
         username,
@@ -53,6 +54,16 @@ async fn run() -> Result<(), String> {
             println!("Login outcome: {}", result_kind(&result));
             println!("Sanitized trace:\n{trace:#?}");
             println!("Interpreted result:\n{result:#?}");
+            if fetch_seed_caps && matches!(result, GridLoginResult::Success(_)) {
+                let caps = connection
+                    .fetch_seed_capabilities()
+                    .await
+                    .map_err(|err| format!("seed capability fetch failed: {err}"))?;
+                println!("Seed capability entries: {}", caps.entries.len());
+                for name in caps.entries.keys() {
+                    println!("Capability: {name}");
+                }
+            }
             Ok(())
         }
         Err(err) => {

@@ -40,6 +40,7 @@ Real login compatibility is now proven against the live Second Life endpoint. Th
 - configurable wire format
 - manual login attempt example
 - successful real live login achieved
+- minimal seed capability fetch transport path implemented in `viewer_net`
 
 ### Research / Continuity
 - Firestorm login flow documented
@@ -58,8 +59,8 @@ Login payload compatibility is no longer the primary blocker. The immediate bloc
 ## Most Likely Immediate Work
 
 - seed capability bootstrap kickoff
-- document and implement minimal capability client boundary
-- fetch and inspect early bootstrap capability responses
+- expand capability interpretation typing in `viewer_grid` while keeping transport in `viewer_net`
+- fetch and inspect early bootstrap capability responses from live login state
 - keep capability/bootstrap logic separate from simulator transport
 - expand diagnostics for post-login bootstrap flow
 

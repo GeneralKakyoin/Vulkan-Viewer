@@ -2,6 +2,10 @@
 
 ## Last Completed Work
 
+- Added minimal seed capability fetch support in `viewer_net` after logged-in session establishment
+- Seed capability response parsing currently extracts top-level capability name -> URL pairs for initial inspection
+- Added focused test coverage for login -> seed capability fetch path using LLSD capability map fixture
+- Updated manual login example to optionally fetch and list capability names (`VIEWER_FETCH_SEED_CAPS=true`)
 - Achieved successful real Second Life login through the live endpoint
 - Confirmed `GridLoginResult::Success` path with real bootstrap/session population (sensitive values intentionally not recorded here)
 - Completed login compatibility milestone transition from payload-envelope debugging to post-login startup work
@@ -26,9 +30,9 @@ Focus only on:
 **seed capability bootstrap using successful login output already available in-session**
 
 This includes:
-- define minimal capability client boundary
-- perform first seed capability request
-- capture and classify early bootstrap capability payloads
+- expand capability typing/interpretation boundary in `viewer_grid`
+- exercise seed capability fetch against live successful login state
+- capture and classify early bootstrap capability payloads without sensitive value leakage
 - keep bootstrap diagnostics explicit and sanitized
 
 Keep the current boundaries intact:
@@ -54,6 +58,7 @@ Do not:
 - `crates/viewer_net/src/lib.rs`
 - `crates/viewer_grid/src/lib.rs`
 - `crates/viewer_net/examples/llsd_login_attempt.rs`
+- `crates/viewer_net/examples/README.md`
 - `docs/RESEARCH/firestorm_login_flow.md`
 - new capability/bootstrap research notes in `docs/RESEARCH/*`
 

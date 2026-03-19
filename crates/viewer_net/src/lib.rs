@@ -4,7 +4,7 @@ use reqwest::{Method, StatusCode, header::CONTENT_TYPE};
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use thiserror::Error;
 use viewer_grid::{
@@ -711,6 +711,12 @@ pub struct LoginTraceFinalResult {
 pub struct Session {
     pub account_name: String,
     pub session_token: String,
+    pub seed_capability: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeedCapabilityMap {
+    pub entries: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -739,6 +745,10 @@ pub enum ConnectionError {
     UnsupportedRedirectMethod(String),
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
+    #[error("seed capability URL is unavailable in current session")]
+    MissingSeedCapability,
+    #[error("capability response decode error: {0}")]
+    CapabilityDecode(String),
 }
 
 /// Minimal networking boundary.
@@ -796,6 +806,7 @@ impl Connection {
         self.session = Some(Session {
             account_name: format!("{} {}", request.first_name, request.last_name),
             session_token: String::from("placeholder-session-token"),
+            seed_capability: None,
         });
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -906,6 +917,40 @@ impl Connection {
         Ok(())
     }
 
+    pub async fn fetch_seed_capabilities(&self) -> Result<SeedCapabilityMap, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let seed_url = self
+            .session
+            .as_ref()
+            .and_then(|session| session.seed_capability.as_deref())
+            .ok_or(ConnectionError::MissingSeedCapability)?;
+
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+
+        let response = client.get(seed_url).send().await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+
+        parse_seed_capability_map(&bytes, content_type.as_deref())
+    }
+
     async fn http_transport_login(
         &self,
         request: &GridLoginRequest,
@@ -942,8 +987,43 @@ impl Connection {
         self.session = Some(Session {
             account_name: bootstrap.agent_id.clone(),
             session_token: bootstrap.session_id.clone(),
+            seed_capability: Some(bootstrap.seed_capability.clone()),
         });
     }
+}
+
+fn parse_seed_capability_map(
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<SeedCapabilityMap, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        if let Some(obj) = value.as_object() {
+            let mut entries = BTreeMap::new();
+            for (key, raw_value) in obj {
+                if let Some(url) = raw_value.as_str() {
+                    entries.insert(key.clone(), url.to_string());
+                }
+            }
+            return Ok(SeedCapabilityMap { entries });
+        }
+        return Err(ConnectionError::CapabilityDecode(String::from(
+            "json capability response is not an object",
+        )));
+    }
+
+    let map = parse_llsd_map(body).map_err(ConnectionError::Codec)?;
+    let mut entries = BTreeMap::new();
+    for (key, raw_value) in map {
+        if let Some(url) = llsd_to_string(&raw_value) {
+            entries.insert(key, url);
+        }
+    }
+    Ok(SeedCapabilityMap { entries })
 }
 
 fn normalize_login_response(raw: Value) -> Value {
@@ -1745,5 +1825,74 @@ mod tests {
             GridLoginResult::Success(_) => {}
             other => panic!("expected success, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_seed_capabilities_after_login_returns_capability_map() {
+        let server = MockServer::start().await;
+        let seed_url = format!("{}/seed", server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "0000",
+                "session_id": "1111",
+                "secure_session_id": "2222",
+                "circuit_code": 1,
+                "sim_ip": "127.0.0.1",
+                "sim_port": 1234,
+                "region_x": 10,
+                "region_y": 10,
+                "seed_capability": seed_url
+            })))
+            .mount(&server)
+            .await;
+
+        let capability_map = r#"<llsd><map>
+            <key>EventQueueGet</key><string>https://cap.example/event</string>
+            <key>MapLayer</key><string>https://cap.example/map</string>
+        </map></llsd>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/seed"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/llsd+xml")
+                    .set_body_string(capability_map),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        let adapter = SecondLifeAdapter;
+        connection.connect().await.expect("connect should succeed");
+        let login_result = connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+        match login_result {
+            GridLoginResult::Success(_) => {}
+            other => panic!("expected success, got {other:?}"),
+        }
+
+        let caps = connection
+            .fetch_seed_capabilities()
+            .await
+            .expect("seed capability fetch should succeed");
+
+        assert_eq!(
+            caps.entries.get("EventQueueGet").map(String::as_str),
+            Some("https://cap.example/event")
+        );
+        assert_eq!(
+            caps.entries.get("MapLayer").map(String::as_str),
+            Some("https://cap.example/map")
+        );
     }
 }
