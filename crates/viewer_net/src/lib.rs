@@ -175,16 +175,14 @@ impl LoginCodec for XmlRpcLoginCodec {
         ));
         xml.push_str("<params><param><value><struct>");
 
-        xmlrpc_member_string(&mut xml, "username", &request.params.username);
+        let credentials = classify_legacy_login_name(&request.params.username);
+        xmlrpc_member_string(&mut xml, "first", &credentials.first);
+        xmlrpc_member_string(&mut xml, "last", &credentials.last);
         xmlrpc_member_string(
             &mut xml,
             "passwd",
             &normalize_legacy_passwd(&request.params.password),
         );
-        if let Some((first, last)) = split_legacy_name(&request.params.username) {
-            xmlrpc_member_string(&mut xml, "first", &first);
-            xmlrpc_member_string(&mut xml, "last", &last);
-        }
         xmlrpc_member_string(&mut xml, "start", &request.params.start);
         xmlrpc_member_bool(&mut xml, "agree_to_tos", request.params.agree_to_tos);
         xmlrpc_member_bool(&mut xml, "read_critical", request.params.read_critical);
@@ -312,6 +310,47 @@ fn xmlrpc_member_array_of_strings(xml: &mut String, name: &str, values: &[String
     }
     xml.push_str("</data></array></value>");
     xml.push_str("</member>");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyLoginName {
+    first: String,
+    last: String,
+}
+
+fn classify_legacy_login_name(raw: &str) -> LegacyLoginName {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return LegacyLoginName {
+            first: String::new(),
+            last: String::new(),
+        };
+    }
+
+    if let Some((first, last)) = trimmed.split_once('.') {
+        if !first.is_empty() && !last.is_empty() {
+            return LegacyLoginName {
+                first: first.to_string(),
+                last: last.to_string(),
+            };
+        }
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    if let Some(first) = parts.next() {
+        let remainder: Vec<&str> = parts.collect();
+        if !remainder.is_empty() {
+            return LegacyLoginName {
+                first: first.to_string(),
+                last: remainder.join(" "),
+            };
+        }
+    }
+
+    LegacyLoginName {
+        first: trimmed.to_string(),
+        last: String::from("Resident"),
+    }
 }
 
 fn split_legacy_name(username: &str) -> Option<(String, String)> {
@@ -1492,9 +1531,48 @@ mod tests {
 
         assert!(encoded.contains("<methodCall>"));
         assert!(encoded.contains("<methodName>login_to_simulator</methodName>"));
+        assert!(encoded.contains("<name>first</name><value><string>test</string></value>"));
+        assert!(encoded.contains("<name>last</name><value><string>user</string></value>"));
+        assert!(!encoded.contains("<name>username</name>"));
         assert!(encoded.contains("<name>passwd</name>"));
         assert!(encoded.contains("$1$5ebe2294ecd0e0f08eab7690d2a6ee69"));
         assert!(encoded.contains("<name>options</name>"));
+    }
+
+    #[test]
+    fn xmlrpc_codec_encodes_legacy_first_last_for_space_separated_names() {
+        let codec = XmlRpcLoginCodec;
+        let mut intent = make_intent(true);
+        intent.username = String::from("legacy resident");
+        let request = SecondLifeAdapter.shape_login_request(&intent);
+        let encoded = String::from_utf8(
+            codec
+                .encode_request(&request)
+                .expect("xml-rpc encode should succeed"),
+        )
+        .expect("valid UTF-8");
+
+        assert!(encoded.contains("<name>first</name><value><string>legacy</string></value>"));
+        assert!(encoded.contains("<name>last</name><value><string>resident</string></value>"));
+        assert!(!encoded.contains("<name>username</name>"));
+    }
+
+    #[test]
+    fn xmlrpc_codec_encodes_resident_last_name_for_single_identifier() {
+        let codec = XmlRpcLoginCodec;
+        let mut intent = make_intent(true);
+        intent.username = String::from("bobsmith12");
+        let request = SecondLifeAdapter.shape_login_request(&intent);
+        let encoded = String::from_utf8(
+            codec
+                .encode_request(&request)
+                .expect("xml-rpc encode should succeed"),
+        )
+        .expect("valid UTF-8");
+
+        assert!(encoded.contains("<name>first</name><value><string>bobsmith12</string></value>"));
+        assert!(encoded.contains("<name>last</name><value><string>Resident</string></value>"));
+        assert!(!encoded.contains("<name>username</name>"));
     }
 
     #[test]

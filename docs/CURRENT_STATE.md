@@ -36,6 +36,7 @@ The foundation and architecture-proof work are complete enough to support real l
 - minimal LLSD codec
 - experimental XML-RPC `login_to_simulator` codec path in `viewer_net`
 - LLSD `passwd` normalization to legacy `$1$<md5>` form
+- XML-RPC credential shaping normalized to legacy `first`/`last` semantics
 - configurable wire format
 - manual LLSD login attempt example
 
@@ -59,7 +60,7 @@ This is now a protocol-compatibility problem, not a transport-architecture probl
 
 - continue LLSD auth/payload alignment
 - verify XML-RPC field-level compatibility (not just envelope) using controlled live attempts
-- compare XML-RPC key/auth outcomes between account-style and legacy first/last identifiers
+- compare XML-RPC auth outcomes with real credentials after first/last normalization
 - verify account identifier handling
 - improve live-compatibility fixtures
 - rerun controlled real login attempts with sanitized trace inspection

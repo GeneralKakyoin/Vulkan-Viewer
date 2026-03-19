@@ -16,6 +16,10 @@
 - Verified live endpoint behavior shift on 2026-03-19:
   - LLSD attempt still returns `reason=viewer-data`, `message=Missing password`
   - XML-RPC attempt returns `reason=key` (credential/auth failure), indicating the envelope is recognized
+- Refined XML-RPC credential field semantics:
+  - XML-RPC now sends normalized legacy `first`/`last` fields (dot-separated and single-identifier forms)
+  - XML-RPC no longer sends `username` field in request struct
+- Verified on 2026-03-19 that XML-RPC outcome remains `reason=key` (auth failure style) after this correction
 
 ---
 

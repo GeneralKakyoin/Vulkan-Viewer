@@ -79,6 +79,15 @@
   - XML-RPC path returned `reason=key` with invalid-credentials style message
 - Interpretation: endpoint behavior strongly suggests XML-RPC envelope recognition, and the current blocker likely moved from envelope-level mismatch toward field-level auth compatibility.
 
+### XML-RPC credential-semantic refinement (2026-03-19)
+- Follow-up compatibility pass adjusted XML-RPC credential fields toward legacy shape:
+  - send normalized `first`/`last` fields for XML-RPC requests
+  - dotted identifiers map to `first.last`
+  - single identifiers map to `first=<identifier>`, `last=Resident`
+  - omit XML-RPC `username` field in this path
+- Controlled live XML-RPC attempt still resulted in `reason=key` (invalid-credentials style), not `Missing password`.
+- Implication: request structure remains recognized; remaining blocker is likely credential correctness/account identity semantics rather than XML-RPC envelope parse.
+
 ## Important Response Data (Login/Startup)
 - Session identity:
   - `agent_id`
