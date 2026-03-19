@@ -27,6 +27,7 @@ async fn run() -> Result<(), String> {
     let mfa_token = std::env::var("VIEWER_LOGIN_MFA_TOKEN").ok();
     let wire_format = parse_wire_format_env("VIEWER_LOGIN_WIRE_FORMAT", LoginWireFormat::Llsd);
     let fetch_seed_caps = parse_bool_env("VIEWER_FETCH_SEED_CAPS", false);
+    let inspect_event_queue_once = parse_bool_env("VIEWER_INSPECT_EVENT_QUEUE_ONCE", false);
 
     let intent = LoginIntent {
         username,
@@ -62,6 +63,23 @@ async fn run() -> Result<(), String> {
                 println!("Seed capability entries: {}", caps.entries.len());
                 for name in caps.entries.keys() {
                     println!("Capability: {name}");
+                }
+                if inspect_event_queue_once {
+                    if let Some(event_queue_url) = caps.entries.get("EventQueueGet") {
+                        let inspection = connection
+                            .fetch_event_queue_once(event_queue_url)
+                            .await
+                            .map_err(|err| format!("event queue one-shot fetch failed: {err}"))?;
+                        println!(
+                            "EventQueueGet one-shot: has_events={}, has_id={}, event_count={}",
+                            inspection.has_events_array, inspection.has_id, inspection.event_count
+                        );
+                        for event_name in &inspection.event_names {
+                            println!("Event: {event_name}");
+                        }
+                    } else {
+                        println!("EventQueueGet capability not present in seed map");
+                    }
                 }
             }
             Ok(())

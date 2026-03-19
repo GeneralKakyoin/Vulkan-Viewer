@@ -20,6 +20,7 @@ It is manual-only and requires environment variables. It does not store credenti
 - `VIEWER_LOGIN_TIMEOUT_SECS` (default: `15`)
 - `VIEWER_LOGIN_WIRE_FORMAT` (`llsd` | `json` | `xmlrpc`, default: `llsd`)
 - `VIEWER_FETCH_SEED_CAPS` (`true/false`, default: `false`)
+- `VIEWER_INSPECT_EVENT_QUEUE_ONCE` (`true/false`, default: `false`)
 
 ## Run
 ```powershell
@@ -28,6 +29,7 @@ $env:VIEWER_LOGIN_USERNAME="your.username"
 $env:VIEWER_LOGIN_PASSWORD="your-password"
 $env:VIEWER_LOGIN_WIRE_FORMAT="xmlrpc"
 $env:VIEWER_FETCH_SEED_CAPS="true"
+$env:VIEWER_INSPECT_EVENT_QUEUE_ONCE="true"
 cargo run -p viewer_net --example llsd_login_attempt
 ```
 

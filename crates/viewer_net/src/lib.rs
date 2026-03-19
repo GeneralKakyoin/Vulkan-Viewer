@@ -725,6 +725,15 @@ pub struct SeedCapabilityMap {
     pub entries: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQueueInspection {
+    pub top_level_keys: Vec<String>,
+    pub has_events_array: bool,
+    pub has_id: bool,
+    pub event_count: usize,
+    pub event_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
     Disconnected,
@@ -963,6 +972,43 @@ impl Connection {
         parse_seed_capability_map(&bytes, content_type.as_deref())
     }
 
+    pub async fn fetch_event_queue_once(
+        &self,
+        event_queue_url: &str,
+    ) -> Result<EventQueueInspection, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+
+        let request_body = llsd_event_queue_request(0, false);
+        let response = client
+            .post(event_queue_url)
+            .header(CONTENT_TYPE, "application/llsd+xml")
+            .body(request_body)
+            .send()
+            .await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+
+        parse_event_queue_once_response(&bytes, content_type.as_deref())
+    }
+
     async fn http_transport_login(
         &self,
         request: &GridLoginRequest,
@@ -1013,6 +1059,13 @@ fn llsd_string_array(items: &[&str]) -> String {
     xml
 }
 
+fn llsd_event_queue_request(ack: u64, done: bool) -> String {
+    let done_str = if done { "true" } else { "false" };
+    format!(
+        "<llsd><map><key>ack</key><integer>{ack}</integer><key>done</key><boolean>{done_str}</boolean></map></llsd>"
+    )
+}
+
 fn parse_seed_capability_map(
     body: &[u8],
     content_type: Option<&str>,
@@ -1045,6 +1098,113 @@ fn parse_seed_capability_map(
         }
     }
     Ok(SeedCapabilityMap { entries })
+}
+
+fn parse_event_queue_once_response(
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<EventQueueInspection, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        return parse_event_queue_from_json(&value);
+    }
+
+    parse_event_queue_from_llsd_xml(body)
+}
+
+fn parse_event_queue_from_json(value: &Value) -> Result<EventQueueInspection, ConnectionError> {
+    let Some(map) = value.as_object() else {
+        return Err(ConnectionError::CapabilityDecode(String::from(
+            "event queue json response is not an object",
+        )));
+    };
+
+    let mut inspection = EventQueueInspection {
+        top_level_keys: map.keys().cloned().collect(),
+        has_events_array: false,
+        has_id: map.contains_key("id"),
+        event_count: 0,
+        event_names: Vec::new(),
+    };
+    inspection.top_level_keys.sort();
+
+    if let Some(events) = map.get("events").and_then(Value::as_array) {
+        inspection.has_events_array = true;
+        inspection.event_count = events.len();
+        for item in events {
+            if let Some(name) = item.get("message").and_then(Value::as_str) {
+                inspection.event_names.push(name.to_string());
+            }
+        }
+    }
+
+    Ok(inspection)
+}
+
+fn parse_event_queue_from_llsd_xml(body: &[u8]) -> Result<EventQueueInspection, ConnectionError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let doc =
+        Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let map = doc
+        .descendants()
+        .find(|node| node.has_tag_name("map"))
+        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+
+    let mut keys = Vec::new();
+    let mut inspection = EventQueueInspection::default();
+    let children: Vec<Node<'_, '_>> = map.children().filter(|node| node.is_element()).collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        if key_node.has_tag_name("key") {
+            let key_name = key_node.text().unwrap_or_default().to_string();
+            keys.push(key_name.clone());
+            let value_node = children[idx + 1];
+            if key_name == "id" {
+                inspection.has_id = true;
+            } else if key_name == "events" && value_node.has_tag_name("array") {
+                inspection.has_events_array = true;
+                inspection.event_count = extract_llsd_event_messages(value_node, &mut inspection);
+            }
+        }
+        idx += 2;
+    }
+
+    keys.sort();
+    inspection.top_level_keys = keys;
+    Ok(inspection)
+}
+
+fn extract_llsd_event_messages(array_node: Node<'_, '_>, inspection: &mut EventQueueInspection) -> usize {
+    let mut count = 0usize;
+    for event_map in array_node.children().filter(|node| node.has_tag_name("map")) {
+        count += 1;
+        let children: Vec<Node<'_, '_>> = event_map
+            .children()
+            .filter(|node| node.is_element())
+            .collect();
+        let mut idx = 0usize;
+        while idx + 1 < children.len() {
+            let key_node = children[idx];
+            let value_node = children[idx + 1];
+            if key_node.has_tag_name("key")
+                && key_node.text().unwrap_or_default() == "message"
+                && value_node.has_tag_name("string")
+            {
+                inspection
+                    .event_names
+                    .push(value_node.text().unwrap_or_default().to_string());
+                break;
+            }
+            idx += 2;
+        }
+    }
+    count
 }
 
 fn normalize_login_response(raw: Value) -> Value {
@@ -1918,5 +2078,60 @@ mod tests {
             caps.entries.get("MapLayer").map(String::as_str),
             Some("https://cap.example/map")
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_event_queue_once_reports_event_names() {
+        let server = MockServer::start().await;
+
+        let event_response = r#"<llsd><map>
+            <key>events</key><array>
+                <map>
+                    <key>message</key><string>EnableSimulator</string>
+                    <key>body</key><map></map>
+                </map>
+                <map>
+                    <key>message</key><string>ParcelProperties</string>
+                    <key>body</key><map></map>
+                </map>
+            </array>
+            <key>id</key><integer>41</integer>
+        </map></llsd>"#;
+
+        Mock::given(method("POST"))
+            .and(path("/eventqueue"))
+            .and(header("content-type", "application/llsd+xml"))
+            .and(body_string_contains("<key>ack</key><integer>0</integer>"))
+            .and(body_string_contains("<key>done</key><boolean>false</boolean>"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/llsd+xml")
+                    .set_body_string(event_response),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_event_queue_once(&format!("{}/eventqueue", server.uri()))
+            .await
+            .expect("event queue fetch should succeed");
+
+        assert!(inspection.has_events_array);
+        assert!(inspection.has_id);
+        assert_eq!(inspection.event_count, 2);
+        assert_eq!(
+            inspection.event_names,
+            vec!["EnableSimulator".to_string(), "ParcelProperties".to_string()]
+        );
+        assert!(inspection.top_level_keys.iter().any(|key| key == "events"));
+        assert!(inspection.top_level_keys.iter().any(|key| key == "id"));
     }
 }
