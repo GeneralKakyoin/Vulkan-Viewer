@@ -2,6 +2,26 @@
 
 ## Last Completed Work
 
+- Made viewer_app startup ownership explicit for the live path:
+  - added startup mode parsing (`auto`/`on`/`off`) via `VIEWER_APP_LIVE_STARTUP`
+  - added app-side startup plan selection and startup status modeling
+  - app now receives typed worker updates (`Snapshot` + `Status`) instead of snapshot-only stream
+- Strengthened app-owned orchestration behavior:
+  - in-process worker now reports status transitions (`starting`, `connected`, failure reasons)
+  - app displays startup status in debug UI
+  - fallback behavior is explicit when live startup is disabled/missing config
+- Preserved crate boundaries:
+  - `viewer_net` remains transport/session/handshake/traffic owner
+  - `viewer_app` now clearly owns startup orchestration and runtime enablement policy
+  - `viewer_ui` remains display/debug-only
+- Added focused tests in `viewer_app` for startup ownership:
+  - startup mode parsing
+  - forced-off behavior even when credentials are present
+  - forced-on missing-config failure behavior
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Extended the runtime-fed seam to carry a first object-facing bounded payload path:
   - added seam lane `TrafficSignalPayload`
   - added typed payload counts on seam item:

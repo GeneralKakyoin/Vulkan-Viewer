@@ -94,6 +94,7 @@ impl UiSystem {
         surface_size: PhysicalSize<u32>,
         camera: &Camera,
         live_visual: Option<&LiveVisualSnapshot>,
+        live_startup_status: &str,
     ) {
         if surface_size.width == 0 || surface_size.height == 0 {
             return;
@@ -127,6 +128,7 @@ impl UiSystem {
                     ));
                     ui.separator();
                     ui.heading("Live Visual");
+                    ui.label(format!("Live startup: {live_startup_status}"));
                     for line in live_visual_lines(live_visual) {
                         ui.label(line);
                     }

@@ -66,8 +66,9 @@ struct LiveVisualState {
     path: PathBuf,
     last_modified: Option<std::time::SystemTime>,
     snapshot: Option<LiveVisualSnapshot>,
-    in_process_rx: Option<Receiver<LiveVisualSnapshot>>,
+    in_process_rx: Option<Receiver<LiveFeedUpdate>>,
     in_process_enabled: bool,
+    startup_status: LiveStartupStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -87,15 +88,44 @@ struct InProcessLiveFeedConfig {
     run_probe: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveStartupMode {
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LiveStartupStatus {
+    DisabledByConfig,
+    DisabledMissingConfig,
+    Starting,
+    Connected,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+enum LiveFeedUpdate {
+    Snapshot(LiveVisualSnapshot),
+    Status(LiveStartupStatus),
+}
+
+#[derive(Debug, Clone)]
+struct LiveStartupPlan {
+    config: Option<InProcessLiveFeedConfig>,
+    enabled: bool,
+    startup_status: LiveStartupStatus,
+}
+
 impl LiveVisualState {
     fn from_env() -> Self {
         let path = std::env::var("VIEWER_LIVE_VISUAL_SNAPSHOT_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("live_visual_snapshot.json"));
-        let in_process_config =
-            in_process_live_feed_config_from_lookup(|key| std::env::var(key).ok());
-        let in_process_enabled = in_process_config.is_some();
-        let in_process_rx = in_process_config.map(spawn_in_process_live_feed);
+        let startup_plan = live_startup_plan_from_lookup(|key| std::env::var(key).ok());
+        let in_process_enabled = startup_plan.enabled;
+        let startup_status = startup_plan.startup_status.clone();
+        let in_process_rx = startup_plan.config.map(spawn_in_process_live_feed);
 
         Self {
             path,
@@ -103,15 +133,23 @@ impl LiveVisualState {
             snapshot: None,
             in_process_rx,
             in_process_enabled,
+            startup_status,
         }
     }
 
     fn refresh(&mut self) {
         let mut got_in_process_update = false;
         if let Some(rx) = &self.in_process_rx {
-            while let Ok(snapshot) = rx.try_recv() {
-                self.snapshot = Some(snapshot);
-                got_in_process_update = true;
+            while let Ok(update) = rx.try_recv() {
+                match update {
+                    LiveFeedUpdate::Snapshot(snapshot) => {
+                        self.snapshot = Some(snapshot);
+                        got_in_process_update = true;
+                    }
+                    LiveFeedUpdate::Status(status) => {
+                        self.startup_status = status;
+                    }
+                }
             }
         }
 
@@ -143,6 +181,18 @@ impl LiveVisualState {
 
         self.snapshot = Some(snapshot);
         self.last_modified = modified;
+    }
+
+    fn startup_status_line(&self) -> String {
+        match &self.startup_status {
+            LiveStartupStatus::DisabledByConfig => String::from("disabled (VIEWER_APP_LIVE_STARTUP=off)"),
+            LiveStartupStatus::DisabledMissingConfig => {
+                String::from("disabled (missing login env); using fallback snapshot path")
+            }
+            LiveStartupStatus::Starting => String::from("starting"),
+            LiveStartupStatus::Connected => String::from("connected"),
+            LiveStartupStatus::Failed(reason) => format!("failed ({reason})"),
+        }
     }
 }
 
@@ -203,8 +253,68 @@ where
     })
 }
 
-fn spawn_in_process_live_feed(config: InProcessLiveFeedConfig) -> Receiver<LiveVisualSnapshot> {
-    let (tx, rx) = mpsc::channel::<LiveVisualSnapshot>();
+fn parse_live_startup_mode(value: Option<&str>) -> LiveStartupMode {
+    match value
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "on" | "enabled" | "true" | "1" => LiveStartupMode::On,
+        "off" | "disabled" | "false" | "0" => LiveStartupMode::Off,
+        _ => LiveStartupMode::Auto,
+    }
+}
+
+fn live_startup_plan_from_lookup<F>(lookup: F) -> LiveStartupPlan
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mode = parse_live_startup_mode(lookup("VIEWER_APP_LIVE_STARTUP").as_deref());
+    let config = in_process_live_feed_config_from_lookup(&lookup);
+    match mode {
+        LiveStartupMode::Off => LiveStartupPlan {
+            config: None,
+            enabled: false,
+            startup_status: LiveStartupStatus::DisabledByConfig,
+        },
+        LiveStartupMode::On => {
+            if let Some(config) = config {
+                LiveStartupPlan {
+                    config: Some(config),
+                    enabled: true,
+                    startup_status: LiveStartupStatus::Starting,
+                }
+            } else {
+                LiveStartupPlan {
+                    config: None,
+                    enabled: false,
+                    startup_status: LiveStartupStatus::Failed(String::from(
+                        "missing required VIEWER_LOGIN_* env vars",
+                    )),
+                }
+            }
+        }
+        LiveStartupMode::Auto => {
+            if let Some(config) = config {
+                LiveStartupPlan {
+                    config: Some(config),
+                    enabled: true,
+                    startup_status: LiveStartupStatus::Starting,
+                }
+            } else {
+                LiveStartupPlan {
+                    config: None,
+                    enabled: false,
+                    startup_status: LiveStartupStatus::DisabledMissingConfig,
+                }
+            }
+        }
+    }
+}
+
+fn spawn_in_process_live_feed(config: InProcessLiveFeedConfig) -> Receiver<LiveFeedUpdate> {
+    let (tx, rx) = mpsc::channel::<LiveFeedUpdate>();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -221,9 +331,10 @@ fn spawn_in_process_live_feed(config: InProcessLiveFeedConfig) -> Receiver<LiveV
 
 async fn run_in_process_live_feed(
     config: InProcessLiveFeedConfig,
-    tx: mpsc::Sender<LiveVisualSnapshot>,
+    tx: mpsc::Sender<LiveFeedUpdate>,
 ) {
-    let _ = tx.send(LiveVisualSnapshot {
+    let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Starting));
+    let _ = tx.send(LiveFeedUpdate::Snapshot(LiveVisualSnapshot {
         source: String::from("viewer_app_in_process:start"),
         logged_in: false,
         first_sim_endpoint: None,
@@ -238,7 +349,7 @@ async fn run_in_process_live_feed(
         likely_broader_traffic: 0,
         unknown: 0,
         observed_at_unix_ms: now_unix_ms(),
-    });
+    }));
 
     let mut connection = Connection::new(ConnectionConfig {
         endpoint: config.endpoint.clone(),
@@ -248,6 +359,9 @@ async fn run_in_process_live_feed(
     let adapter = SecondLifeAdapter;
 
     if connection.connect().await.is_err() {
+        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(String::from(
+            "connect failed",
+        ))));
         return;
     }
 
@@ -261,10 +375,19 @@ async fn run_in_process_live_feed(
     };
 
     let Ok((result, _trace)) = connection.login_with_trace(&adapter, intent).await else {
+        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(String::from(
+            "login request failed",
+        ))));
         return;
     };
     let mut snapshot = build_live_visual_snapshot_from_result(&result);
-    let _ = tx.send(snapshot.clone());
+    let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
+    if !snapshot.logged_in {
+        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(String::from(
+            "login not successful",
+        ))));
+        return;
+    }
 
     if config.run_probe && matches!(result, GridLoginResult::Success(_)) {
         let _ = connection
@@ -282,7 +405,8 @@ async fn run_in_process_live_feed(
 
     update_live_visual_from_connection(&mut snapshot, &connection);
     snapshot.source = String::from("viewer_app_in_process:ready");
-    let _ = tx.send(snapshot);
+    let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot));
+    let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Connected));
 }
 
 fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisualSnapshot {
@@ -430,6 +554,7 @@ impl AppState {
         let ui = &mut self.ui;
         let camera = self.camera;
         let live_visual = self.live_visual_state.snapshot.clone();
+        let live_startup_status = self.live_visual_state.startup_status_line();
 
         self.renderer.render_frame(
             &camera,
@@ -444,6 +569,7 @@ impl AppState {
                     surface_size,
                     &camera,
                     live_visual.as_ref(),
+                    &live_startup_status,
                 );
             },
         )
@@ -656,5 +782,40 @@ mod tests {
         assert!(parse_bool_like("YES"));
         assert!(!parse_bool_like("false"));
         assert!(!parse_bool_like("0"));
+    }
+
+    #[test]
+    fn parse_live_startup_mode_defaults_to_auto_and_parses_values() {
+        assert_eq!(parse_live_startup_mode(None), LiveStartupMode::Auto);
+        assert_eq!(parse_live_startup_mode(Some("on")), LiveStartupMode::On);
+        assert_eq!(parse_live_startup_mode(Some("off")), LiveStartupMode::Off);
+    }
+
+    #[test]
+    fn live_startup_plan_respects_off_mode_even_with_credentials() {
+        let mut vars = HashMap::<String, String>::new();
+        vars.insert(String::from("VIEWER_APP_LIVE_STARTUP"), String::from("off"));
+        vars.insert(
+            String::from("VIEWER_LOGIN_ENDPOINT"),
+            String::from("https://example.invalid/login"),
+        );
+        vars.insert(String::from("VIEWER_LOGIN_USERNAME"), String::from("user"));
+        vars.insert(String::from("VIEWER_LOGIN_PASSWORD"), String::from("pass"));
+        let plan = live_startup_plan_from_lookup(|k| vars.get(k).cloned());
+        assert!(!plan.enabled);
+        assert!(plan.config.is_none());
+        assert_eq!(plan.startup_status, LiveStartupStatus::DisabledByConfig);
+    }
+
+    #[test]
+    fn live_startup_plan_reports_missing_config_when_forced_on() {
+        let vars = HashMap::<String, String>::from([(
+            String::from("VIEWER_APP_LIVE_STARTUP"),
+            String::from("on"),
+        )]);
+        let plan = live_startup_plan_from_lookup(|k| vars.get(k).cloned());
+        assert!(!plan.enabled);
+        assert!(plan.config.is_none());
+        assert!(matches!(plan.startup_status, LiveStartupStatus::Failed(_)));
     }
 }

@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First object-facing bounded payload path through ingestion seam
+Phase E - App-owned live startup orchestration path
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -23,6 +23,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - spawns a narrow background live-feed worker when login env vars are present
   - uses real `viewer_net` login/bootstrap/handshake probe state in-process
   - falls back to sanitized snapshot ingest (`live_visual_snapshot.json`) when in-process feed is unavailable
+  - startup mode control now exists:
+    - `VIEWER_APP_LIVE_STARTUP=auto` (default)
+    - `VIEWER_APP_LIVE_STARTUP=on`
+    - `VIEWER_APP_LIVE_STARTUP=off`
+  - app now surfaces explicit startup status in UI (`starting`, `connected`, `disabled`, `failed`)
   - debug overlay displays live-derived connection/handshake/traffic summary fields
 - sandbox cube visual indicator now reflects live state:
     - default/offline: red, scale 1.0
@@ -61,6 +66,10 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `viewer_app` builds seam items each frame via `WorldObjectIngestionAdapter::adapt(snapshot)`
   - `viewer_app` applies seam to `Scene::apply_world_object_ingestion_seam(...)`
   - `WorldIngestionProxy` is no longer implicitly created by snapshot mapping internals; it is fed through the seam path
+- app-owned startup orchestration is now explicit and first-class:
+  - app owns startup mode selection and config gating
+  - app receives startup status + snapshots from worker updates
+  - app maps runtime state into seam-fed scene path every frame
 - seam now carries one narrow typed payload category beyond generic proxy state:
   - new lane: `TrafficSignalPayload`
   - typed payload fields:
@@ -234,7 +243,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 
 The immediate blocker is no longer login/bootstrap transport viability. The current blocker is phase control:
 
-- we now have connected live diagnostics, a meaningful world-facing composition, and a typed ingestion seam
+- we now have connected live diagnostics, a meaningful world-facing composition, a typed ingestion seam, and explicit app-owned startup orchestration
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
 - next steps must decide between:
   - adding one more bounded object-like seam payload category, or
