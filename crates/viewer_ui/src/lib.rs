@@ -214,8 +214,17 @@ mod tests {
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
             decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 1,
         };
         let lines = live_visual_lines(Some(&snapshot));
@@ -224,5 +233,10 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("CrossedRegion=1")));
     }
 }
+
+
+
+
+
 
 

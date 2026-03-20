@@ -355,8 +355,17 @@ async fn run_in_process_live_feed(
         decoded_coarse_first_x: None,
         decoded_coarse_first_y: None,
         decoded_coarse_first_z: None,
+        decoded_coarse_second_x: None,
+        decoded_coarse_second_y: None,
+        decoded_coarse_second_z: None,
+        decoded_coarse_third_x: None,
+        decoded_coarse_third_y: None,
+        decoded_coarse_third_z: None,
         decoded_health_updates: 0,
         decoded_health_last_basis_points: None,
+        decoded_viewer_time_updates: 0,
+        decoded_viewer_time_body_len: None,
+        decoded_viewer_time_signature: None,
         observed_at_unix_ms: now_unix_ms(),
     }));
 
@@ -438,8 +447,17 @@ fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisua
         decoded_coarse_first_x: None,
         decoded_coarse_first_y: None,
         decoded_coarse_first_z: None,
+        decoded_coarse_second_x: None,
+        decoded_coarse_second_y: None,
+        decoded_coarse_second_z: None,
+        decoded_coarse_third_x: None,
+        decoded_coarse_third_y: None,
+        decoded_coarse_third_z: None,
         decoded_health_updates: 0,
         decoded_health_last_basis_points: None,
+        decoded_viewer_time_updates: 0,
+        decoded_viewer_time_body_len: None,
+        decoded_viewer_time_signature: None,
         observed_at_unix_ms: now_unix_ms(),
     };
 
@@ -486,8 +504,17 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
     snapshot.decoded_coarse_first_x = decoded.coarse_location_last_first.map(|xyz| xyz[0]);
     snapshot.decoded_coarse_first_y = decoded.coarse_location_last_first.map(|xyz| xyz[1]);
     snapshot.decoded_coarse_first_z = decoded.coarse_location_last_first.map(|xyz| xyz[2]);
+    snapshot.decoded_coarse_second_x = decoded.coarse_location_last_second.map(|xyz| xyz[0]);
+    snapshot.decoded_coarse_second_y = decoded.coarse_location_last_second.map(|xyz| xyz[1]);
+    snapshot.decoded_coarse_second_z = decoded.coarse_location_last_second.map(|xyz| xyz[2]);
+    snapshot.decoded_coarse_third_x = decoded.coarse_location_last_third.map(|xyz| xyz[0]);
+    snapshot.decoded_coarse_third_y = decoded.coarse_location_last_third.map(|xyz| xyz[1]);
+    snapshot.decoded_coarse_third_z = decoded.coarse_location_last_third.map(|xyz| xyz[2]);
     snapshot.decoded_health_updates = decoded.health_updates as u32;
     snapshot.decoded_health_last_basis_points = decoded.health_last_basis_points;
+    snapshot.decoded_viewer_time_updates = decoded.simulator_viewer_time_updates as u32;
+    snapshot.decoded_viewer_time_body_len = decoded.simulator_viewer_time_last_body_len;
+    snapshot.decoded_viewer_time_signature = decoded.simulator_viewer_time_last_signature;
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -902,12 +929,71 @@ mod tests {
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
             decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 1,
             decoded_health_last_basis_points: Some(6200),
+            decoded_viewer_time_updates: 1,
+            decoded_viewer_time_body_len: Some(5),
+            decoded_viewer_time_signature: Some(0xDDCCBBAA),
             observed_at_unix_ms: 1,
         }));
         assert!(should_apply_world_ingestion_seam(Some(&empty), &changed));
         assert!(!should_apply_world_ingestion_seam(Some(&changed), &changed));
+        let mut viewer_time_changed_snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 2,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 1,
+            unknown: 0,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
+            decoded_health_updates: 1,
+            decoded_health_last_basis_points: Some(6200),
+            decoded_viewer_time_updates: 1,
+            decoded_viewer_time_body_len: Some(5),
+            decoded_viewer_time_signature: Some(0xDDCCBBAA),
+            observed_at_unix_ms: 1,
+        };
+        let viewer_time_first = WorldObjectIngestionAdapter::adapt(Some(&viewer_time_changed_snapshot));
+        viewer_time_changed_snapshot.decoded_viewer_time_updates = 2;
+        let viewer_time_second =
+            WorldObjectIngestionAdapter::adapt(Some(&viewer_time_changed_snapshot));
+        assert!(should_apply_world_ingestion_seam(
+            Some(&viewer_time_first),
+            &viewer_time_second
+        ));
+        let mut coarse_neighbor_changed_snapshot = viewer_time_changed_snapshot.clone();
+        coarse_neighbor_changed_snapshot.decoded_coarse_second_x = Some(96);
+        coarse_neighbor_changed_snapshot.decoded_coarse_second_y = Some(56);
+        coarse_neighbor_changed_snapshot.decoded_coarse_second_z = Some(14);
+        let coarse_neighbor_changed =
+            WorldObjectIngestionAdapter::adapt(Some(&coarse_neighbor_changed_snapshot));
+        assert!(should_apply_world_ingestion_seam(
+            Some(&viewer_time_second),
+            &coarse_neighbor_changed
+        ));
     }
 
     #[test]
@@ -932,8 +1018,17 @@ mod tests {
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
             decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 1,
             decoded_health_last_basis_points: Some(6200),
+            decoded_viewer_time_updates: 1,
+            decoded_viewer_time_body_len: Some(5),
+            decoded_viewer_time_signature: Some(0xDDCCBBAA),
             observed_at_unix_ms: 1,
         };
         assert!(should_apply_live_visual_snapshot(None, Some(&first)));
@@ -941,9 +1036,20 @@ mod tests {
         let mut second = first.clone();
         second.observed_at_unix_ms = 2;
         assert!(should_apply_live_visual_snapshot(Some(&first), Some(&second)));
+        let mut viewer_time_second = first.clone();
+        viewer_time_second.decoded_viewer_time_updates = 2;
+        assert!(should_apply_live_visual_snapshot(
+            Some(&first),
+            Some(&viewer_time_second)
+        ));
         assert!(should_apply_live_visual_snapshot(Some(&first), None));
     }
 }
+
+
+
+
+
 
 
 

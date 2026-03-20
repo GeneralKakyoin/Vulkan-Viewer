@@ -940,6 +940,8 @@ pub struct EarlySimulatorTrafficSummary {
 pub struct DecodedCoarseLocationUpdate {
     pub location_count: u8,
     pub first_location: Option<[u8; 3]>,
+    pub second_location: Option<[u8; 3]>,
+    pub third_location: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -947,13 +949,24 @@ pub struct DecodedHealthMessage {
     pub health: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedSimulatorViewerTimeMessage {
+    pub body_len: u16,
+    pub signature: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulatorPayloadDecodeSummary {
     pub coarse_location_updates: usize,
     pub coarse_location_last_count: Option<u8>,
     pub coarse_location_last_first: Option<[u8; 3]>,
+    pub coarse_location_last_second: Option<[u8; 3]>,
+    pub coarse_location_last_third: Option<[u8; 3]>,
     pub health_updates: usize,
     pub health_last_basis_points: Option<u16>,
+    pub simulator_viewer_time_updates: usize,
+    pub simulator_viewer_time_last_body_len: Option<u16>,
+    pub simulator_viewer_time_last_signature: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1548,6 +1561,10 @@ impl Connection {
                     Some(decoded.location_count);
                 self.simulator_payload_decode_summary.coarse_location_last_first =
                     decoded.first_location;
+                self.simulator_payload_decode_summary.coarse_location_last_second =
+                    decoded.second_location;
+                self.simulator_payload_decode_summary.coarse_location_last_third =
+                    decoded.third_location;
             }
         }
         if classification.kind == FirstSimulatorInboundMessageKind::HealthMessage
@@ -1557,6 +1574,17 @@ impl Connection {
                 self.simulator_payload_decode_summary.health_updates += 1;
                 self.simulator_payload_decode_summary.health_last_basis_points =
                     Some(health_to_basis_points(decoded.health));
+            }
+        }
+        if classification.kind == FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage
+            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        {
+            if let Some(decoded) = decode_simulator_viewer_time_message(payload) {
+                self.simulator_payload_decode_summary.simulator_viewer_time_updates += 1;
+                self.simulator_payload_decode_summary.simulator_viewer_time_last_body_len =
+                    Some(decoded.body_len);
+                self.simulator_payload_decode_summary.simulator_viewer_time_last_signature =
+                    decoded.signature;
             }
         }
         if let Some(kind) = to_region_transition_control_kind(classification.kind) {
@@ -2700,9 +2728,21 @@ fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocation
     } else {
         None
     };
+    let second_location = if location_count > 1 {
+        Some([body[4], body[5], body[6]])
+    } else {
+        None
+    };
+    let third_location = if location_count > 2 {
+        Some([body[7], body[8], body[9]])
+    } else {
+        None
+    };
     Some(DecodedCoarseLocationUpdate {
         location_count,
         first_location,
+        second_location,
+        third_location,
     })
 }
 
@@ -2718,6 +2758,24 @@ fn decode_health_message(payload: &[u8]) -> Option<DecodedHealthMessage> {
         return None;
     }
     Some(DecodedHealthMessage { health })
+}
+
+fn decode_simulator_viewer_time_message(payload: &[u8]) -> Option<DecodedSimulatorViewerTimeMessage> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let body_len = u16::try_from(body.len()).ok()?;
+    let signature = body.get(0..4).and_then(|bytes| {
+        let raw: [u8; 4] = bytes.try_into().ok()?;
+        Some(u32::from_le_bytes(raw))
+    });
+    Some(DecodedSimulatorViewerTimeMessage {
+        body_len,
+        signature,
+    })
 }
 
 fn health_to_basis_points(value: f32) -> u16 {
@@ -4905,11 +4963,14 @@ mod tests {
 
     #[test]
     fn decode_coarse_location_update_extracts_count_and_first_location() {
-        let payload = make_medium_frequency_packet_with_body(6, &[2, 10, 20, 8, 30, 40, 9]);
+        let payload =
+            make_medium_frequency_packet_with_body(6, &[3, 10, 20, 8, 30, 40, 9, 60, 70, 11]);
         let decoded = decode_coarse_location_update(&payload)
             .expect("coarse location update should decode from medium packet body");
-        assert_eq!(decoded.location_count, 2);
+        assert_eq!(decoded.location_count, 3);
         assert_eq!(decoded.first_location, Some([10, 20, 8]));
+        assert_eq!(decoded.second_location, Some([30, 40, 9]));
+        assert_eq!(decoded.third_location, Some([60, 70, 11]));
     }
 
     #[test]
@@ -4920,6 +4981,16 @@ mod tests {
             decode_health_message(&payload).expect("health message should decode from packet body");
         assert!((decoded.health - 0.73).abs() < f32::EPSILON);
         assert_eq!(health_to_basis_points(decoded.health), 7300);
+    }
+
+    #[test]
+    fn decode_simulator_viewer_time_message_extracts_body_signature() {
+        let mut payload = make_low_frequency_packet(150);
+        payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x99, 0x88]);
+        let decoded = decode_simulator_viewer_time_message(&payload)
+            .expect("simulator viewer time message should decode from packet body");
+        assert_eq!(decoded.body_len, 6);
+        assert_eq!(decoded.signature, Some(0x44332211));
     }
 
     #[test]
@@ -4936,6 +5007,38 @@ mod tests {
         assert_eq!(summary.coarse_location_updates, 1);
         assert_eq!(summary.coarse_location_last_count, Some(1));
         assert_eq!(summary.coarse_location_last_first, Some([64, 32, 12]));
+        assert_eq!(summary.coarse_location_last_second, None);
+        assert_eq!(summary.coarse_location_last_third, None);
+    }
+
+    #[test]
+    fn observe_coarse_location_update_tracks_second_location_sample() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let payload = make_medium_frequency_packet_with_body(6, &[2, 64, 32, 12, 80, 48, 16]);
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("coarse location update should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.coarse_location_last_second, Some([80, 48, 16]));
+        assert_eq!(summary.coarse_location_last_third, None);
+    }
+
+    #[test]
+    fn observe_coarse_location_update_tracks_third_location_sample() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let payload =
+            make_medium_frequency_packet_with_body(6, &[3, 64, 32, 12, 80, 48, 16, 96, 56, 20]);
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("coarse location update should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.coarse_location_last_third, Some([96, 56, 20]));
     }
 
     #[test]
@@ -4952,6 +5055,23 @@ mod tests {
         let summary = connection.simulator_payload_decode_summary();
         assert_eq!(summary.health_updates, 1);
         assert_eq!(summary.health_last_basis_points, Some(6200));
+    }
+
+    #[test]
+    fn observe_simulator_viewer_time_updates_payload_decode_summary() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let mut payload = make_low_frequency_packet(150);
+        payload.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0x01]);
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("simulator viewer time message should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.simulator_viewer_time_updates, 1);
+        assert_eq!(summary.simulator_viewer_time_last_body_len, Some(5));
+        assert_eq!(summary.simulator_viewer_time_last_signature, Some(0xDDCCBBAA));
     }
 
     #[tokio::test]

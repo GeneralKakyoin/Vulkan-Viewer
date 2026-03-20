@@ -79,6 +79,8 @@ Status:
 - crate boundaries are holding
 - real login transport and diagnostics are viable
 - login compatibility has progressed to live successful login
+- first connected-world diagnostic slice is viable through seam-owned runtime mapping
+- bounded pre-world object/state composition is viable with multi-entity and lifecycle behavior
 
 ---
 
@@ -152,6 +154,6 @@ When meaningful progress is made, update:
 
 ## Current Recommended Next Step
 
-Begin seed capability bootstrap from successful live login state.
+Begin a narrower follow-on bounded world/object refinement slice on top of the completed coarse-neighborhood ingestion path.
 
-Do not move to simulator/world integration until capability/bootstrap startup is credible and documented.
+Do not move to broad simulator/world object decoding until this bounded seam-owned ingestion step is documented and test-protected.

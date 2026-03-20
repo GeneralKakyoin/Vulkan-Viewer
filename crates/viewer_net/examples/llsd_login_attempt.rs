@@ -251,8 +251,17 @@ fn build_base_live_visual_snapshot(result: &GridLoginResult) -> LiveVisualSnapsh
         decoded_coarse_first_x: None,
         decoded_coarse_first_y: None,
         decoded_coarse_first_z: None,
+        decoded_coarse_second_x: None,
+        decoded_coarse_second_y: None,
+        decoded_coarse_second_z: None,
+        decoded_coarse_third_x: None,
+        decoded_coarse_third_y: None,
+        decoded_coarse_third_z: None,
         decoded_health_updates: 0,
         decoded_health_last_basis_points: None,
+        decoded_viewer_time_updates: 0,
+        decoded_viewer_time_body_len: None,
+        decoded_viewer_time_signature: None,
         observed_at_unix_ms: now_unix_ms(),
     };
 
@@ -301,8 +310,17 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
     snapshot.decoded_coarse_first_x = decoded.coarse_location_last_first.map(|xyz| xyz[0]);
     snapshot.decoded_coarse_first_y = decoded.coarse_location_last_first.map(|xyz| xyz[1]);
     snapshot.decoded_coarse_first_z = decoded.coarse_location_last_first.map(|xyz| xyz[2]);
+    snapshot.decoded_coarse_second_x = decoded.coarse_location_last_second.map(|xyz| xyz[0]);
+    snapshot.decoded_coarse_second_y = decoded.coarse_location_last_second.map(|xyz| xyz[1]);
+    snapshot.decoded_coarse_second_z = decoded.coarse_location_last_second.map(|xyz| xyz[2]);
+    snapshot.decoded_coarse_third_x = decoded.coarse_location_last_third.map(|xyz| xyz[0]);
+    snapshot.decoded_coarse_third_y = decoded.coarse_location_last_third.map(|xyz| xyz[1]);
+    snapshot.decoded_coarse_third_z = decoded.coarse_location_last_third.map(|xyz| xyz[2]);
     snapshot.decoded_health_updates = decoded.health_updates as u32;
     snapshot.decoded_health_last_basis_points = decoded.health_last_basis_points;
+    snapshot.decoded_viewer_time_updates = decoded.simulator_viewer_time_updates as u32;
+    snapshot.decoded_viewer_time_body_len = decoded.simulator_viewer_time_last_body_len;
+    snapshot.decoded_viewer_time_signature = decoded.simulator_viewer_time_last_signature;
 }
 
 fn write_live_visual_snapshot(path: &PathBuf, snapshot: &LiveVisualSnapshot) -> Result<(), String> {
@@ -548,6 +566,11 @@ async fn inspect_first_simulator_handshake_once(
 
     Ok(())
 }
+
+
+
+
+
 
 
 

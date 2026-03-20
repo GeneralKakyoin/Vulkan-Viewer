@@ -3,6 +3,13 @@
 ## Current Focus
 Only work on the smallest steps that advance bounded world-facing live diagnostics while preserving crate boundaries and stopping before broad object/world decoding.
 
+Status note:
+- bounded pre-world object/state phase is now substantially complete
+- bounded broader-ingestion phase is now substantially complete:
+  - coarse-neighborhood sampling now carries bounded second+third coarse samples
+  - mapping is in place and test-protected across decode -> snapshot -> seam (`DecodedCoarseNeighborhoodPayload`) -> scene neighborhood-family roles
+- next phase should be a narrower bounded world/object refinement step that stays below broad object/world decoding
+
 ---
 
 ## Active Tasks
@@ -265,14 +272,28 @@ Status update (latest):
     - `Dormant`, `Warming`, `Active`, `Strained`
 - app runtime now also applies live snapshot scene updates on dirty-only changes:
   - snapshot apply is skipped when `LiveVisualSnapshot` content is unchanged
+- bounded live scene composition now has a first visually meaningful tiny-cluster hierarchy pass:
+  - coherent cluster-base layout now improves anchor/center/satellite readability
+  - decoded endpoint/coarse/health, seam proxy/composite, traffic payload, and entity family now read as one grouped slice
+  - composition is materially less marker-scattered at normal camera distance
+- lifecycle readability is now materially improved:
+  - lifecycle phase influences visible spacing and intensity
+  - active phase increases pulse and satellite spread
+  - strained phase increases stability-stress profile
+  - focused tests now lock this progression behavior
+- bounded seam ingestion now includes one additional tightly-related decoded lane for live progression signal:
+  - new lane: `DecodedViewerTimePayload`
+  - decoded source: inbound `SimulatorViewerTimeMessage` (tiny body/signature slice + update counter)
+  - seam-owned role: `WorldIngestionDecodedViewerTimePayload`
+  - decode -> snapshot -> seam -> scene path is test-protected, including presence/absence behavior
 - viewer_app-owned live startup orchestration is now first-class:
   - startup mode control (`VIEWER_APP_LIVE_STARTUP`: auto/on/off)
   - app-owned startup status mapping and diagnostics
   - app receives worker status + snapshot updates and feeds seam/scene path
-- next T8 slice should:
-  - refine lifecycle-aware multi-entity behavior (for example bounded phase transitions or lane-local stability semantics), or
-  - add one tiny supporting simulator-derived decoded input if it clearly improves the lifecycle slice,
-  while preserving the hard stop before broad object/world decoding
+- T8 status:
+  - substantially complete for the current bounded pre-world object/state phase
+  - next phase should begin the first richer bounded world/object ingestion slice through the existing seam,
+    while preserving the hard stop before broad object/world decoding
 
 ---
 

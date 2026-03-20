@@ -2,6 +2,111 @@
 
 ## Last Completed Work
 
+- Completed a substantial bounded broader-ingestion bundle with a coherent seam-owned local neighborhood composition:
+  - extended bounded coarse decode from first+second to first+second+third sample support
+  - decode summary now carries:
+    - `coarse_location_last_second`
+    - `coarse_location_last_third`
+  - runtime snapshot bridge now carries:
+    - `decoded_coarse_second_x/y/z`
+    - `decoded_coarse_third_x/y/z`
+  - seam neighborhood lane now carries bounded sample-family payload:
+    - `DecodedCoarseNeighborhoodPayload`
+  - scene neighborhood reflection is now a small role family:
+    - `WorldIngestionDecodedCoarseNeighborhoodPayload` (hub)
+    - `WorldIngestionDecodedCoarseNeighborhoodSatelliteA`
+    - `WorldIngestionDecodedCoarseNeighborhoodSatelliteB`
+- Performance-sensitive behavior preserved:
+  - app dirty-only snapshot/seam apply logic remains unchanged and test-covered
+  - no per-frame forced animation/update loop was introduced for neighborhood roles
+  - latest-value bounded decode semantics retained (no backlog processing)
+- Strengthened tests:
+  - `viewer_net`: third coarse sample decode + summary propagation
+  - `viewer_core`: neighborhood lane gating, role-family apply/remove, structured composition checks, cleanup checks
+  - `viewer_app`: neighborhood-only seam-change dirty-check path remains covered
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
+- Began the first bounded broader world/object ingestion phase with one meaningful seam-owned step:
+  - extended bounded coarse decode in `viewer_net` to carry a second coarse XYZ sample when present
+  - decode summary now carries:
+    - `coarse_location_last_second`
+  - runtime snapshot bridge now carries:
+    - `decoded_coarse_second_x`
+    - `decoded_coarse_second_y`
+    - `decoded_coarse_second_z`
+  - `viewer_core` seam now emits a broader-facing lane:
+    - `DecodedCoarseNeighborhoodPayload`
+  - scene now reflects this lane via seam-owned role:
+    - `WorldIngestionDecodedCoarseNeighborhoodPayload`
+  - this extends beyond the completed pre-world cluster while staying strictly below broad object/world decoding
+- Strengthened tests for decode -> snapshot -> seam -> scene on the new broader slice:
+  - `viewer_net`: second coarse sample decode + summary propagation
+  - `viewer_core`: coarse-neighborhood lane presence + scene role apply/remove + seam-empty cleanup
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
+- Consolidated phase-completion durability around viewer-time integration:
+  - `viewer_app` dirty-only tests now explicitly assert that viewer-time-only changes trigger:
+    - seam re-application decisions
+    - live-snapshot re-application decisions
+  - `viewer_core` now has a focused lifecycle-visibility test proving viewer-time updates alone can advance pulse intensity in the bounded object/state slice
+  - this locks lifecycle progression behavior without adding broad world/object decode scope
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
+- Added one more tightly-bounded decoded input lane to the seam-driven scene system:
+  - `viewer_net` now decodes a tiny `SimulatorViewerTimeMessage` payload slice:
+    - update counter
+    - payload body length
+    - first signature word
+  - decode summary now exposes:
+    - `simulator_viewer_time_updates`
+    - `simulator_viewer_time_last_body_len`
+    - `simulator_viewer_time_last_signature`
+  - app/example snapshot bridges now map these into `LiveVisualSnapshot`:
+    - `decoded_viewer_time_updates`
+    - `decoded_viewer_time_body_len`
+    - `decoded_viewer_time_signature`
+- Extended seam + scene mapping in `viewer_core` for this bounded decode:
+  - new lane: `DecodedViewerTimePayload`
+  - new seam-owned role: `WorldIngestionDecodedViewerTimePayload`
+  - lifecycle activity mapping now includes viewer-time update count as a bounded signal
+- Strengthened tests for seam ownership and mapping boundaries:
+  - `viewer_net`:
+    - `decode_simulator_viewer_time_message_extracts_body_signature`
+    - `observe_simulator_viewer_time_updates_payload_decode_summary`
+  - `viewer_core`:
+    - `world_object_ingestion_seam_includes_decoded_viewer_time_payload_when_present`
+    - `world_object_ingestion_seam_omits_decoded_viewer_time_payload_without_body_len`
+    - `scene_applies_and_removes_decoded_viewer_time_payload_role`
+    - seam-empty removal test now asserts viewer-time role cleanup
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
+- Reworked bounded scene composition geometry in `viewer_core` into a clearer tiny world-cluster hierarchy (no broad decode expansion):
+  - introduced a coherent cluster-base layout used across seam-owned roles
+  - improved anchor/center/satellite readability:
+    - region anchor + entry beacon remain macro reference
+    - seam proxy/composite/entity core now read as local center
+    - decoded endpoint/coarse/health + traffic payload now occupy clearer peripheral positions
+  - strengthened composition coherence from normal camera distance (less debug-marker scatter)
+- Strengthened lifecycle visibility in scene behavior:
+  - lifecycle progression now affects spacing/intensity in addition to color
+  - active phase visibly increases pulse scale + entity satellite spread
+  - strained phase increases stability-stress profile
+- Added focused composition/lifecycle tests in `viewer_core`:
+  - `scene_world_cluster_hierarchy_is_spatially_coherent`
+  - `lifecycle_progression_changes_pulse_and_satellite_spacing`
+  - existing seam/lifecycle/presence tests updated where intentional layout values changed
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Extended the bounded multi-entity object/state seam slice with lifecycle semantics in `viewer_core`:
   - added dedicated lifecycle lane:
     - `ObjectStateEntityLifecyclePayload`
@@ -757,7 +862,7 @@
 
 Focus only on:
 
-**extend the new bounded multi-entity object/state seam slice with one narrow temporal/lifecycle behavior (or one tiny supporting decoded lane) without starting broad object/world decoding**
+**choose between one more bounded visual hierarchy refinement or the first richer bounded world/object ingestion slice, without starting broad object/world decoding**
 
 This includes:
 - keep `viewer_net` unchanged as transport/session/handshake diagnostics source unless a tiny decoded field is clearly justified
@@ -770,6 +875,9 @@ Status update:
   - lifecycle lane exists
   - lifecycle scene roles exist
   - dirty-only snapshot/seam application exists in app orchestration
+- this visual hierarchy step is now complete:
+  - composition reads as anchor/center/satellite cluster
+  - lifecycle progression is visibly stronger in geometry/spacing
 
 Keep the current boundaries intact:
 - `viewer_net` = transport/session/handshake diagnostics

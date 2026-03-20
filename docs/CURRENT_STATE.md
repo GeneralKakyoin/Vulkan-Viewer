@@ -5,6 +5,10 @@ Phase E - App-owned live startup orchestration path
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
+Within this phase, the bounded pre-world object/state slice is now substantially complete:
+- seam-owned multi-lane decode -> snapshot -> seam -> scene mapping is established
+- multi-entity object/state + lifecycle progression are visible and test-protected
+- the hard stop remains: no broad object/world decoding in this phase
 
 ---
 
@@ -105,6 +109,22 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - seam-owned marker `WorldIngestionDecodedCoarseLocationPayload`
     - marker transform/color are driven by decoded coarse payload values
   - decode remains tiny, typed, reversible, and below broad world/object decoding scope
+- first bounded broader world/object-facing ingestion step beyond the pre-world cluster is now in place:
+  - new lane: `DecodedCoarseNeighborhoodPayload`
+  - bounded source: coarse sample family from `CoarseLocationUpdate` (second + third when available)
+  - minimal decoded fields carried through runtime:
+    - `decoded_coarse_second_x`
+    - `decoded_coarse_second_y`
+    - `decoded_coarse_second_z`
+    - `decoded_coarse_third_x`
+    - `decoded_coarse_third_y`
+    - `decoded_coarse_third_z`
+  - scene reflection:
+    - seam-owned neighborhood family:
+      - `WorldIngestionDecodedCoarseNeighborhoodPayload` (hub)
+      - `WorldIngestionDecodedCoarseNeighborhoodSatelliteA`
+      - `WorldIngestionDecodedCoarseNeighborhoodSatelliteB`
+  - this is the first broader ingestion move while still strictly below broad object/world decoding
 - seam now carries a second minimal real simulator-payload decode lane:
   - new lane: `DecodedHealthPayload`
   - decoded source is simulator-side inbound `HealthMessage` packet body (low `0xffff008a`)
@@ -114,6 +134,17 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - seam-owned marker `WorldIngestionDecodedHealthPayload`
     - marker transform/color are driven by decoded health basis-point values
   - this advances bounded multi-input seam ingestion without broad object/world decoding
+- seam now carries a third tightly-bounded simulator-payload decode lane that improves world-slice liveliness:
+  - new lane: `DecodedViewerTimePayload`
+  - decoded source is simulator-side inbound `SimulatorViewerTimeMessage` packet body (low `0xffff0096`)
+  - minimal decoded fields:
+    - decoded payload body length
+    - decoded first signature word
+    - update counter
+  - scene reflection:
+    - seam-owned marker `WorldIngestionDecodedViewerTimePayload`
+    - marker transform/color are driven by bounded viewer-time decode fields
+  - lane remains diagnostic-first and explicitly below broad object/world decoding
 - first bounded object-like decoded composition now exists:
   - composition source lanes:
     - `DecodedCoarseLocationPayload`
@@ -152,6 +183,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - lifecycle lane carries tiny bounded update counters:
     - `decoded_coarse_updates`
     - `decoded_health_updates`
+    - `decoded_viewer_time_updates` (when available)
   - seam-owned lifecycle scene roles now include:
     - `WorldObjectStateEntityPulse`
     - `WorldObjectStateEntityStability`
@@ -159,6 +191,18 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - phase classification (`Dormant`, `Warming`, `Active`, `Strained`) from update counters + health basis points
     - pulse/stability transforms and colors derive only from existing bounded decoded fields
   - this advances scene-system liveliness while remaining below broad object/world decoding
+- bounded world-facing scene composition now has a clearer tiny-cluster spatial hierarchy:
+  - composition is intentionally grouped around a coherent cluster base derived from region presence
+  - anchor/center/satellite readability improved:
+    - region anchor + entry beacon remain macro orientation cues
+    - seam proxy and decoded composite now read as local cluster center cues
+    - decoded endpoint/coarse/health and traffic payload now sit in clearer peripheral bands
+  - world-like grouping is materially stronger from normal camera distance (less marker scatter)
+- lifecycle readability is now visibly stronger in scene geometry:
+  - lifecycle phase drives not only marker color, but also spacing and intensity in the entity family
+  - active lifecycle expands satellite spacing and pulse intensity
+  - strained lifecycle increases stability-column stress profile
+  - this progression is test-protected and visible without relying only on debug text
 - app runtime now avoids unnecessary seam/scene churn when seam content is unchanged:
   - `viewer_app` compares previous vs newly adapted seam each frame
   - seam application runs only on change (`dirty-only` path)
@@ -167,6 +211,16 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - `viewer_app` compares previous vs current `LiveVisualSnapshot` before applying `Scene::apply_live_visual_snapshot(...)`
   - snapshot application runs only on change (`dirty-only` path)
   - seam adaptation still runs each frame in app orchestration flow
+- current pre-world bounded object/state phase is now substantially complete for this slice:
+  - seam ownership is explicit and test-protected across presence/traffic/decoded/object-state/lifecycle roles
+  - cluster composition is readable as a tiny live world slice from normal camera distance
+  - additional progress beyond this point should move to the first richer bounded world/object ingestion slice,
+    while preserving the hard stop before broad object/world decoding
+- current bounded broader-ingestion phase is now substantially complete:
+  - bounded local-neighborhood composition is seam-owned and visibly beyond isolated markers
+  - decode -> snapshot -> seam -> scene mapping is test-protected for coarse neighborhood family behavior
+  - dirty-only app orchestration behavior remains intact (no per-frame forced churn)
+  - next phase should remain narrow and avoid broad object/world decoding
 
 ### Architecture
 - clear crate boundaries
@@ -346,6 +400,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 ## Most Likely Immediate Work
 
 - extend seam/object-state composition behavior beyond decoded endpoint + coarse + health inputs while preserving current bounded seam ownership
+- maintain visual hierarchy/readability of the bounded live cluster as additional bounded lanes are introduced
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability

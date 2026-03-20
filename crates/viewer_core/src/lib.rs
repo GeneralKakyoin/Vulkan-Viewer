@@ -28,7 +28,11 @@ pub enum InstanceRole {
     WorldIngestionTrafficPayload,
     WorldIngestionDecodedEndpointPayload,
     WorldIngestionDecodedCoarseLocationPayload,
+    WorldIngestionDecodedCoarseNeighborhoodPayload,
+    WorldIngestionDecodedCoarseNeighborhoodSatelliteA,
+    WorldIngestionDecodedCoarseNeighborhoodSatelliteB,
     WorldIngestionDecodedHealthPayload,
+    WorldIngestionDecodedViewerTimePayload,
     WorldIngestionDecodedCompositeBeacon,
     WorldObjectStateEntityBody,
     WorldObjectStateEntityAura,
@@ -95,9 +99,27 @@ pub struct LiveVisualSnapshot {
     #[serde(default)]
     pub decoded_coarse_first_z: Option<u8>,
     #[serde(default)]
+    pub decoded_coarse_second_x: Option<u8>,
+    #[serde(default)]
+    pub decoded_coarse_second_y: Option<u8>,
+    #[serde(default)]
+    pub decoded_coarse_second_z: Option<u8>,
+    #[serde(default)]
+    pub decoded_coarse_third_x: Option<u8>,
+    #[serde(default)]
+    pub decoded_coarse_third_y: Option<u8>,
+    #[serde(default)]
+    pub decoded_coarse_third_z: Option<u8>,
+    #[serde(default)]
     pub decoded_health_updates: u32,
     #[serde(default)]
     pub decoded_health_last_basis_points: Option<u16>,
+    #[serde(default)]
+    pub decoded_viewer_time_updates: u32,
+    #[serde(default)]
+    pub decoded_viewer_time_body_len: Option<u16>,
+    #[serde(default)]
+    pub decoded_viewer_time_signature: Option<u32>,
     pub observed_at_unix_ms: u64,
 }
 
@@ -182,7 +204,9 @@ pub enum WorldObjectIngestionLane {
     TrafficSignalPayload,
     DecodedSimulatorEndpointPayload,
     DecodedCoarseLocationPayload,
+    DecodedCoarseNeighborhoodPayload,
     DecodedHealthPayload,
+    DecodedViewerTimePayload,
     ObjectStateEntitySeedPayload,
     ObjectStateEntityLifecyclePayload,
 }
@@ -200,9 +224,14 @@ pub struct WorldObjectIngestionItem {
     pub decoded_endpoint_host_tail: Option<u8>,
     pub decoded_coarse_location_count: Option<u8>,
     pub decoded_coarse_first_xyz: Option<[u8; 3]>,
+    pub decoded_coarse_second_xyz: Option<[u8; 3]>,
+    pub decoded_coarse_third_xyz: Option<[u8; 3]>,
     pub decoded_coarse_updates: Option<u32>,
     pub decoded_health_updates: Option<u32>,
     pub decoded_health_basis_points: Option<u16>,
+    pub decoded_viewer_time_updates: Option<u32>,
+    pub decoded_viewer_time_body_len: Option<u16>,
+    pub decoded_viewer_time_signature: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -227,9 +256,14 @@ impl WorldObjectIngestionSeam {
             decoded_endpoint_host_tail: None,
             decoded_coarse_location_count: None,
             decoded_coarse_first_xyz: None,
+            decoded_coarse_second_xyz: None,
+            decoded_coarse_third_xyz: None,
             decoded_coarse_updates: None,
             decoded_health_updates: None,
             decoded_health_basis_points: None,
+            decoded_viewer_time_updates: None,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
         }];
         if slice.traffic.available {
             items.push(WorldObjectIngestionItem {
@@ -244,9 +278,14 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_coarse_second_xyz: None,
+                decoded_coarse_third_xyz: None,
                 decoded_coarse_updates: None,
                 decoded_health_updates: None,
                 decoded_health_basis_points: None,
+                decoded_viewer_time_updates: None,
+                decoded_viewer_time_body_len: None,
+                decoded_viewer_time_signature: None,
             });
         }
         Self {
@@ -288,9 +327,14 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: Some(endpoint_host_tail),
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_coarse_second_xyz: None,
+                decoded_coarse_third_xyz: None,
                 decoded_coarse_updates: None,
                 decoded_health_updates: None,
                 decoded_health_basis_points: None,
+                decoded_viewer_time_updates: None,
+                decoded_viewer_time_body_len: None,
+                decoded_viewer_time_signature: None,
             });
         }
         if let Some(location_count) = snapshot.and_then(|s| s.decoded_coarse_location_count) {
@@ -299,6 +343,20 @@ impl WorldObjectIngestionSeam {
                     s.decoded_coarse_first_x?,
                     s.decoded_coarse_first_y?,
                     s.decoded_coarse_first_z?,
+                ])
+            });
+            let second_xyz = snapshot.and_then(|s| {
+                Some([
+                    s.decoded_coarse_second_x?,
+                    s.decoded_coarse_second_y?,
+                    s.decoded_coarse_second_z?,
+                ])
+            });
+            let third_xyz = snapshot.and_then(|s| {
+                Some([
+                    s.decoded_coarse_third_x?,
+                    s.decoded_coarse_third_y?,
+                    s.decoded_coarse_third_z?,
                 ])
             });
             let (stage, region_coords) = snapshot
@@ -330,10 +388,38 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: Some(location_count),
                 decoded_coarse_first_xyz: first_xyz,
+                decoded_coarse_second_xyz: second_xyz,
+                decoded_coarse_third_xyz: third_xyz,
                 decoded_coarse_updates: snapshot.map(|s| s.decoded_coarse_updates),
                 decoded_health_updates: None,
                 decoded_health_basis_points: None,
+                decoded_viewer_time_updates: None,
+                decoded_viewer_time_body_len: None,
+                decoded_viewer_time_signature: None,
             });
+            if let Some(coarse_second_xyz) = second_xyz {
+                seam.items.push(WorldObjectIngestionItem {
+                    lane: WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload,
+                    stage,
+                    region_coords,
+                    simulator_target_present: false,
+                    traffic_broader_count: 0,
+                    traffic_unknown_count: 0,
+                    traffic_region_control_count: 0,
+                    decoded_endpoint_port: None,
+                    decoded_endpoint_host_tail: None,
+                    decoded_coarse_location_count: Some(location_count),
+                    decoded_coarse_first_xyz: first_xyz,
+                    decoded_coarse_second_xyz: Some(coarse_second_xyz),
+                    decoded_coarse_third_xyz: third_xyz,
+                    decoded_coarse_updates: snapshot.map(|s| s.decoded_coarse_updates),
+                    decoded_health_updates: None,
+                    decoded_health_basis_points: None,
+                    decoded_viewer_time_updates: None,
+                    decoded_viewer_time_body_len: None,
+                    decoded_viewer_time_signature: None,
+                });
+            }
         }
         if let Some(health_basis_points) = snapshot.and_then(|s| s.decoded_health_last_basis_points) {
             let (stage, region_coords) = snapshot
@@ -365,9 +451,54 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_coarse_second_xyz: None,
+                decoded_coarse_third_xyz: None,
                 decoded_coarse_updates: None,
                 decoded_health_updates: snapshot.map(|s| s.decoded_health_updates),
                 decoded_health_basis_points: Some(health_basis_points),
+                decoded_viewer_time_updates: None,
+                decoded_viewer_time_body_len: None,
+                decoded_viewer_time_signature: None,
+            });
+        }
+        if let Some(body_len) = snapshot.and_then(|s| s.decoded_viewer_time_body_len) {
+            let (stage, region_coords) = snapshot
+                .map(|s| {
+                    (
+                        if s.logged_in && s.handshake_agent_movement_complete {
+                            WorldEntryStage::EnteredFirstRegion
+                        } else if s.logged_in {
+                            WorldEntryStage::Connected
+                        } else {
+                            WorldEntryStage::Offline
+                        },
+                        match (s.first_sim_region_x, s.first_sim_region_y) {
+                            (Some(x), Some(y)) => Some([x, y]),
+                            _ => None,
+                        },
+                    )
+                })
+                .unwrap_or((WorldEntryStage::Offline, None));
+            seam.items.push(WorldObjectIngestionItem {
+                lane: WorldObjectIngestionLane::DecodedViewerTimePayload,
+                stage,
+                region_coords,
+                simulator_target_present: false,
+                traffic_broader_count: 0,
+                traffic_unknown_count: 0,
+                traffic_region_control_count: 0,
+                decoded_endpoint_port: None,
+                decoded_endpoint_host_tail: None,
+                decoded_coarse_location_count: None,
+                decoded_coarse_first_xyz: None,
+                decoded_coarse_second_xyz: None,
+                decoded_coarse_third_xyz: None,
+                decoded_coarse_updates: None,
+                decoded_health_updates: None,
+                decoded_health_basis_points: None,
+                decoded_viewer_time_updates: snapshot.map(|s| s.decoded_viewer_time_updates),
+                decoded_viewer_time_body_len: Some(body_len),
+                decoded_viewer_time_signature: snapshot.and_then(|s| s.decoded_viewer_time_signature),
             });
         }
         if let Some(state) = snapshot {
@@ -407,9 +538,28 @@ impl WorldObjectIngestionSeam {
                     decoded_endpoint_host_tail: None,
                     decoded_coarse_location_count: Some(coarse_count),
                     decoded_coarse_first_xyz: Some(coarse_first_xyz),
+                    decoded_coarse_second_xyz: match (
+                        state.decoded_coarse_second_x,
+                        state.decoded_coarse_second_y,
+                        state.decoded_coarse_second_z,
+                    ) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => None,
+                    },
+                    decoded_coarse_third_xyz: match (
+                        state.decoded_coarse_third_x,
+                        state.decoded_coarse_third_y,
+                        state.decoded_coarse_third_z,
+                    ) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => None,
+                    },
                     decoded_coarse_updates: Some(state.decoded_coarse_updates),
                     decoded_health_updates: Some(state.decoded_health_updates),
                     decoded_health_basis_points: Some(health_basis_points),
+                    decoded_viewer_time_updates: Some(state.decoded_viewer_time_updates),
+                    decoded_viewer_time_body_len: state.decoded_viewer_time_body_len,
+                    decoded_viewer_time_signature: state.decoded_viewer_time_signature,
                 });
                 seam.items.push(WorldObjectIngestionItem {
                     lane: WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload,
@@ -423,9 +573,28 @@ impl WorldObjectIngestionSeam {
                     decoded_endpoint_host_tail: None,
                     decoded_coarse_location_count: Some(coarse_count),
                     decoded_coarse_first_xyz: Some(coarse_first_xyz),
+                    decoded_coarse_second_xyz: match (
+                        state.decoded_coarse_second_x,
+                        state.decoded_coarse_second_y,
+                        state.decoded_coarse_second_z,
+                    ) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => None,
+                    },
+                    decoded_coarse_third_xyz: match (
+                        state.decoded_coarse_third_x,
+                        state.decoded_coarse_third_y,
+                        state.decoded_coarse_third_z,
+                    ) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => None,
+                    },
                     decoded_coarse_updates: Some(state.decoded_coarse_updates),
                     decoded_health_updates: Some(state.decoded_health_updates),
                     decoded_health_basis_points: Some(health_basis_points),
+                    decoded_viewer_time_updates: Some(state.decoded_viewer_time_updates),
+                    decoded_viewer_time_body_len: state.decoded_viewer_time_body_len,
+                    decoded_viewer_time_signature: state.decoded_viewer_time_signature,
                 });
             }
         }
@@ -639,6 +808,48 @@ impl Scene {
             .items
             .iter()
             .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload,
+                MeshKind::Cube,
+                world_ingestion_decoded_coarse_neighborhood_transform(item),
+                world_ingestion_decoded_coarse_neighborhood_color(item),
+            );
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA,
+                MeshKind::AxisMarker,
+                world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(item),
+                world_ingestion_decoded_coarse_neighborhood_satellite_a_color(item),
+            );
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB,
+                MeshKind::AxisMarker,
+                world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(item),
+                world_ingestion_decoded_coarse_neighborhood_satellite_b_color(item),
+            );
+        } else {
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB,
+            );
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
         {
             upsert_instance(
@@ -652,6 +863,26 @@ impl Scene {
             remove_instance(
                 &mut self.instances,
                 InstanceRole::WorldIngestionDecodedHealthPayload,
+            );
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedViewerTimePayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedViewerTimePayload,
+                MeshKind::AxisMarker,
+                world_ingestion_decoded_viewer_time_transform(item),
+                world_ingestion_decoded_viewer_time_color(item),
+            );
+        } else {
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedViewerTimePayload,
             );
         }
 
@@ -822,6 +1053,11 @@ fn world_presence_offset(region_coords: Option<[u32; 2]>) -> [f32; 2] {
     }
 }
 
+fn world_cluster_base(region_coords: Option<[u32; 2]>) -> [f32; 2] {
+    let [offset_x, offset_z] = world_presence_offset(region_coords);
+    [3.0 + offset_x, offset_z - 1.95]
+}
+
 fn world_region_anchor_transform(presence: FirstRegionPresence) -> Transform {
     let [offset_x, offset_z] = world_presence_offset(presence.region_coords);
     Transform {
@@ -918,13 +1154,11 @@ enum TrafficPillarKind {
 }
 
 fn world_traffic_pillar_transform(slice: WorldDiagnosticSlice, kind: TrafficPillarKind) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(slice.presence.region_coords);
-    let base_x = 3.0 + offset_x;
-    let base_z = offset_z;
+    let [base_x, base_z] = world_cluster_base(slice.presence.region_coords);
     let (x_shift, z_shift) = match kind {
-        TrafficPillarKind::Broader => (-0.9, 0.9),
-        TrafficPillarKind::Unknown => (0.0, 1.0),
-        TrafficPillarKind::RegionControl => (0.9, 0.9),
+        TrafficPillarKind::Broader => (-1.05, 0.95),
+        TrafficPillarKind::Unknown => (0.0, 1.05),
+        TrafficPillarKind::RegionControl => (1.05, 0.95),
     };
     let raw_count = match kind {
         TrafficPillarKind::Broader => slice.traffic.likely_broader,
@@ -955,14 +1189,14 @@ fn world_traffic_pillar_color(kind: TrafficPillarKind) -> [f32; 3] {
 }
 
 fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
     let (y, scale) = match item.stage {
-        WorldEntryStage::EnteredFirstRegion => (0.32, [0.18, 0.18, 0.18]),
-        WorldEntryStage::Connected => (0.24, [0.14, 0.14, 0.14]),
-        WorldEntryStage::Offline => (0.20, [0.10, 0.10, 0.10]),
+        WorldEntryStage::EnteredFirstRegion => (0.36, [0.22, 0.22, 0.22]),
+        WorldEntryStage::Connected => (0.28, [0.18, 0.18, 0.18]),
+        WorldEntryStage::Offline => (0.22, [0.12, 0.12, 0.12]),
     };
     Transform {
-        position: [3.0 + offset_x, y, offset_z - 0.85],
+        position: [base_x, y, base_z + 0.22],
         scale,
     }
 }
@@ -979,16 +1213,16 @@ fn world_ingestion_proxy_color(item: WorldObjectIngestionItem) -> [f32; 3] {
 }
 
 fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
     let weighted = item
         .traffic_broader_count
         .saturating_add(item.traffic_unknown_count.saturating_mul(2))
         .saturating_add(item.traffic_region_control_count.saturating_mul(3))
         .min(30) as f32;
-    let y = 0.42 + weighted * 0.015;
-    let scale = 0.22 + weighted * 0.006;
+    let y = 0.50 + weighted * 0.012;
+    let scale = 0.24 + weighted * 0.005;
     Transform {
-        position: [3.0 + offset_x + 0.85, y, offset_z - 0.85],
+        position: [base_x + 0.92, y, base_z + 0.18],
         scale: [scale, scale, scale],
     }
 }
@@ -1015,11 +1249,11 @@ fn decode_simulator_endpoint(endpoint: Option<&str>) -> Option<(u16, u8)> {
 }
 
 fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
     let host_tail = f32::from(item.decoded_endpoint_host_tail.unwrap_or(0));
     let port = f32::from(item.decoded_endpoint_port.unwrap_or(0));
-    let x = 3.0 + offset_x - 0.85 + ((host_tail / 255.0) - 0.5) * 0.9;
-    let z = offset_z - 1.2;
+    let x = base_x - 0.96 + ((host_tail / 255.0) - 0.5) * 0.85;
+    let z = base_z - 0.18;
     let y = 0.48 + ((port % 1000.0) / 1000.0) * 0.6;
     let scale = 0.18 + ((host_tail % 32.0) / 32.0) * 0.14;
     Transform {
@@ -1040,10 +1274,10 @@ fn world_ingestion_decoded_endpoint_color(item: WorldObjectIngestionItem) -> [f3
 }
 
 fn world_ingestion_decoded_coarse_location_transform(item: WorldObjectIngestionItem) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
-    let x = 3.0 + offset_x - 0.45 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.6;
-    let z = offset_z - 1.85 + ((f32::from(coarse_y) / 255.0) - 0.5) * 1.6;
+    let x = base_x - 0.42 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.4;
+    let z = base_z - 0.72 + ((f32::from(coarse_y) / 255.0) - 0.5) * 1.2;
     let y = 0.28 + (f32::from(coarse_z) / 255.0) * 1.0;
     let count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
     let scale = (0.16 + count * 0.01).clamp(0.16, 0.42);
@@ -1064,14 +1298,81 @@ fn world_ingestion_decoded_coarse_location_color(item: WorldObjectIngestionItem)
     }
 }
 
+fn world_ingestion_decoded_coarse_neighborhood_transform(item: WorldObjectIngestionItem) -> Transform {
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
+    let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_second_xyz.unwrap_or([128, 128, 0]);
+    let x = base_x + 1.05 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.8;
+    let z = base_z - 0.10 + ((f32::from(coarse_y) / 255.0) - 0.5) * 1.6;
+    let y = 0.30 + (f32::from(coarse_z) / 255.0) * 1.2;
+    let count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
+    let scale = (0.18 + count * 0.012).clamp(0.18, 0.52);
+    Transform {
+        position: [x, y, z],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_ingestion_decoded_coarse_neighborhood_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let updates = item.decoded_coarse_updates.unwrap_or(0) as f32;
+    let intensity = (updates.min(10.0) / 10.0).clamp(0.0, 1.0);
+    [0.30, 0.64 + intensity * 0.30, 0.98]
+}
+
+fn world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(
+    item: WorldObjectIngestionItem,
+) -> Transform {
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
+    let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
+    let x = base_x + 1.55 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.0;
+    let z = base_z + 0.35 + ((f32::from(coarse_y) / 255.0) - 0.5) * 1.0;
+    let y = 0.34 + (f32::from(coarse_z) / 255.0) * 0.9;
+    Transform {
+        position: [x, y, z],
+        scale: [0.18, 0.18, 0.18],
+    }
+}
+
+fn world_ingestion_decoded_coarse_neighborhood_satellite_a_color(
+    item: WorldObjectIngestionItem,
+) -> [f32; 3] {
+    let count = item.decoded_coarse_location_count.unwrap_or(0) as f32;
+    let c = (count / 12.0).clamp(0.0, 1.0);
+    [0.26, 0.74 + c * 0.20, 0.84]
+}
+
+fn world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(
+    item: WorldObjectIngestionItem,
+) -> Transform {
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
+    let [coarse_x, coarse_y, coarse_z] = item
+        .decoded_coarse_third_xyz
+        .or(item.decoded_coarse_second_xyz)
+        .unwrap_or([128, 128, 0]);
+    let x = base_x + 0.78 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.0;
+    let z = base_z + 0.95 + ((f32::from(coarse_y) / 255.0) - 0.5) * 1.1;
+    let y = 0.30 + (f32::from(coarse_z) / 255.0) * 0.85;
+    Transform {
+        position: [x, y, z],
+        scale: [0.15, 0.15, 0.15],
+    }
+}
+
+fn world_ingestion_decoded_coarse_neighborhood_satellite_b_color(
+    item: WorldObjectIngestionItem,
+) -> [f32; 3] {
+    let updates = item.decoded_coarse_updates.unwrap_or(0) as f32;
+    let i = (updates.min(12.0) / 12.0).clamp(0.0, 1.0);
+    [0.24, 0.58 + i * 0.34, 0.96]
+}
+
 fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
     let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
     let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
     let y = 0.25 + normalized * 1.25;
     let scale = 0.14 + normalized * 0.34;
     Transform {
-        position: [3.0 + offset_x + 0.15, y, offset_z - 2.15],
+        position: [base_x + 0.62, y, base_z - 0.92],
         scale: [scale, scale, scale],
     }
 }
@@ -1082,15 +1383,38 @@ fn world_ingestion_decoded_health_color(item: WorldObjectIngestionItem) -> [f32;
     [1.0 - normalized * 0.72, 0.28 + normalized * 0.66, 0.24]
 }
 
+fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem) -> Transform {
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
+    let updates = item.decoded_viewer_time_updates.unwrap_or(0);
+    let body_len = f32::from(item.decoded_viewer_time_body_len.unwrap_or(0));
+    let signature = item.decoded_viewer_time_signature.unwrap_or(0);
+    let heading = ((signature % 3600) as f32 / 3600.0) * core::f32::consts::TAU;
+    let radius = 1.05 + (body_len / 256.0).clamp(0.0, 0.36);
+    let y = 0.64 + ((updates % 12) as f32 / 12.0) * 0.58;
+    let scale = (0.22 + (body_len / 255.0) * 0.24).clamp(0.20, 0.48);
+    Transform {
+        position: [base_x + heading.cos() * radius, y, base_z + heading.sin() * radius],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_ingestion_decoded_viewer_time_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let updates = item.decoded_viewer_time_updates.unwrap_or(0) as f32;
+    let body_len = f32::from(item.decoded_viewer_time_body_len.unwrap_or(0));
+    let intensity = (updates.min(12.0) / 12.0).clamp(0.0, 1.0);
+    let len_norm = (body_len / 255.0).clamp(0.0, 1.0);
+    [0.36 + len_norm * 0.44, 0.34 + intensity * 0.48, 0.92]
+}
+
 fn world_ingestion_decoded_composite_transform(
     coarse: WorldObjectIngestionItem,
     health: WorldObjectIngestionItem,
 ) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(coarse.region_coords.or(health.region_coords));
+    let [base_x, base_z] = world_cluster_base(coarse.region_coords.or(health.region_coords));
     let [cx, cy, cz] = coarse.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let health_norm = f32::from(health.decoded_health_basis_points.unwrap_or(0)) / 10_000.0;
-    let x = 3.0 + offset_x + ((f32::from(cx) / 255.0) - 0.5) * 0.9;
-    let z = offset_z - 2.55 + ((f32::from(cy) / 255.0) - 0.5) * 0.9;
+    let x = base_x + ((f32::from(cx) / 255.0) - 0.5) * 0.72;
+    let z = base_z - 1.35 + ((f32::from(cy) / 255.0) - 0.5) * 0.72;
     let y = 0.32 + (f32::from(cz) / 255.0) * 0.55 + health_norm.clamp(0.0, 1.0) * 0.45;
     let coarse_count = f32::from(coarse.decoded_coarse_location_count.unwrap_or(0));
     let scale = (0.18 + coarse_count * 0.01 + health_norm * 0.18).clamp(0.18, 0.46);
@@ -1113,26 +1437,36 @@ fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
     }
 }
 
-fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
-    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [cx, cy, cz] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    [
+        base_x + ((f32::from(cx) / 255.0) - 0.5) * 0.95,
+        0.34 + (f32::from(cz) / 255.0) * 0.82 + health * 0.26,
+        base_z - 1.18 + ((f32::from(cy) / 255.0) - 0.5) * 0.95,
+    ]
+}
+
+fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
+    let [center_x, center_y, center_z] = object_state_cluster_center(item);
+    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let spread = match object_state_lifecycle_phase(item) {
+        ObjectStateLifecyclePhase::Dormant => 0.75,
+        ObjectStateLifecyclePhase::Warming => 0.92,
+        ObjectStateLifecyclePhase::Active => 1.18,
+        ObjectStateLifecyclePhase::Strained => 1.05,
+    };
     let phase = ((item.decoded_coarse_updates.unwrap_or(0) % 32) as f32 / 32.0)
         * core::f32::consts::TAU;
     let (orbit_radius, orbit_angle, y_bias, scale_bias) = match variant {
-        1 => (0.58, phase + 0.8, 0.05, -0.03),
-        2 => (0.86, phase + 2.35, 0.10, -0.05),
+        1 => (0.56 * spread, phase + 0.8, 0.05, -0.03),
+        2 => (0.84 * spread, phase + 2.35, 0.10, -0.05),
         _ => (0.0, phase, 0.0, 0.0),
     };
-    let x = 3.0
-        + offset_x
-        + ((f32::from(cx) / 255.0) - 0.5) * 1.3
-        + orbit_radius * orbit_angle.cos();
-    let z = offset_z
-        - 3.05
-        + ((f32::from(cy) / 255.0) - 0.5) * 1.3
-        + orbit_radius * orbit_angle.sin();
-    let y = 0.30 + (f32::from(cz) / 255.0) * 0.9 + health * 0.25;
+    let x = center_x + orbit_radius * orbit_angle.cos();
+    let z = center_z + orbit_radius * orbit_angle.sin();
+    let y = center_y;
     let scale = (0.22 + health * 0.18 + scale_bias).clamp(0.18, 0.44);
     Transform {
         position: [x, y + y_bias, z],
@@ -1152,12 +1486,19 @@ fn world_object_state_entity_body_color(item: WorldObjectIngestionItem, variant:
 fn world_object_state_entity_aura_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
     let body = world_object_state_entity_body_transform(item, variant);
     let coarse_count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
+    let lifecycle_boost = match object_state_lifecycle_phase(item) {
+        ObjectStateLifecyclePhase::Dormant => 0.02,
+        ObjectStateLifecyclePhase::Warming => 0.06,
+        ObjectStateLifecyclePhase::Active => 0.12,
+        ObjectStateLifecyclePhase::Strained => 0.08,
+    };
     let aura_scale_bias = match variant {
         1 => 0.08,
         2 => 0.12,
         _ => 0.18,
     };
-    let aura_scale = (body.scale[0] + aura_scale_bias + coarse_count * 0.01).clamp(0.28, 0.72);
+    let aura_scale = (body.scale[0] + aura_scale_bias + coarse_count * 0.01 + lifecycle_boost)
+        .clamp(0.28, 0.78);
     Transform {
         position: [body.position[0], body.position[1] + 0.42, body.position[2]],
         scale: [aura_scale, aura_scale, aura_scale],
@@ -1177,10 +1518,16 @@ fn world_object_state_entity_cluster_core_transform(
     item: WorldObjectIngestionItem,
     entity_count: usize,
 ) -> Transform {
-    let primary = world_object_state_entity_body_transform(item, 0);
-    let scale = (0.16 + entity_count as f32 * 0.06).clamp(0.22, 0.44);
+    let [center_x, center_y, center_z] = object_state_cluster_center(item);
+    let phase_scale = match object_state_lifecycle_phase(item) {
+        ObjectStateLifecyclePhase::Dormant => 0.0,
+        ObjectStateLifecyclePhase::Warming => 0.03,
+        ObjectStateLifecyclePhase::Active => 0.08,
+        ObjectStateLifecyclePhase::Strained => 0.05,
+    };
+    let scale = (0.16 + entity_count as f32 * 0.06 + phase_scale).clamp(0.22, 0.50);
     Transform {
-        position: [primary.position[0], primary.position[1] + 0.88, primary.position[2]],
+        position: [center_x, center_y + 0.92, center_z],
         scale: [scale, scale, scale],
     }
 }
@@ -1206,11 +1553,13 @@ fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLi
     let health = item.decoded_health_basis_points.unwrap_or(0);
     let coarse_updates = item.decoded_coarse_updates.unwrap_or(0);
     let health_updates = item.decoded_health_updates.unwrap_or(0);
+    let viewer_time_updates = item.decoded_viewer_time_updates.unwrap_or(0);
+    let activity = coarse_updates + health_updates + viewer_time_updates;
     if health < 2_800 {
         ObjectStateLifecyclePhase::Strained
-    } else if coarse_updates + health_updates >= 4 {
+    } else if activity >= 6 {
         ObjectStateLifecyclePhase::Active
-    } else if coarse_updates + health_updates >= 1 {
+    } else if activity >= 1 {
         ObjectStateLifecyclePhase::Warming
     } else {
         ObjectStateLifecyclePhase::Dormant
@@ -1229,7 +1578,13 @@ fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> 
     let cadence = ((item.decoded_coarse_updates.unwrap_or(0) + item.decoded_health_updates.unwrap_or(0)) % 10)
         as f32
         / 10.0;
-    let scale = (core.scale[0] + 0.10 + cadence * 0.16).clamp(0.26, 0.64);
+    let phase_scale = match phase {
+        ObjectStateLifecyclePhase::Dormant => 0.06,
+        ObjectStateLifecyclePhase::Warming => 0.12,
+        ObjectStateLifecyclePhase::Active => 0.20,
+        ObjectStateLifecyclePhase::Strained => 0.16,
+    };
+    let scale = (core.scale[0] + 0.08 + phase_scale + cadence * 0.14).clamp(0.24, 0.72);
     Transform {
         position: [core.position[0], core.position[1] + phase_lift, core.position[2]],
         scale: [scale, scale, scale],
@@ -1246,14 +1601,22 @@ fn world_object_state_entity_pulse_color(item: WorldObjectIngestionItem) -> [f32
 }
 
 fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem) -> Transform {
-    let primary = world_object_state_entity_body_transform(item, 0);
+    let [center_x, _, center_z] = object_state_cluster_center(item);
     let health_norm = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     let instability = 1.0 - health_norm;
+    let phase = object_state_lifecycle_phase(item);
+    let phase_instability = match phase {
+        ObjectStateLifecyclePhase::Dormant => 0.08,
+        ObjectStateLifecyclePhase::Warming => 0.0,
+        ObjectStateLifecyclePhase::Active => -0.06,
+        ObjectStateLifecyclePhase::Strained => 0.14,
+    };
     let height = 0.16 + instability * 0.72;
     let width = 0.10 + (item.decoded_coarse_location_count.unwrap_or(0) as f32 / 24.0).clamp(0.0, 0.24);
+    let adjusted_height = (height + phase_instability).clamp(0.14, 0.86);
     Transform {
-        position: [primary.position[0] + 0.18, 0.12 + height * 0.5, primary.position[2] + 0.12],
-        scale: [width, height, width],
+        position: [center_x + 0.26, 0.12 + adjusted_height * 0.5, center_z + 0.18],
+        scale: [width, adjusted_height, width],
     }
 }
 
@@ -1358,8 +1721,17 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 0,
         }
     }
@@ -1502,7 +1874,7 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
         assert_eq!(seam_proxy.mesh, MeshKind::Cube);
-        assert_eq!(seam_proxy.transform.position[1], 0.24);
+        assert_eq!(seam_proxy.transform.position[1], 0.28);
         assert!(
             scene
                 .instances
@@ -1588,7 +1960,7 @@ mod tests {
             .iter()
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
-        assert_eq!(seam_proxy.transform.position[1], 0.32);
+        assert_eq!(seam_proxy.transform.position[1], 0.36);
         assert!(
             scene
                 .instances
@@ -1650,9 +2022,18 @@ mod tests {
             decoded_coarse_location_count: Some(2),
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
-            decoded_coarse_first_z: Some(12),
+            decoded_coarse_first_z: Some(1),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 1,
             decoded_health_last_basis_points: Some(6700),
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 1,
         };
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
@@ -1834,9 +2215,18 @@ mod tests {
             decoded_coarse_location_count: None,
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 0,
         };
         let presence = FirstRegionPresence::from_live_snapshot(Some(&snapshot));
@@ -1865,9 +2255,18 @@ mod tests {
             decoded_coarse_location_count: None,
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 7,
         };
         let slice = WorldDiagnosticSlice::from_live_snapshot(Some(&snapshot));
@@ -1921,9 +2320,18 @@ mod tests {
             decoded_coarse_location_count: None,
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1961,9 +2369,18 @@ mod tests {
             decoded_coarse_location_count: None,
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1996,9 +2413,18 @@ mod tests {
             decoded_coarse_location_count: None,
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -2029,8 +2455,17 @@ mod tests {
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
             decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -2041,6 +2476,71 @@ mod tests {
             .expect("decoded coarse payload should exist");
         assert_eq!(decoded.decoded_coarse_location_count, Some(2));
         assert_eq!(decoded.decoded_coarse_first_xyz, Some([64, 32, 12]));
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_includes_coarse_neighborhood_payload_when_second_sample_present() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 4,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 3,
+            unknown: 1,
+            decoded_coarse_updates: 2,
+            decoded_coarse_location_count: Some(3),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: Some(96),
+            decoded_coarse_second_y: Some(56),
+            decoded_coarse_second_z: Some(14),
+            decoded_coarse_third_x: Some(110),
+            decoded_coarse_third_y: Some(62),
+            decoded_coarse_third_z: Some(18),
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
+            observed_at_unix_ms: 9,
+        };
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        let neighborhood = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload)
+            .expect("decoded coarse neighborhood payload should exist");
+        assert_eq!(neighborhood.decoded_coarse_second_xyz, Some([96, 56, 14]));
+        assert_eq!(neighborhood.decoded_coarse_third_xyz, Some([110, 62, 18]));
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_omits_coarse_neighborhood_payload_without_second_sample() {
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_coarse_location_count = Some(3);
+        snapshot.decoded_coarse_first_x = Some(64);
+        snapshot.decoded_coarse_first_y = Some(32);
+        snapshot.decoded_coarse_first_z = Some(12);
+        snapshot.decoded_coarse_second_x = None;
+        snapshot.decoded_coarse_second_y = None;
+        snapshot.decoded_coarse_second_z = None;
+        snapshot.decoded_coarse_third_x = Some(110);
+        snapshot.decoded_coarse_third_y = Some(62);
+        snapshot.decoded_coarse_third_z = Some(18);
+
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        assert!(seam
+            .items
+            .iter()
+            .all(|item| item.lane != WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload));
     }
 
     #[test]
@@ -2064,8 +2564,17 @@ mod tests {
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
             decoded_coarse_first_z: Some(12),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 2,
             decoded_health_last_basis_points: Some(6200),
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -2095,6 +2604,220 @@ mod tests {
     }
 
     #[test]
+    fn world_object_ingestion_seam_includes_decoded_viewer_time_payload_when_present() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 4,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 3,
+            unknown: 1,
+            decoded_coarse_updates: 2,
+            decoded_coarse_location_count: Some(3),
+            decoded_coarse_first_x: Some(80),
+            decoded_coarse_first_y: Some(48),
+            decoded_coarse_first_z: Some(1),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
+            decoded_health_updates: 1,
+            decoded_health_last_basis_points: Some(6500),
+            decoded_viewer_time_updates: 5,
+            decoded_viewer_time_body_len: Some(28),
+            decoded_viewer_time_signature: Some(0xDDCCBBAA),
+            observed_at_unix_ms: 9,
+        };
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        let decoded = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedViewerTimePayload)
+            .expect("decoded viewer-time payload should exist");
+        assert_eq!(decoded.decoded_viewer_time_updates, Some(5));
+        assert_eq!(decoded.decoded_viewer_time_body_len, Some(28));
+        assert_eq!(decoded.decoded_viewer_time_signature, Some(0xDDCCBBAA));
+
+        let lifecycle = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload)
+            .expect("object-state lifecycle payload should exist when coarse+health are present");
+        assert_eq!(lifecycle.decoded_viewer_time_updates, Some(5));
+        assert_eq!(lifecycle.decoded_viewer_time_body_len, Some(28));
+        assert_eq!(lifecycle.decoded_viewer_time_signature, Some(0xDDCCBBAA));
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_omits_decoded_viewer_time_payload_without_body_len() {
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_viewer_time_updates = 3;
+        snapshot.decoded_viewer_time_body_len = None;
+        snapshot.decoded_viewer_time_signature = Some(0x11223344);
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        assert!(seam
+            .items
+            .iter()
+            .all(|item| item.lane != WorldObjectIngestionLane::DecodedViewerTimePayload));
+    }
+
+    #[test]
+    fn scene_applies_and_removes_decoded_viewer_time_payload_role() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_coarse_location_count = Some(4);
+        snapshot.decoded_coarse_first_x = Some(64);
+        snapshot.decoded_coarse_first_y = Some(32);
+        snapshot.decoded_coarse_first_z = Some(12);
+        snapshot.decoded_health_last_basis_points = Some(7000);
+        snapshot.decoded_viewer_time_updates = 2;
+        snapshot.decoded_viewer_time_body_len = Some(22);
+        snapshot.decoded_viewer_time_signature = Some(0x01020304);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene.instances.iter().any(|instance| {
+                instance.role == InstanceRole::WorldIngestionDecodedViewerTimePayload
+            })
+        );
+
+        snapshot.decoded_viewer_time_body_len = None;
+        snapshot.decoded_viewer_time_signature = None;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
+            })
+        );
+    }
+
+    #[test]
+    fn scene_applies_and_removes_decoded_coarse_neighborhood_payload_role() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_coarse_location_count = Some(4);
+        snapshot.decoded_coarse_first_x = Some(64);
+        snapshot.decoded_coarse_first_y = Some(32);
+        snapshot.decoded_coarse_first_z = Some(12);
+        snapshot.decoded_coarse_second_x = Some(92);
+        snapshot.decoded_coarse_second_y = Some(48);
+        snapshot.decoded_coarse_second_z = Some(20);
+        snapshot.decoded_coarse_third_x = Some(106);
+        snapshot.decoded_coarse_third_y = Some(60);
+        snapshot.decoded_coarse_third_z = Some(22);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene.instances.iter().any(|instance| {
+                instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+            })
+        );
+        assert!(
+            scene.instances.iter().any(|instance| {
+                instance.role
+                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+            })
+        );
+        assert!(
+            scene.instances.iter().any(|instance| {
+                instance.role
+                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+            })
+        );
+
+        snapshot.decoded_coarse_second_x = None;
+        snapshot.decoded_coarse_second_y = None;
+        snapshot.decoded_coarse_second_z = None;
+        snapshot.decoded_coarse_third_x = None;
+        snapshot.decoded_coarse_third_y = None;
+        snapshot.decoded_coarse_third_z = None;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+            })
+        );
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role
+                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+            })
+        );
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role
+                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+            })
+        );
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role
+                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+            })
+        );
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role
+                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+            })
+        );
+    }
+
+    #[test]
+    fn coarse_neighborhood_family_positions_are_structured() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.first_sim_region_x = Some(1024);
+        snapshot.first_sim_region_y = Some(2048);
+        snapshot.decoded_coarse_location_count = Some(5);
+        snapshot.decoded_coarse_first_x = Some(64);
+        snapshot.decoded_coarse_first_y = Some(32);
+        snapshot.decoded_coarse_first_z = Some(12);
+        snapshot.decoded_coarse_second_x = Some(92);
+        snapshot.decoded_coarse_second_y = Some(48);
+        snapshot.decoded_coarse_second_z = Some(20);
+        snapshot.decoded_coarse_third_x = Some(108);
+        snapshot.decoded_coarse_third_y = Some(62);
+        snapshot.decoded_coarse_third_z = Some(24);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let hub = scene
+            .instances
+            .iter()
+            .find(|instance| {
+                instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+            })
+            .expect("coarse neighborhood hub should exist");
+        let sat_a = scene
+            .instances
+            .iter()
+            .find(|instance| {
+                instance.role
+                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+            })
+            .expect("coarse neighborhood satellite A should exist");
+        let sat_b = scene
+            .instances
+            .iter()
+            .find(|instance| {
+                instance.role
+                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+            })
+            .expect("coarse neighborhood satellite B should exist");
+
+        assert!(hub.transform.position[0] > 0.0);
+        assert!(sat_a.transform.position[0] > hub.transform.position[0]);
+        assert!(sat_b.transform.position[2] > hub.transform.position[2]);
+    }
+
+    #[test]
     fn scene_composite_beacon_requires_both_decoded_inputs() {
         let mut scene = Scene::prototype();
         let coarse_only = LiveVisualSnapshot {
@@ -2115,9 +2838,18 @@ mod tests {
             decoded_coarse_location_count: Some(2),
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
-            decoded_coarse_first_z: Some(12),
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         apply_scene_from_snapshot(&mut scene, Some(&coarse_only));
@@ -2305,9 +3037,14 @@ mod tests {
             decoded_endpoint_host_tail: None,
             decoded_coarse_location_count: Some(4),
             decoded_coarse_first_xyz: Some([64, 32, 12]),
+            decoded_coarse_second_xyz: None,
+            decoded_coarse_third_xyz: None,
             decoded_coarse_updates: Some(0),
             decoded_health_updates: Some(0),
             decoded_health_basis_points: Some(6400),
+            decoded_viewer_time_updates: Some(0),
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
         };
         assert_eq!(object_state_lifecycle_phase(base), ObjectStateLifecyclePhase::Dormant);
         assert_eq!(
@@ -2321,6 +3058,7 @@ mod tests {
             object_state_lifecycle_phase(WorldObjectIngestionItem {
                 decoded_coarse_updates: Some(3),
                 decoded_health_updates: Some(2),
+                decoded_viewer_time_updates: Some(1),
                 ..base
             }),
             ObjectStateLifecyclePhase::Active
@@ -2334,6 +3072,169 @@ mod tests {
             }),
             ObjectStateLifecyclePhase::Strained
         );
+    }
+
+    #[test]
+    fn scene_world_cluster_hierarchy_is_spatially_coherent() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.first_sim_endpoint = Some(String::from("198.51.100.42:13009"));
+        snapshot.first_sim_region_x = Some(1024);
+        snapshot.first_sim_region_y = Some(2048);
+        snapshot.traffic_summary_available = true;
+        snapshot.likely_broader_traffic = 6;
+        snapshot.unknown = 2;
+        snapshot.decoded_coarse_location_count = Some(5);
+        snapshot.decoded_coarse_first_x = Some(80);
+        snapshot.decoded_coarse_first_y = Some(64);
+        snapshot.decoded_coarse_first_z = Some(20);
+        snapshot.decoded_coarse_updates = 4;
+        snapshot.decoded_health_updates = 3;
+        snapshot.decoded_health_last_basis_points = Some(7300);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let anchor = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
+            .expect("region anchor should exist");
+        let body = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
+            .expect("entity body should exist");
+        let core = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
+            .expect("cluster core should exist");
+        let pulse = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+            .expect("pulse should exist");
+        let stability = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
+            .expect("stability should exist");
+        let traffic = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldIngestionTrafficPayload)
+            .expect("traffic payload should exist");
+
+        assert!(body.transform.position[2] < anchor.transform.position[2]);
+        assert!(core.transform.position[1] > body.transform.position[1]);
+        assert!(pulse.transform.position[1] > core.transform.position[1]);
+        assert!(stability.transform.position[1] < body.transform.position[1]);
+        assert!(traffic.transform.position[0] > body.transform.position[0]);
+    }
+
+    #[test]
+    fn lifecycle_progression_changes_pulse_and_satellite_spacing() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.first_sim_endpoint = Some(String::from("198.51.100.42:13009"));
+        snapshot.first_sim_region_x = Some(1024);
+        snapshot.first_sim_region_y = Some(2048);
+        snapshot.decoded_coarse_location_count = Some(6);
+        snapshot.decoded_coarse_first_x = Some(96);
+        snapshot.decoded_coarse_first_y = Some(72);
+        snapshot.decoded_coarse_first_z = Some(18);
+        snapshot.decoded_health_last_basis_points = Some(7200);
+
+        snapshot.decoded_coarse_updates = 0;
+        snapshot.decoded_health_updates = 0;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        let dormant_pulse = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+            .expect("dormant pulse should exist");
+        let dormant_body = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
+            .expect("dormant body should exist");
+        let dormant_wing = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
+            .expect("dormant wing should exist");
+        let dormant_spacing = (dormant_wing.transform.position[0] - dormant_body.transform.position[0])
+            .abs()
+            + (dormant_wing.transform.position[2] - dormant_body.transform.position[2]).abs();
+        let dormant_pulse_scale = dormant_pulse.transform.scale[0];
+
+        snapshot.decoded_coarse_updates = 6;
+        snapshot.decoded_health_updates = 4;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        let active_pulse = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+            .expect("active pulse should exist");
+        let active_body = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
+            .expect("active body should exist");
+        let active_wing = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
+            .expect("active wing should exist");
+        let active_spacing = (active_wing.transform.position[0] - active_body.transform.position[0])
+            .abs()
+            + (active_wing.transform.position[2] - active_body.transform.position[2]).abs();
+
+        assert!(active_pulse.transform.scale[0] > dormant_pulse_scale);
+        assert!(active_spacing > dormant_spacing);
+    }
+
+    #[test]
+    fn viewer_time_updates_drive_lifecycle_visual_progression() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.first_sim_endpoint = Some(String::from("198.51.100.42:13009"));
+        snapshot.first_sim_region_x = Some(1024);
+        snapshot.first_sim_region_y = Some(2048);
+        snapshot.decoded_coarse_location_count = Some(4);
+        snapshot.decoded_coarse_first_x = Some(64);
+        snapshot.decoded_coarse_first_y = Some(32);
+        snapshot.decoded_coarse_first_z = Some(12);
+        snapshot.decoded_health_last_basis_points = Some(6800);
+        snapshot.decoded_coarse_updates = 0;
+        snapshot.decoded_health_updates = 0;
+        snapshot.decoded_viewer_time_updates = 0;
+        snapshot.decoded_viewer_time_body_len = None;
+        snapshot.decoded_viewer_time_signature = None;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        let dormant_pulse = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+            .expect("dormant pulse should exist");
+        let dormant_pulse_scale = dormant_pulse.transform.scale[0];
+
+        snapshot.decoded_viewer_time_updates = 4;
+        snapshot.decoded_viewer_time_body_len = Some(24);
+        snapshot.decoded_viewer_time_signature = Some(0xAABBCCDD);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        let active_pulse = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+            .expect("active pulse should exist");
+        let viewer_time_marker = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedViewerTimePayload)
+            .expect("viewer-time payload marker should exist");
+
+        assert!(active_pulse.transform.scale[0] > dormant_pulse_scale);
+        assert!(viewer_time_marker.transform.scale[0] > 0.0);
     }
 
     #[test]
@@ -2356,9 +3257,18 @@ mod tests {
             decoded_coarse_location_count: None,
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_first_z: Some(0),
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
             decoded_health_updates: 0,
             decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -2420,10 +3330,20 @@ mod tests {
                 })
         );
         assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+            })
+        );
+        assert!(
             scene
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
+        );
+        assert!(
+            scene.instances.iter().all(|instance| {
+                instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
+            })
         );
         assert!(
             scene
@@ -2481,6 +3401,12 @@ mod tests {
         );
     }
 }
+
+
+
+
+
+
 
 
 
