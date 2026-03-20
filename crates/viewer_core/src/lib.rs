@@ -28,6 +28,7 @@ pub enum InstanceRole {
     WorldIngestionTrafficPayload,
     WorldIngestionDecodedEndpointPayload,
     WorldIngestionDecodedCoarseLocationPayload,
+    WorldIngestionDecodedHealthPayload,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +84,10 @@ pub struct LiveVisualSnapshot {
     pub decoded_coarse_first_y: Option<u8>,
     #[serde(default)]
     pub decoded_coarse_first_z: Option<u8>,
+    #[serde(default)]
+    pub decoded_health_updates: u32,
+    #[serde(default)]
+    pub decoded_health_last_basis_points: Option<u16>,
     pub observed_at_unix_ms: u64,
 }
 
@@ -167,6 +172,7 @@ pub enum WorldObjectIngestionLane {
     TrafficSignalPayload,
     DecodedSimulatorEndpointPayload,
     DecodedCoarseLocationPayload,
+    DecodedHealthPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +188,7 @@ pub struct WorldObjectIngestionItem {
     pub decoded_endpoint_host_tail: Option<u8>,
     pub decoded_coarse_location_count: Option<u8>,
     pub decoded_coarse_first_xyz: Option<[u8; 3]>,
+    pub decoded_health_basis_points: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -206,6 +213,7 @@ impl WorldObjectIngestionSeam {
             decoded_endpoint_host_tail: None,
             decoded_coarse_location_count: None,
             decoded_coarse_first_xyz: None,
+            decoded_health_basis_points: None,
         }];
         if slice.traffic.available {
             items.push(WorldObjectIngestionItem {
@@ -220,6 +228,7 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_health_basis_points: None,
             });
         }
         Self {
@@ -261,6 +270,7 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: Some(endpoint_host_tail),
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_health_basis_points: None,
             });
         }
         if let Some(location_count) = snapshot.and_then(|s| s.decoded_coarse_location_count) {
@@ -300,6 +310,40 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: Some(location_count),
                 decoded_coarse_first_xyz: first_xyz,
+                decoded_health_basis_points: None,
+            });
+        }
+        if let Some(health_basis_points) = snapshot.and_then(|s| s.decoded_health_last_basis_points) {
+            let (stage, region_coords) = snapshot
+                .map(|s| {
+                    (
+                        if s.logged_in && s.handshake_agent_movement_complete {
+                            WorldEntryStage::EnteredFirstRegion
+                        } else if s.logged_in {
+                            WorldEntryStage::Connected
+                        } else {
+                            WorldEntryStage::Offline
+                        },
+                        match (s.first_sim_region_x, s.first_sim_region_y) {
+                            (Some(x), Some(y)) => Some([x, y]),
+                            _ => None,
+                        },
+                    )
+                })
+                .unwrap_or((WorldEntryStage::Offline, None));
+            seam.items.push(WorldObjectIngestionItem {
+                lane: WorldObjectIngestionLane::DecodedHealthPayload,
+                stage,
+                region_coords,
+                simulator_target_present: false,
+                traffic_broader_count: 0,
+                traffic_unknown_count: 0,
+                traffic_region_control_count: 0,
+                decoded_endpoint_port: None,
+                decoded_endpoint_host_tail: None,
+                decoded_coarse_location_count: None,
+                decoded_coarse_first_xyz: None,
+                decoded_health_basis_points: Some(health_basis_points),
             });
         }
         seam
@@ -505,6 +549,26 @@ impl Scene {
             remove_instance(
                 &mut self.instances,
                 InstanceRole::WorldIngestionDecodedCoarseLocationPayload,
+            );
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedHealthPayload,
+                MeshKind::Cube,
+                world_ingestion_decoded_health_transform(item),
+                world_ingestion_decoded_health_color(item),
+            );
+        } else {
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedHealthPayload,
             );
         }
     }
@@ -791,6 +855,24 @@ fn world_ingestion_decoded_coarse_location_color(item: WorldObjectIngestionItem)
     }
 }
 
+fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
+    let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
+    let y = 0.25 + normalized * 1.25;
+    let scale = 0.14 + normalized * 0.34;
+    Transform {
+        position: [3.0 + offset_x + 0.15, y, offset_z - 2.15],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_ingestion_decoded_health_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
+    let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
+    [1.0 - normalized * 0.72, 0.28 + normalized * 0.66, 0.24]
+}
+
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
     match snapshot {
         Some(state) if state.logged_in => {
@@ -887,6 +969,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 0,
         }
     }
@@ -955,6 +1039,12 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
+        );
     }
 
     #[test]
@@ -1016,6 +1106,12 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
+        );
     }
 
     #[test]
@@ -1076,6 +1172,12 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
+        );
     }
 
     #[test]
@@ -1100,6 +1202,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 1,
+            decoded_health_last_basis_points: Some(6700),
             observed_at_unix_ms: 1,
         };
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
@@ -1169,6 +1273,13 @@ mod tests {
         assert_eq!(decoded_endpoint_payload.mesh, MeshKind::AxisMarker);
         assert!(decoded_endpoint_payload.transform.position[1] > 0.48);
         assert_eq!(decoded_endpoint_payload.color, [0.30, 0.84, 0.96]);
+        let decoded_health_payload = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedHealthPayload)
+            .expect("decoded health payload marker should exist");
+        assert_eq!(decoded_health_payload.mesh, MeshKind::Cube);
+        assert!(decoded_health_payload.transform.position[1] > 0.25);
     }
 
     #[test]
@@ -1207,6 +1318,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 0,
         };
         let presence = FirstRegionPresence::from_live_snapshot(Some(&snapshot));
@@ -1236,6 +1349,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 7,
         };
         let slice = WorldDiagnosticSlice::from_live_snapshot(Some(&snapshot));
@@ -1290,6 +1405,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1328,6 +1445,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1361,6 +1480,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1391,6 +1512,8 @@ mod tests {
             decoded_coarse_first_x: Some(64),
             decoded_coarse_first_y: Some(32),
             decoded_coarse_first_z: Some(12),
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1401,6 +1524,40 @@ mod tests {
             .expect("decoded coarse payload should exist");
         assert_eq!(decoded.decoded_coarse_location_count, Some(2));
         assert_eq!(decoded.decoded_coarse_first_xyz, Some([64, 32, 12]));
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_includes_decoded_health_payload_when_present() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 4,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 3,
+            unknown: 1,
+            decoded_coarse_updates: 0,
+            decoded_coarse_location_count: None,
+            decoded_coarse_first_x: None,
+            decoded_coarse_first_y: None,
+            decoded_coarse_first_z: None,
+            decoded_health_updates: 2,
+            decoded_health_last_basis_points: Some(6200),
+            observed_at_unix_ms: 9,
+        };
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        let decoded = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
+            .expect("decoded health payload should exist");
+        assert_eq!(decoded.decoded_health_basis_points, Some(6200));
     }
 
     #[test]
@@ -1424,6 +1581,8 @@ mod tests {
             decoded_coarse_first_x: None,
             decoded_coarse_first_y: None,
             decoded_coarse_first_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -1476,7 +1635,23 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| {
+                    instance.role != InstanceRole::WorldIngestionDecodedCoarseLocationPayload
+                })
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
+        );
     }
 }
+
+
 
 

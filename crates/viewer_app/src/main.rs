@@ -353,6 +353,8 @@ async fn run_in_process_live_feed(
         decoded_coarse_first_x: None,
         decoded_coarse_first_y: None,
         decoded_coarse_first_z: None,
+        decoded_health_updates: 0,
+        decoded_health_last_basis_points: None,
         observed_at_unix_ms: now_unix_ms(),
     }));
 
@@ -434,6 +436,8 @@ fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisua
         decoded_coarse_first_x: None,
         decoded_coarse_first_y: None,
         decoded_coarse_first_z: None,
+        decoded_health_updates: 0,
+        decoded_health_last_basis_points: None,
         observed_at_unix_ms: now_unix_ms(),
     };
 
@@ -480,6 +484,8 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
     snapshot.decoded_coarse_first_x = decoded.coarse_location_last_first.map(|xyz| xyz[0]);
     snapshot.decoded_coarse_first_y = decoded.coarse_location_last_first.map(|xyz| xyz[1]);
     snapshot.decoded_coarse_first_z = decoded.coarse_location_last_first.map(|xyz| xyz[2]);
+    snapshot.decoded_health_updates = decoded.health_updates as u32;
+    snapshot.decoded_health_last_basis_points = decoded.health_last_basis_points;
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -836,5 +842,7 @@ mod tests {
         assert!(matches!(plan.startup_status, LiveStartupStatus::Failed(_)));
     }
 }
+
+
 
 

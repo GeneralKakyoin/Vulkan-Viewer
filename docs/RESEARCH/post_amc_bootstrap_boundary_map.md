@@ -48,6 +48,11 @@ Do not start broad world-state decoding from this map alone.
     - location block count
     - first coarse XYZ sample (when present)
   - this decode is intentionally tiny and is used as a seam-fed diagnostic input, not as broad world/object ingestion.
+- bounded simulator-payload decode has been extended with a second tiny source:
+  - source: `HealthMessage` body
+  - currently decoded minimally:
+    - health scalar normalized to basis points
+  - this remains diagnostic-first and is routed through a distinct seam lane/scene role, not broad world/object ingestion.
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.

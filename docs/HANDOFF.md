@@ -2,6 +2,29 @@
 
 ## Last Completed Work
 
+- Added a second tiny simulator-derived decoded payload lane for bounded multi-input seam ingestion:
+  - transport decode in `viewer_net` for inbound `HealthMessage` body:
+    - minimal decoded scalar -> normalized basis points
+  - decode summary extended:
+    - `Connection::simulator_payload_decode_summary()` now includes health decode counters/value
+- Extended runtime snapshot bridge for the new decoded input:
+  - `LiveVisualSnapshot` now carries:
+    - `decoded_health_updates`
+    - `decoded_health_last_basis_points`
+  - app/example update paths map connection summary -> snapshot fields
+- Extended seam + scene with distinct lane/role for the new decoded input:
+  - seam lane: `DecodedHealthPayload`
+  - seam-owned scene role: `WorldIngestionDecodedHealthPayload`
+  - marker transform/color are derived from decoded health basis-point value
+- Multi-input seam behavior is now explicitly present and test-protected:
+  - simulator-derived decoded lanes currently include:
+    - `DecodedCoarseLocationPayload`
+    - `DecodedHealthPayload`
+  - focused tests cover decoder -> summary -> seam lane -> scene role behavior
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Implemented first minimal real simulator-payload decode through the existing seam:
   - added bounded payload decode in `viewer_net` for inbound `CoarseLocationUpdate` body:
     - decoded location count

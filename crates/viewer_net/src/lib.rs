@@ -942,11 +942,18 @@ pub struct DecodedCoarseLocationUpdate {
     pub first_location: Option<[u8; 3]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DecodedHealthMessage {
+    pub health: f32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulatorPayloadDecodeSummary {
     pub coarse_location_updates: usize,
     pub coarse_location_last_count: Option<u8>,
     pub coarse_location_last_first: Option<[u8; 3]>,
+    pub health_updates: usize,
+    pub health_last_basis_points: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1541,6 +1548,15 @@ impl Connection {
                     Some(decoded.location_count);
                 self.simulator_payload_decode_summary.coarse_location_last_first =
                     decoded.first_location;
+            }
+        }
+        if classification.kind == FirstSimulatorInboundMessageKind::HealthMessage
+            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        {
+            if let Some(decoded) = decode_health_message(payload) {
+                self.simulator_payload_decode_summary.health_updates += 1;
+                self.simulator_payload_decode_summary.health_last_basis_points =
+                    Some(health_to_basis_points(decoded.health));
             }
         }
         if let Some(kind) = to_region_transition_control_kind(classification.kind) {
@@ -2688,6 +2704,29 @@ fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocation
         location_count,
         first_location,
     })
+}
+
+fn decode_health_message(payload: &[u8]) -> Option<DecodedHealthMessage> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let health_bytes: [u8; 4] = body.get(0..4)?.try_into().ok()?;
+    let health = f32::from_le_bytes(health_bytes);
+    if !health.is_finite() {
+        return None;
+    }
+    Some(DecodedHealthMessage { health })
+}
+
+fn health_to_basis_points(value: f32) -> u16 {
+    let normalized = if value > 1.0 {
+        (value / 100.0).clamp(0.0, 1.0)
+    } else {
+        value.clamp(0.0, 1.0)
+    };
+    (normalized * 10_000.0).round() as u16
 }
 
 fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInboundClassification {
@@ -4874,6 +4913,16 @@ mod tests {
     }
 
     #[test]
+    fn decode_health_message_extracts_health_scalar() {
+        let mut payload = make_low_frequency_packet(138);
+        payload.extend_from_slice(&0.73f32.to_le_bytes());
+        let decoded =
+            decode_health_message(&payload).expect("health message should decode from packet body");
+        assert!((decoded.health - 0.73).abs() < f32::EPSILON);
+        assert_eq!(health_to_basis_points(decoded.health), 7300);
+    }
+
+    #[test]
     fn observe_coarse_location_update_updates_payload_decode_summary() {
         let mut connection = Connection::new(ConnectionConfig::default());
         connection.state = ConnectionState::LoggedIn;
@@ -4887,6 +4936,22 @@ mod tests {
         assert_eq!(summary.coarse_location_updates, 1);
         assert_eq!(summary.coarse_location_last_count, Some(1));
         assert_eq!(summary.coarse_location_last_first, Some([64, 32, 12]));
+    }
+
+    #[test]
+    fn observe_health_message_updates_payload_decode_summary() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let mut payload = make_low_frequency_packet(138);
+        payload.extend_from_slice(&0.62f32.to_le_bytes());
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("health message should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.health_updates, 1);
+        assert_eq!(summary.health_last_basis_points, Some(6200));
     }
 
     #[tokio::test]

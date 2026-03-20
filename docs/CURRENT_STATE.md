@@ -105,6 +105,15 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - seam-owned marker `WorldIngestionDecodedCoarseLocationPayload`
     - marker transform/color are driven by decoded coarse payload values
   - decode remains tiny, typed, reversible, and below broad world/object decoding scope
+- seam now carries a second minimal real simulator-payload decode lane:
+  - new lane: `DecodedHealthPayload`
+  - decoded source is simulator-side inbound `HealthMessage` packet body (low `0xffff008a`)
+  - minimal decoded field:
+    - decoded health scalar normalized to basis points
+  - scene reflection:
+    - seam-owned marker `WorldIngestionDecodedHealthPayload`
+    - marker transform/color are driven by decoded health basis-point values
+  - this advances bounded multi-input seam ingestion without broad object/world decoding
 
 ### Architecture
 - clear crate boundaries
@@ -184,6 +193,9 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `coarse_location_updates`
     - last decoded coarse location count
     - last decoded first coarse XYZ sample
+  - now also captures bounded `HealthMessage` body decode signals:
+    - `health_updates`
+    - last decoded health basis points
 - bounded region-transition control visibility diagnostics now exist:
   - dedicated scope: `RegionTransitionControl`
   - run-level summary available via `Connection::summarize_region_transition_control()`
@@ -270,9 +282,9 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 - we now have connected live diagnostics, a meaningful world-facing composition, a typed ingestion seam, and explicit app-owned startup orchestration
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
-- first tiny decoded seam input is now implemented; next steps must decide between:
-  - adding a second bounded simulator-payload decode category, or
-  - starting first bounded multi-input simulator payload ingestion through the same seam
+- multi-input simulator-derived seam ingestion is now in place (coarse + health decode lanes); next steps must decide between:
+  - adding one more bounded simulator decode lane, or
+  - starting first bounded object-like composition from current multi-input decoded lanes
 - either path must still avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
@@ -280,7 +292,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 ## Most Likely Immediate Work
 
-- extend seam payload categories beyond decoded endpoint + coarse-location inputs while preserving current bounded seam ownership
+- extend seam payload categories beyond decoded endpoint + coarse + health inputs while preserving current bounded seam ownership
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
@@ -293,7 +305,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**add one more bounded simulator-payload decode lane through the existing seam (or begin bounded multi-input ingestion), while keeping broad object/world decode out of scope**
+**add one more bounded simulator-payload decode lane (or begin bounded object-like composition from current decoded lanes), while keeping broad object/world decode out of scope**
 
 ---
 
