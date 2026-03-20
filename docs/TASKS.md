@@ -212,13 +212,19 @@ Status update (latest):
   - new seam lane: `TrafficSignalPayload`
   - seam now carries typed traffic payload counts
   - seam-owned marker `WorldIngestionTrafficPayload` reflects this payload in scene space
+- first tiny decoded payload path through seam is now implemented:
+  - new seam lane: `DecodedSimulatorEndpointPayload`
+  - bounded decode from `first_sim_endpoint` now feeds typed seam fields:
+    - decoded host-tail octet
+    - decoded port
+  - seam-owned marker `WorldIngestionDecodedEndpointPayload` reflects this decoded payload in scene space
 - viewer_app-owned live startup orchestration is now first-class:
   - startup mode control (`VIEWER_APP_LIVE_STARTUP`: auto/on/off)
   - app-owned startup status mapping and diagnostics
   - app receives worker status + snapshot updates and feeds seam/scene path
 - next T8 slice should either:
-  - add one more bounded payload category through seam, or
-  - start first bounded real world/object payload ingestion beyond diagnostic-derived fields
+  - add one more bounded decoded payload category through seam, or
+  - start first bounded real simulator payload decode path beyond endpoint-derived fields
   while preserving the hard stop before broad object/world decoding
 
 ---

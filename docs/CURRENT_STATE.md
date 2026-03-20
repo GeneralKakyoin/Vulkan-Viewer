@@ -86,6 +86,15 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `WorldIngestionProxy` (entry/presence object-like proxy)
     - `WorldIngestionTrafficPayload` (typed traffic payload marker)
   - seam lanes now represent multi-category payload ingestion behavior while staying pre-decode
+- seam now carries a first tiny decoded world/object-facing input lane:
+  - new lane: `DecodedSimulatorEndpointPayload`
+  - decoded input is bounded and derived only from existing sanitized live state:
+    - `first_sim_endpoint` host tail octet
+    - `first_sim_endpoint` port
+  - scene reflection:
+    - seam-owned marker `WorldIngestionDecodedEndpointPayload`
+    - marker transform/color are driven by decoded endpoint values
+  - this remains diagnostic-first and does not introduce broad object/world decoding
 
 ### Architecture
 - clear crate boundaries
@@ -245,17 +254,17 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 - we now have connected live diagnostics, a meaningful world-facing composition, a typed ingestion seam, and explicit app-owned startup orchestration
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
-- next steps must decide between:
-  - adding one more bounded object-like seam payload category, or
-  - first tiny real decoded world/object input into the existing seam
-- either path must avoid broad object/world decoding
+- first tiny decoded seam input is now implemented; next steps must decide between:
+  - adding one more bounded decoded payload category, or
+  - starting the first minimal real simulator payload decode into the same seam
+- either path must still avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
 ---
 
 ## Most Likely Immediate Work
 
-- extend seam payload categories toward first tiny decoded world/object input while preserving current bounded seam ownership
+- extend seam payload categories beyond decoded endpoint input while preserving current bounded seam ownership
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
@@ -268,7 +277,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**extend the typed ingestion seam to the first bounded real ingestion adapter while keeping broad object/world decode out of scope**
+**add one more bounded decoded payload through the existing seam (or first tiny simulator-payload decode), while keeping broad object/world decode out of scope**
 
 ---
 

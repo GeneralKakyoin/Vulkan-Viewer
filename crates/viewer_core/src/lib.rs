@@ -26,6 +26,7 @@ pub enum InstanceRole {
     WorldTrafficRegionControlPillar,
     WorldIngestionProxy,
     WorldIngestionTrafficPayload,
+    WorldIngestionDecodedEndpointPayload,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +154,7 @@ impl WorldDiagnosticSlice {
 pub enum WorldObjectIngestionLane {
     FirstRegionPresenceProxy,
     TrafficSignalPayload,
+    DecodedSimulatorEndpointPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +166,8 @@ pub struct WorldObjectIngestionItem {
     pub traffic_broader_count: u32,
     pub traffic_unknown_count: u32,
     pub traffic_region_control_count: u32,
+    pub decoded_endpoint_port: Option<u16>,
+    pub decoded_endpoint_host_tail: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -184,6 +188,8 @@ impl WorldObjectIngestionSeam {
             traffic_broader_count: 0,
             traffic_unknown_count: 0,
             traffic_region_control_count: 0,
+            decoded_endpoint_port: None,
+            decoded_endpoint_host_tail: None,
         }];
         if slice.traffic.available {
             items.push(WorldObjectIngestionItem {
@@ -194,6 +200,8 @@ impl WorldObjectIngestionSeam {
                 traffic_broader_count: slice.traffic.likely_broader,
                 traffic_unknown_count: slice.traffic.unknown,
                 traffic_region_control_count: slice.traffic.region_control,
+                decoded_endpoint_port: None,
+                decoded_endpoint_host_tail: None,
             });
         }
         Self {
@@ -202,7 +210,40 @@ impl WorldObjectIngestionSeam {
     }
 
     pub fn from_live_snapshot(snapshot: Option<&LiveVisualSnapshot>) -> Self {
-        Self::from_diagnostic_slice(WorldDiagnosticSlice::from_live_snapshot(snapshot))
+        let mut seam = Self::from_diagnostic_slice(WorldDiagnosticSlice::from_live_snapshot(snapshot));
+        if let Some((endpoint_port, endpoint_host_tail)) =
+            decode_simulator_endpoint(snapshot.and_then(|s| s.first_sim_endpoint.as_deref()))
+        {
+            let (stage, region_coords) = snapshot
+                .map(|s| {
+                    (
+                        if s.logged_in && s.handshake_agent_movement_complete {
+                            WorldEntryStage::EnteredFirstRegion
+                        } else if s.logged_in {
+                            WorldEntryStage::Connected
+                        } else {
+                            WorldEntryStage::Offline
+                        },
+                        match (s.first_sim_region_x, s.first_sim_region_y) {
+                            (Some(x), Some(y)) => Some([x, y]),
+                            _ => None,
+                        },
+                    )
+                })
+                .unwrap_or((WorldEntryStage::Offline, None));
+            seam.items.push(WorldObjectIngestionItem {
+                lane: WorldObjectIngestionLane::DecodedSimulatorEndpointPayload,
+                stage,
+                region_coords,
+                simulator_target_present: true,
+                traffic_broader_count: 0,
+                traffic_unknown_count: 0,
+                traffic_region_control_count: 0,
+                decoded_endpoint_port: Some(endpoint_port),
+                decoded_endpoint_host_tail: Some(endpoint_host_tail),
+            });
+        }
+        seam
     }
 }
 
@@ -366,6 +407,26 @@ impl Scene {
             );
         } else {
             remove_instance(&mut self.instances, InstanceRole::WorldIngestionTrafficPayload);
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedSimulatorEndpointPayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedEndpointPayload,
+                MeshKind::AxisMarker,
+                world_ingestion_decoded_endpoint_transform(item),
+                world_ingestion_decoded_endpoint_color(item),
+            );
+        } else {
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedEndpointPayload,
+            );
         }
     }
 }
@@ -590,6 +651,42 @@ fn world_ingestion_traffic_payload_color(item: WorldObjectIngestionItem) -> [f32
     }
 }
 
+fn decode_simulator_endpoint(endpoint: Option<&str>) -> Option<(u16, u8)> {
+    let endpoint = endpoint?;
+    let (host, port_text) = endpoint.rsplit_once(':')?;
+    let port = port_text.parse::<u16>().ok()?;
+    let host_tail = host
+        .split('.')
+        .next_back()
+        .and_then(|octet| octet.parse::<u8>().ok())?;
+    Some((port, host_tail))
+}
+
+fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let host_tail = f32::from(item.decoded_endpoint_host_tail.unwrap_or(0));
+    let port = f32::from(item.decoded_endpoint_port.unwrap_or(0));
+    let x = 3.0 + offset_x - 0.85 + ((host_tail / 255.0) - 0.5) * 0.9;
+    let z = offset_z - 1.2;
+    let y = 0.48 + ((port % 1000.0) / 1000.0) * 0.6;
+    let scale = 0.18 + ((host_tail % 32.0) / 32.0) * 0.14;
+    Transform {
+        position: [x, y, z],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_ingestion_decoded_endpoint_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let port = item.decoded_endpoint_port.unwrap_or(0);
+    if port >= 13000 {
+        [0.30, 0.84, 0.96]
+    } else if port >= 9000 {
+        [0.34, 0.90, 0.62]
+    } else {
+        [0.92, 0.66, 0.30]
+    }
+}
+
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
     match snapshot {
         Some(state) if state.logged_in => {
@@ -743,6 +840,12 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
+        );
     }
 
     #[test]
@@ -798,6 +901,12 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
+        );
     }
 
     #[test]
@@ -851,6 +960,12 @@ mod tests {
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
     }
 
@@ -932,6 +1047,14 @@ mod tests {
         assert_eq!(traffic_payload.mesh, MeshKind::AxisMarker);
         assert!(traffic_payload.transform.scale[0] > 0.22);
         assert_eq!(traffic_payload.color, [0.30, 0.72, 0.94]);
+        let decoded_endpoint_payload = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedEndpointPayload)
+            .expect("decoded endpoint payload marker should exist");
+        assert_eq!(decoded_endpoint_payload.mesh, MeshKind::AxisMarker);
+        assert!(decoded_endpoint_payload.transform.position[1] > 0.48);
+        assert_eq!(decoded_endpoint_payload.color, [0.30, 0.84, 0.96]);
     }
 
     #[test]
@@ -1041,7 +1164,10 @@ mod tests {
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
-        assert_eq!(seam.items.len(), 2);
+        assert!(seam
+            .items
+            .iter()
+            .any(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy));
         let traffic = seam
             .items
             .iter()
@@ -1050,6 +1176,59 @@ mod tests {
         assert_eq!(traffic.traffic_broader_count, 11);
         assert_eq!(traffic.traffic_unknown_count, 3);
         assert_eq!(traffic.traffic_region_control_count, 2);
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_includes_decoded_endpoint_payload_when_parseable() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: false,
+            post_boundary_observations: 0,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 0,
+            unknown: 0,
+            observed_at_unix_ms: 9,
+        };
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        let decoded = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedSimulatorEndpointPayload)
+            .expect("decoded endpoint payload should exist");
+        assert_eq!(decoded.decoded_endpoint_host_tail, Some(42));
+        assert_eq!(decoded.decoded_endpoint_port, Some(13009));
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_omits_decoded_endpoint_payload_when_unparseable() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("bad-endpoint")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: false,
+            post_boundary_observations: 0,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 0,
+            unknown: 0,
+            observed_at_unix_ms: 9,
+        };
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        assert!(seam
+            .items
+            .iter()
+            .all(|item| item.lane != WorldObjectIngestionLane::DecodedSimulatorEndpointPayload));
     }
 
     #[test]
@@ -1113,6 +1292,12 @@ mod tests {
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
     }
 }

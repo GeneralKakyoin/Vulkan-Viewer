@@ -2,6 +2,25 @@
 
 ## Last Completed Work
 
+- Implemented the first tiny decoded world/object input lane through the existing seam in `viewer_core`:
+  - new seam lane: `DecodedSimulatorEndpointPayload`
+  - bounded decoded fields added to seam item:
+    - `decoded_endpoint_port`
+    - `decoded_endpoint_host_tail`
+  - decode source is intentionally narrow and sanitized:
+    - parsed from `LiveVisualSnapshot.first_sim_endpoint`
+- Added seam-owned scene mapping for decoded endpoint lane:
+  - new role `WorldIngestionDecodedEndpointPayload`
+  - marker transform/color now reflect decoded endpoint values
+  - marker creation/removal remains owned by `Scene::apply_world_object_ingestion_seam(...)`
+- Strengthened focused tests in `viewer_core`:
+  - decoded lane presence when endpoint parse is valid
+  - decoded lane omission when endpoint parse is invalid
+  - seam-application tests now assert decoded marker role behavior
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Made viewer_app startup ownership explicit for the live path:
   - added startup mode parsing (`auto`/`on`/`off`) via `VIEWER_APP_LIVE_STARTUP`
   - added app-side startup plan selection and startup status modeling
