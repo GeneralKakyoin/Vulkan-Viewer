@@ -2,6 +2,24 @@
 
 ## Last Completed Work
 
+- Broadened the bounded world-state bridge into a meaningful world-facing diagnostic composition in `viewer_core`:
+  - added typed bounded live slice model:
+    - `WorldDiagnosticSlice`
+    - `WorldTrafficSummary`
+  - expanded role-based scene composition with live markers:
+    - `WorldSimTargetMarker` (first-simulator-target-derived landmark)
+    - `WorldTrafficBroaderPillar`
+    - `WorldTrafficUnknownPillar`
+    - `WorldTrafficRegionControlPillar`
+  - composition remains fully driven by sanitized, already-proven live state (no broad world/object ingestion)
+- Added focused tests in `viewer_core`:
+  - typed diagnostic-slice mapping from snapshot
+  - traffic-pillar scaling behavior
+  - role-based composition behavior under connected/AMC/traffic conditions
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Implemented the first bounded world-state bridge beyond placeholders in `viewer_core`:
   - added typed world-entry/region-presence model:
     - `WorldEntryStage` (`Offline`, `Connected`, `EnteredFirstRegion`)

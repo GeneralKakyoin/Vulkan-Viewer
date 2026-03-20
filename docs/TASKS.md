@@ -189,7 +189,19 @@ Status update (latest):
     - `WorldRegionAnchor`
     - `WorldEntryBeacon`
   - focused tests now cover typed mapping and marker behavior
-- next T8 slice should add one richer typed landmark/summary layer while preserving the hard stop before broad object/world decoding
+- first meaningful live world-facing diagnostic slice is now implemented:
+  - bounded typed `WorldDiagnosticSlice` + `WorldTrafficSummary` model
+  - world composition expanded with:
+    - `WorldSimTargetMarker`
+    - `WorldTrafficBroaderPillar`
+    - `WorldTrafficUnknownPillar`
+    - `WorldTrafficRegionControlPillar`
+  - composition remains diagnostic-first and reversible
+  - focused tests now protect traffic-slice mapping and pillar scaling behavior
+- next T8 slice should decide between:
+  - first bounded world/object-state ingestion seam, or
+  - one final scene-side diagnostic consolidation pass
+  while preserving the hard stop before broad object/world decoding
 
 ---
 

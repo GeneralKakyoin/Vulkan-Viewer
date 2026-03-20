@@ -20,6 +20,10 @@ pub enum InstanceRole {
     LivePlaceholder,
     WorldRegionAnchor,
     WorldEntryBeacon,
+    WorldSimTargetMarker,
+    WorldTrafficBroaderPillar,
+    WorldTrafficUnknownPillar,
+    WorldTrafficRegionControlPillar,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +112,41 @@ impl FirstRegionPresence {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldTrafficSummary {
+    pub available: bool,
+    pub likely_broader: u32,
+    pub unknown: u32,
+    pub region_control: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldDiagnosticSlice {
+    pub presence: FirstRegionPresence,
+    pub traffic: WorldTrafficSummary,
+}
+
+impl WorldDiagnosticSlice {
+    pub fn from_live_snapshot(snapshot: Option<&LiveVisualSnapshot>) -> Self {
+        let presence = FirstRegionPresence::from_live_snapshot(snapshot);
+        let traffic = match snapshot {
+            Some(state) => WorldTrafficSummary {
+                available: state.traffic_summary_available,
+                likely_broader: state.likely_broader_traffic,
+                unknown: state.unknown,
+                region_control: state.region_transition_control_observations,
+            },
+            None => WorldTrafficSummary {
+                available: false,
+                likely_broader: 0,
+                unknown: 0,
+                region_control: 0,
+            },
+        };
+        Self { presence, traffic }
+    }
+}
+
 impl Scene {
     pub fn prototype() -> Self {
         Self {
@@ -142,6 +181,7 @@ impl Scene {
 
     pub fn apply_live_visual_snapshot(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
         let world_presence = FirstRegionPresence::from_live_snapshot(snapshot);
+        let world_slice = WorldDiagnosticSlice::from_live_snapshot(snapshot);
         let Some(cube) = self
             .instances
             .iter_mut()
@@ -192,6 +232,36 @@ impl Scene {
             MeshKind::AxisMarker,
             world_entry_beacon_transform(world_presence),
             world_entry_beacon_color(world_presence),
+        );
+
+        upsert_instance(
+            &mut self.instances,
+            InstanceRole::WorldSimTargetMarker,
+            MeshKind::AxisMarker,
+            world_sim_target_transform(snapshot, world_presence),
+            world_sim_target_color(world_presence),
+        );
+
+        upsert_instance(
+            &mut self.instances,
+            InstanceRole::WorldTrafficBroaderPillar,
+            MeshKind::Cube,
+            world_traffic_pillar_transform(world_slice, TrafficPillarKind::Broader),
+            world_traffic_pillar_color(TrafficPillarKind::Broader),
+        );
+        upsert_instance(
+            &mut self.instances,
+            InstanceRole::WorldTrafficUnknownPillar,
+            MeshKind::Cube,
+            world_traffic_pillar_transform(world_slice, TrafficPillarKind::Unknown),
+            world_traffic_pillar_color(TrafficPillarKind::Unknown),
+        );
+        upsert_instance(
+            &mut self.instances,
+            InstanceRole::WorldTrafficRegionControlPillar,
+            MeshKind::Cube,
+            world_traffic_pillar_transform(world_slice, TrafficPillarKind::RegionControl),
+            world_traffic_pillar_color(TrafficPillarKind::RegionControl),
         );
     }
 }
@@ -263,6 +333,101 @@ fn world_entry_beacon_color(presence: FirstRegionPresence) -> [f32; 3] {
         WorldEntryStage::EnteredFirstRegion => [0.12, 0.86, 0.98],
         WorldEntryStage::Connected => [0.98, 0.83, 0.24],
         WorldEntryStage::Offline => [0.62, 0.36, 0.30],
+    }
+}
+
+fn world_sim_target_transform(
+    snapshot: Option<&LiveVisualSnapshot>,
+    presence: FirstRegionPresence,
+) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(presence.region_coords);
+    let base_x = 3.0 + offset_x;
+    let base_z = offset_z;
+    let heading = endpoint_heading(snapshot.and_then(|state| state.first_sim_endpoint.as_deref()));
+    let radius = if presence.has_sim_endpoint { 1.2 } else { 0.8 };
+    let px = base_x + heading.cos() * radius;
+    let pz = base_z + heading.sin() * radius;
+    let y = match presence.stage {
+        WorldEntryStage::EnteredFirstRegion => 1.2,
+        WorldEntryStage::Connected => 1.0,
+        WorldEntryStage::Offline => 0.85,
+    };
+    let scale = if presence.has_sim_endpoint {
+        [0.33, 0.33, 0.33]
+    } else {
+        [0.24, 0.24, 0.24]
+    };
+    Transform {
+        position: [px, y, pz],
+        scale,
+    }
+}
+
+fn world_sim_target_color(presence: FirstRegionPresence) -> [f32; 3] {
+    if !presence.has_sim_endpoint {
+        return [0.48, 0.44, 0.38];
+    }
+    match presence.stage {
+        WorldEntryStage::EnteredFirstRegion => [0.32, 0.86, 0.98],
+        WorldEntryStage::Connected => [0.98, 0.82, 0.30],
+        WorldEntryStage::Offline => [0.58, 0.40, 0.34],
+    }
+}
+
+fn endpoint_heading(endpoint: Option<&str>) -> f32 {
+    let Some(text) = endpoint else {
+        return 0.0;
+    };
+    let mut hash: u32 = 2_166_136_261;
+    for byte in text.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    let normalized = (hash as f32) / (u32::MAX as f32);
+    normalized * std::f32::consts::TAU
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrafficPillarKind {
+    Broader,
+    Unknown,
+    RegionControl,
+}
+
+fn world_traffic_pillar_transform(slice: WorldDiagnosticSlice, kind: TrafficPillarKind) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(slice.presence.region_coords);
+    let base_x = 3.0 + offset_x;
+    let base_z = offset_z;
+    let (x_shift, z_shift) = match kind {
+        TrafficPillarKind::Broader => (-0.9, 0.9),
+        TrafficPillarKind::Unknown => (0.0, 1.0),
+        TrafficPillarKind::RegionControl => (0.9, 0.9),
+    };
+    let raw_count = match kind {
+        TrafficPillarKind::Broader => slice.traffic.likely_broader,
+        TrafficPillarKind::Unknown => slice.traffic.unknown,
+        TrafficPillarKind::RegionControl => slice.traffic.region_control,
+    };
+    let height = traffic_pillar_height(slice.traffic.available, raw_count);
+    Transform {
+        position: [base_x + x_shift, height * 0.5, base_z + z_shift],
+        scale: [0.20, height, 0.20],
+    }
+}
+
+fn traffic_pillar_height(available: bool, count: u32) -> f32 {
+    if !available {
+        return 0.18;
+    }
+    let clamped = count.min(20) as f32;
+    0.18 + clamped * 0.04
+}
+
+fn world_traffic_pillar_color(kind: TrafficPillarKind) -> [f32; 3] {
+    match kind {
+        TrafficPillarKind::Broader => [0.30, 0.72, 0.94],
+        TrafficPillarKind::Unknown => [0.94, 0.46, 0.30],
+        TrafficPillarKind::RegionControl => [0.48, 0.88, 0.56],
     }
 }
 
@@ -389,6 +554,18 @@ mod tests {
             .expect("entry beacon should exist");
         assert_eq!(entry_beacon.mesh, MeshKind::AxisMarker);
         assert_eq!(entry_beacon.transform.position[1], 1.0);
+        let target = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
+            .expect("sim target marker should exist");
+        assert_eq!(target.color, [0.48, 0.44, 0.38]);
+        let broader = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldTrafficBroaderPillar)
+            .expect("broader traffic pillar should exist");
+        assert_eq!(broader.transform.scale, [0.20, 0.18, 0.20]);
     }
 
     #[test]
@@ -425,6 +602,12 @@ mod tests {
             .expect("entry beacon should exist");
         assert_eq!(entry_beacon.color, [0.98, 0.83, 0.24]);
         assert_eq!(entry_beacon.transform.position[1], 1.4);
+        let target = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
+            .expect("sim target marker should exist");
+        assert_eq!(target.color, [0.48, 0.44, 0.38]);
     }
 
     #[test]
@@ -461,6 +644,12 @@ mod tests {
             .expect("entry beacon should exist");
         assert_eq!(entry_beacon.color, [0.12, 0.86, 0.98]);
         assert_eq!(entry_beacon.transform.position[1], 2.0);
+        let target = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
+            .expect("sim target marker should exist");
+        assert_eq!(target.color, [0.48, 0.44, 0.38]);
     }
 
     #[test]
@@ -502,6 +691,30 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
         assert_ne!(entry_beacon.transform.position, [3.0, 2.0, 0.0]);
+        let target = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
+            .expect("sim target marker should exist");
+        assert_ne!(target.transform.position, [3.0, 1.2, 0.0]);
+        assert_eq!(target.color, [0.32, 0.86, 0.98]);
+        let broader = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldTrafficBroaderPillar)
+            .expect("broader traffic pillar should exist");
+        let unknown = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldTrafficUnknownPillar)
+            .expect("unknown traffic pillar should exist");
+        let region_control = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldTrafficRegionControlPillar)
+            .expect("region control traffic pillar should exist");
+        assert!(broader.transform.scale[1] > unknown.transform.scale[1]);
+        assert!(unknown.transform.scale[1] >= region_control.transform.scale[1]);
     }
 
     #[test]
@@ -541,5 +754,41 @@ mod tests {
         assert_eq!(presence.stage, WorldEntryStage::Connected);
         assert!(presence.has_sim_endpoint);
         assert_eq!(presence.region_coords, Some([1000, 2000]));
+    }
+
+    #[test]
+    fn world_diagnostic_slice_maps_traffic_summary() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.10:13009")),
+            first_sim_region_x: Some(1000),
+            first_sim_region_y: Some(2000),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 14,
+            region_transition_control_observations: 2,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 11,
+            unknown: 3,
+            observed_at_unix_ms: 7,
+        };
+        let slice = WorldDiagnosticSlice::from_live_snapshot(Some(&snapshot));
+        assert_eq!(slice.presence.stage, WorldEntryStage::EnteredFirstRegion);
+        assert!(slice.presence.has_sim_endpoint);
+        assert!(slice.traffic.available);
+        assert_eq!(slice.traffic.likely_broader, 11);
+        assert_eq!(slice.traffic.unknown, 3);
+        assert_eq!(slice.traffic.region_control, 2);
+    }
+
+    #[test]
+    fn traffic_pillar_height_respects_summary_availability_and_caps() {
+        assert_eq!(traffic_pillar_height(false, 10), 0.18);
+        assert_eq!(traffic_pillar_height(true, 0), 0.18);
+        assert_eq!(traffic_pillar_height(true, 5), 0.38);
+        let capped = traffic_pillar_height(true, 200);
+        assert!((capped - 0.98).abs() < 0.0001);
     }
 }

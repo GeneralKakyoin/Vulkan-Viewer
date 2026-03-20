@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First bounded world-state bridge (diagnostic-first)
+Phase E - First meaningful live world-facing diagnostic slice
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -41,6 +41,13 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `WorldEntryBeacon` marker
   - markers are driven only by already-proven sanitized live inputs (login, AMC, region endpoint/coords)
   - implementation remains diagnostic-first and intentionally stops before broad world/object decode
+- world-facing composition is now richer than a single entry marker:
+  - simulator-target landmark (`WorldSimTargetMarker`) is derived from first-simulator target identity
+  - three bounded traffic pillars are rendered in world space from existing traffic summaries:
+    - `WorldTrafficBroaderPillar`
+    - `WorldTrafficUnknownPillar`
+    - `WorldTrafficRegionControlPillar`
+  - the scene now communicates stage + region + target + bounded traffic shape without broad world/object ingestion
 
 ### Architecture
 - clear crate boundaries
@@ -198,8 +205,11 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 
 The immediate blocker is no longer login/bootstrap transport viability. The current blocker is phase control:
 
-- we now have connected live diagnostics and a first bounded world-state bridge in scene space
-- next steps must increase world-facing utility without drifting into broad object/world decoding
+- we now have connected live diagnostics and a first meaningful world-facing composition in scene space
+- next steps must decide between:
+  - one more scene-side diagnostic consolidation pass, or
+  - first bounded world/object-state ingestion
+- either path must avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
 ---
@@ -207,6 +217,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 ## Most Likely Immediate Work
 
 - extend the bounded world-state bridge with one additional typed, scene-facing landmark summary (still diagnostic-first)
+- choose and prepare the first bounded world/object-state ingestion seam (typed and reversible) or perform one final diagnostic composition pass
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
 - optionally expose the new bounded state summary in debug UI without adding product UI features
@@ -218,8 +229,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**add the smallest bounded world-facing state bridge beyond placeholders (for example a typed pre-world-state landmark feed), while keeping broad object/world decode out of scope**
-**extend the bounded world-state bridge with one more typed diagnostic landmark/state summary, while keeping broad object/world decode out of scope**
+**choose the next bounded step: either first typed world/object-state ingestion seam or one final scene-side diagnostic consolidation pass, while keeping broad object/world decode out of scope**
 
 ---
 
