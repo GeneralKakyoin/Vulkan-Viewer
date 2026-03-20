@@ -204,7 +204,11 @@ Status update (latest):
   - `WorldObjectIngestionLane`
   - seam-driven scene placeholder role: `WorldIngestionProxy`
   - focused tests now protect seam mapping and seam-driven scene behavior
-- next T8 slice should extend this seam to the first bounded real ingestion adapter while preserving the hard stop before broad object/world decoding
+- first bounded real ingestion adapter feed is now implemented:
+  - `WorldObjectIngestionAdapter` maps runtime `LiveVisualSnapshot` -> seam
+  - `viewer_app` applies seam each frame through explicit seam API
+  - seam now owns proxy injection/removal path in scene flow
+- next T8 slice should extend seam item content to a first truly ingested narrow world/object payload adapter while preserving the hard stop before broad object/world decoding
 
 ---
 

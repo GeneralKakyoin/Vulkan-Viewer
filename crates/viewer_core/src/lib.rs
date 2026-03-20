@@ -186,6 +186,15 @@ impl WorldObjectIngestionSeam {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorldObjectIngestionAdapter;
+
+impl WorldObjectIngestionAdapter {
+    pub fn adapt(snapshot: Option<&LiveVisualSnapshot>) -> WorldObjectIngestionSeam {
+        WorldObjectIngestionSeam::from_live_snapshot(snapshot)
+    }
+}
+
 impl Scene {
     pub fn prototype() -> Self {
         Self {
@@ -221,7 +230,6 @@ impl Scene {
     pub fn apply_live_visual_snapshot(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
         let world_presence = FirstRegionPresence::from_live_snapshot(snapshot);
         let world_slice = WorldDiagnosticSlice::from_live_snapshot(snapshot);
-        let ingestion_seam = WorldObjectIngestionSeam::from_diagnostic_slice(world_slice);
         let Some(cube) = self
             .instances
             .iter_mut()
@@ -303,14 +311,21 @@ impl Scene {
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::RegionControl),
             world_traffic_pillar_color(TrafficPillarKind::RegionControl),
         );
+    }
 
-        if let Some(item) = ingestion_seam.items.first() {
+    pub fn apply_world_object_ingestion_seam(&mut self, seam: &WorldObjectIngestionSeam) {
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy)
+        {
             upsert_instance(
                 &mut self.instances,
                 InstanceRole::WorldIngestionProxy,
                 MeshKind::Cube,
-                world_ingestion_proxy_transform(*item),
-                world_ingestion_proxy_color(*item),
+                world_ingestion_proxy_transform(item),
+                world_ingestion_proxy_color(item),
             );
         } else {
             remove_instance(&mut self.instances, InstanceRole::WorldIngestionProxy);
@@ -583,6 +598,12 @@ impl Camera {
 mod tests {
     use super::*;
 
+    fn apply_scene_from_snapshot(scene: &mut Scene, snapshot: Option<&LiveVisualSnapshot>) {
+        scene.apply_live_visual_snapshot(snapshot);
+        let seam = WorldObjectIngestionAdapter::adapt(snapshot);
+        scene.apply_world_object_ingestion_seam(&seam);
+    }
+
     fn sample_snapshot(logged_in: bool, amc: bool) -> LiveVisualSnapshot {
         LiveVisualSnapshot {
             source: String::from("test"),
@@ -605,7 +626,7 @@ mod tests {
     #[test]
     fn scene_applies_offline_live_visual_defaults() {
         let mut scene = Scene::prototype();
-        scene.apply_live_visual_snapshot(None);
+        apply_scene_from_snapshot(&mut scene, None);
         let cube = scene
             .instances
             .iter()
@@ -660,7 +681,7 @@ mod tests {
     fn scene_applies_logged_in_pre_amc_live_visual_state() {
         let mut scene = Scene::prototype();
         let snapshot = sample_snapshot(true, false);
-        scene.apply_live_visual_snapshot(Some(&snapshot));
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let cube = scene
             .instances
             .iter()
@@ -709,7 +730,7 @@ mod tests {
     fn scene_applies_amc_reached_live_visual_state() {
         let mut scene = Scene::prototype();
         let snapshot = sample_snapshot(true, true);
-        scene.apply_live_visual_snapshot(Some(&snapshot));
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let cube = scene
             .instances
             .iter()
@@ -772,7 +793,7 @@ mod tests {
             unknown: 0,
             observed_at_unix_ms: 1,
         };
-        scene.apply_live_visual_snapshot(Some(&snapshot));
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let live_anchor = scene
             .instances
             .iter()
@@ -937,5 +958,34 @@ mod tests {
         assert_eq!(item.stage, WorldEntryStage::EnteredFirstRegion);
         assert!(item.simulator_target_present);
         assert_eq!(item.region_coords, Some([1024, 2048]));
+    }
+
+    #[test]
+    fn world_object_ingestion_adapter_matches_seam_from_live_snapshot() {
+        let snapshot = sample_snapshot(true, true);
+        let seam_from_adapter = WorldObjectIngestionAdapter::adapt(Some(&snapshot));
+        let seam_direct = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        assert_eq!(seam_from_adapter, seam_direct);
+    }
+
+    #[test]
+    fn scene_removes_ingestion_proxy_when_seam_is_empty() {
+        let mut scene = Scene::prototype();
+        let snapshot = sample_snapshot(true, true);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldIngestionProxy)
+        );
+
+        scene.apply_world_object_ingestion_seam(&WorldObjectIngestionSeam::default());
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionProxy)
+        );
     }
 }

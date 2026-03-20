@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
-use viewer_core::{Camera, LiveVisualSnapshot, Scene};
+use viewer_core::{
+    Camera, LiveVisualSnapshot, Scene, WorldObjectIngestionAdapter, WorldObjectIngestionSeam,
+};
 use viewer_grid::{GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent};
 use viewer_net::{Connection, ConnectionConfig, FirstSimulatorInboundTrafficScope, LoginWireFormat};
 use viewer_render::RenderBackend;
@@ -41,6 +43,7 @@ struct AppState {
     ui: UiSystem,
     camera: Camera,
     scene: Scene,
+    world_ingestion_seam: WorldObjectIngestionSeam,
     input: InputState,
     live_visual_state: LiveVisualState,
     last_frame_time: Instant,
@@ -394,6 +397,7 @@ impl ViewerApp {
             ui,
             camera: Camera::default(),
             scene: Scene::prototype(),
+            world_ingestion_seam: WorldObjectIngestionSeam::default(),
             input: InputState::default(),
             live_visual_state: LiveVisualState::from_env(),
             last_frame_time: Instant::now(),
@@ -415,8 +419,12 @@ impl AppState {
         self.camera.add_look_delta(look_x, look_y);
         self.input.update_camera(&mut self.camera, dt_seconds);
         self.live_visual_state.refresh();
+        self.world_ingestion_seam =
+            WorldObjectIngestionAdapter::adapt(self.live_visual_state.snapshot.as_ref());
         self.scene
             .apply_live_visual_snapshot(self.live_visual_state.snapshot.as_ref());
+        self.scene
+            .apply_world_object_ingestion_seam(&self.world_ingestion_seam);
 
         let window = self.window.clone();
         let ui = &mut self.ui;

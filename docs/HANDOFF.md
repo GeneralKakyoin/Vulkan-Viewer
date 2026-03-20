@@ -2,6 +2,24 @@
 
 ## Last Completed Work
 
+- Implemented the first bounded real ingestion adapter feed into the existing seam:
+  - added `WorldObjectIngestionAdapter` in `viewer_core`
+  - adapter maps runtime `LiveVisualSnapshot` -> `WorldObjectIngestionSeam`
+- Made runtime seam feed explicit in orchestration path:
+  - `viewer_app` now computes and stores seam state each frame
+  - `viewer_app` applies seam through `Scene::apply_world_object_ingestion_seam(...)`
+  - seam remains the only path for `WorldIngestionProxy`
+- Refined scene ownership boundaries:
+  - `Scene::apply_live_visual_snapshot(...)` no longer creates/removes ingestion proxy directly
+  - proxy behavior is controlled only by seam application method
+- Added focused tests in `viewer_core`:
+  - adapter/seam equivalence
+  - seam-driven proxy removal on empty seam
+  - existing seam mapping tests retained and passing
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Added the first typed world/object ingestion seam in `viewer_core`:
   - new seam types:
     - `WorldObjectIngestionSeam`

@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First typed world/object ingestion seam (bounded)
+Phase E - First typed world/object ingestion seam runtime-fed
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -57,6 +57,10 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - seam output drives a dedicated scene placeholder role:
     - `WorldIngestionProxy`
   - this creates a clear, testable ingress boundary for future world/object state without broad decode
+- seam is now explicitly runtime-fed in normal app flow:
+  - `viewer_app` builds seam items each frame via `WorldObjectIngestionAdapter::adapt(snapshot)`
+  - `viewer_app` applies seam to `Scene::apply_world_object_ingestion_seam(...)`
+  - `WorldIngestionProxy` is no longer implicitly created by snapshot mapping internals; it is fed through the seam path
 
 ### Architecture
 - clear crate boundaries
@@ -215,8 +219,9 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 The immediate blocker is no longer login/bootstrap transport viability. The current blocker is phase control:
 
 - we now have connected live diagnostics, a meaningful world-facing composition, and a typed ingestion seam
+- seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
 - next steps must decide between:
-  - extending the seam to the first truly ingested bounded world/object payload, or
+  - extending the seam to the first truly ingested bounded world/object payload adapter, or
   - one final seam/diagnostic consolidation pass
 - either path must avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
@@ -225,7 +230,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 ## Most Likely Immediate Work
 
-- extend the new ingestion seam from diagnostic-derived items to the first bounded ingested payload adapter
+- extend the runtime-fed ingestion seam from diagnostic-derived items to the first bounded ingested payload adapter
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
