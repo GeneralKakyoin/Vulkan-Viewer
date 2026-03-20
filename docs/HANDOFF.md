@@ -2,6 +2,25 @@
 
 ## Last Completed Work
 
+- Added the first bounded object-like decoded composition from existing multi-input lanes:
+  - composition inputs:
+    - `DecodedCoarseLocationPayload`
+    - `DecodedHealthPayload`
+  - seam-owned composite scene role:
+    - `WorldIngestionDecodedCompositeBeacon`
+  - composition rule:
+    - beacon appears only when both decoded lanes are present
+  - composition mapping:
+    - transform blends coarse location placement with health-derived influence
+    - color is health-influenced
+- Strengthened multi-input composition regression coverage in `viewer_core`:
+  - composite marker appears when both lanes are present
+  - composite marker is absent when either lane is missing
+  - empty seam removes composite role along with other seam-owned decoded roles
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Added a second tiny simulator-derived decoded payload lane for bounded multi-input seam ingestion:
   - transport decode in `viewer_net` for inbound `HealthMessage` body:
     - minimal decoded scalar -> normalized basis points

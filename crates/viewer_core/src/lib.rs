@@ -29,6 +29,7 @@ pub enum InstanceRole {
     WorldIngestionDecodedEndpointPayload,
     WorldIngestionDecodedCoarseLocationPayload,
     WorldIngestionDecodedHealthPayload,
+    WorldIngestionDecodedCompositeBeacon,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -571,6 +572,31 @@ impl Scene {
                 InstanceRole::WorldIngestionDecodedHealthPayload,
             );
         }
+
+        let coarse_item = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload);
+        let health_item = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload);
+        if let (Some(coarse), Some(health)) = (coarse_item, health_item) {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCompositeBeacon,
+                MeshKind::Cube,
+                world_ingestion_decoded_composite_transform(coarse, health),
+                world_ingestion_decoded_composite_color(health),
+            );
+        } else {
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionDecodedCompositeBeacon,
+            );
+        }
     }
 }
 
@@ -873,6 +899,29 @@ fn world_ingestion_decoded_health_color(item: WorldObjectIngestionItem) -> [f32;
     [1.0 - normalized * 0.72, 0.28 + normalized * 0.66, 0.24]
 }
 
+fn world_ingestion_decoded_composite_transform(
+    coarse: WorldObjectIngestionItem,
+    health: WorldObjectIngestionItem,
+) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(coarse.region_coords.or(health.region_coords));
+    let [cx, cy, cz] = coarse.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
+    let health_norm = f32::from(health.decoded_health_basis_points.unwrap_or(0)) / 10_000.0;
+    let x = 3.0 + offset_x + ((f32::from(cx) / 255.0) - 0.5) * 0.9;
+    let z = offset_z - 2.55 + ((f32::from(cy) / 255.0) - 0.5) * 0.9;
+    let y = 0.32 + (f32::from(cz) / 255.0) * 0.55 + health_norm.clamp(0.0, 1.0) * 0.45;
+    let coarse_count = f32::from(coarse.decoded_coarse_location_count.unwrap_or(0));
+    let scale = (0.18 + coarse_count * 0.01 + health_norm * 0.18).clamp(0.18, 0.46);
+    Transform {
+        position: [x, y, z],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_ingestion_decoded_composite_color(health: WorldObjectIngestionItem) -> [f32; 3] {
+    let h = (f32::from(health.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    [0.92 - h * 0.52, 0.35 + h * 0.55, 0.86 - h * 0.62]
+}
+
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
     match snapshot {
         Some(state) if state.logged_in => {
@@ -1045,6 +1094,14 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| {
+                    instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+                })
+        );
     }
 
     #[test]
@@ -1112,6 +1169,14 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| {
+                    instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+                })
+        );
     }
 
     #[test]
@@ -1178,6 +1243,14 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| {
+                    instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+                })
+        );
     }
 
     #[test]
@@ -1197,11 +1270,11 @@ mod tests {
             confirm_enable_simulator: 0,
             likely_broader_traffic: 7,
             unknown: 0,
-            decoded_coarse_updates: 0,
-            decoded_coarse_location_count: None,
-            decoded_coarse_first_x: None,
-            decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
             decoded_health_updates: 1,
             decoded_health_last_basis_points: Some(6700),
             observed_at_unix_ms: 1,
@@ -1280,6 +1353,21 @@ mod tests {
             .expect("decoded health payload marker should exist");
         assert_eq!(decoded_health_payload.mesh, MeshKind::Cube);
         assert!(decoded_health_payload.transform.position[1] > 0.25);
+        let decoded_coarse_payload = scene
+            .instances
+            .iter()
+            .find(|instance| {
+                instance.role == InstanceRole::WorldIngestionDecodedCoarseLocationPayload
+            })
+            .expect("decoded coarse payload marker should exist");
+        assert_eq!(decoded_coarse_payload.mesh, MeshKind::AxisMarker);
+        let composite = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedCompositeBeacon)
+            .expect("decoded composite beacon should exist");
+        assert_eq!(composite.mesh, MeshKind::Cube);
+        assert!(composite.transform.position[1] > 0.3);
     }
 
     #[test]
@@ -1558,6 +1646,50 @@ mod tests {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
             .expect("decoded health payload should exist");
         assert_eq!(decoded.decoded_health_basis_points, Some(6200));
+    }
+
+    #[test]
+    fn scene_composite_beacon_requires_both_decoded_inputs() {
+        let mut scene = Scene::prototype();
+        let coarse_only = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: false,
+            post_boundary_observations: 0,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 0,
+            unknown: 0,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
+            observed_at_unix_ms: 9,
+        };
+        apply_scene_from_snapshot(&mut scene, Some(&coarse_only));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+        }));
+
+        let mut health_only = coarse_only.clone();
+        health_only.decoded_coarse_location_count = None;
+        health_only.decoded_coarse_first_x = None;
+        health_only.decoded_coarse_first_y = None;
+        health_only.decoded_coarse_first_z = None;
+        health_only.decoded_health_updates = 1;
+        health_only.decoded_health_last_basis_points = Some(6200);
+        apply_scene_from_snapshot(&mut scene, Some(&health_only));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+        }));
     }
 
     #[test]

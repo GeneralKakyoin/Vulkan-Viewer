@@ -53,6 +53,10 @@ Do not start broad world-state decoding from this map alone.
   - currently decoded minimally:
     - health scalar normalized to basis points
   - this remains diagnostic-first and is routed through a distinct seam lane/scene role, not broad world/object ingestion.
+- bounded multi-input composition note:
+  - current decoded lanes (`CoarseLocationUpdate` + `HealthMessage`) now drive one seam-owned composite beacon role
+  - composition is gated on both decoded lanes being present
+  - this is treated as object-like diagnostic composition, not broad object/world-state decoding
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.

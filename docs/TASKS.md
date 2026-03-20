@@ -225,19 +225,23 @@ Status update (latest):
     - decoded location count
     - decoded first coarse XYZ sample
   - seam-owned marker `WorldIngestionDecodedCoarseLocationPayload` reflects this simulator-derived decoded payload in scene space
-- bounded multi-input simulator-derived seam ingestion is now underway:
+- bounded multi-input simulator-derived seam ingestion is now complete:
   - second seam lane added: `DecodedHealthPayload`
   - transport decode source: inbound `HealthMessage` body in `viewer_net`
   - bounded decoded field propagated via live snapshot:
     - normalized health basis points
   - seam-owned marker `WorldIngestionDecodedHealthPayload` reflects this decoded payload in scene space
+- first bounded object-like decoded composition is now complete:
+  - seam-owned composite role: `WorldIngestionDecodedCompositeBeacon`
+  - composition inputs: `DecodedCoarseLocationPayload` + `DecodedHealthPayload`
+  - composition appears only when both decoded lanes are present
 - viewer_app-owned live startup orchestration is now first-class:
   - startup mode control (`VIEWER_APP_LIVE_STARTUP`: auto/on/off)
   - app-owned startup status mapping and diagnostics
   - app receives worker status + snapshot updates and feeds seam/scene path
 - next T8 slice should either:
   - add one more bounded simulator-payload decode lane through seam, or
-  - begin first bounded object-like composition from current multi-input decoded lanes
+  - begin first tiny real object/state ingestion step from current decoded composition
   while preserving the hard stop before broad object/world decoding
 
 ---
