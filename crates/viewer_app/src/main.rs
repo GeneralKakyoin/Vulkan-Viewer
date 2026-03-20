@@ -1,10 +1,14 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
 use viewer_core::{Camera, LiveVisualSnapshot, Scene};
+use viewer_grid::{GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent};
+use viewer_net::{Connection, ConnectionConfig, FirstSimulatorInboundTrafficScope, LoginWireFormat};
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
 use winit::{
@@ -59,6 +63,25 @@ struct LiveVisualState {
     path: PathBuf,
     last_modified: Option<std::time::SystemTime>,
     snapshot: Option<LiveVisualSnapshot>,
+    in_process_rx: Option<Receiver<LiveVisualSnapshot>>,
+    in_process_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct InProcessLiveFeedConfig {
+    endpoint: String,
+    username: String,
+    password: String,
+    connect_timeout_secs: u64,
+    wire_format: LoginWireFormat,
+    start_location: StartLocationIntent,
+    receive_bind: String,
+    receive_timeout_secs: u64,
+    receive_max_packets: usize,
+    post_movement_tail_packets: usize,
+    post_movement_timeout_secs: Option<u64>,
+    stop_on_region_control: bool,
+    run_probe: bool,
 }
 
 impl LiveVisualState {
@@ -66,18 +89,40 @@ impl LiveVisualState {
         let path = std::env::var("VIEWER_LIVE_VISUAL_SNAPSHOT_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("live_visual_snapshot.json"));
+        let in_process_config =
+            in_process_live_feed_config_from_lookup(|key| std::env::var(key).ok());
+        let in_process_enabled = in_process_config.is_some();
+        let in_process_rx = in_process_config.map(spawn_in_process_live_feed);
 
         Self {
             path,
             last_modified: None,
             snapshot: None,
+            in_process_rx,
+            in_process_enabled,
         }
     }
 
     fn refresh(&mut self) {
+        let mut got_in_process_update = false;
+        if let Some(rx) = &self.in_process_rx {
+            while let Ok(snapshot) = rx.try_recv() {
+                self.snapshot = Some(snapshot);
+                got_in_process_update = true;
+            }
+        }
+
+        if got_in_process_update || self.in_process_enabled {
+            if self.snapshot.is_some() {
+                return;
+            }
+        }
+
         let Ok(metadata) = fs::metadata(&self.path) else {
-            self.last_modified = None;
-            self.snapshot = None;
+            if !self.in_process_enabled {
+                self.last_modified = None;
+                self.snapshot = None;
+            }
             return;
         };
 
@@ -96,6 +141,233 @@ impl LiveVisualState {
         self.snapshot = Some(snapshot);
         self.last_modified = modified;
     }
+}
+
+fn in_process_live_feed_config_from_lookup<F>(lookup: F) -> Option<InProcessLiveFeedConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = lookup("VIEWER_LOGIN_ENDPOINT")?;
+    let username = lookup("VIEWER_LOGIN_USERNAME")?;
+    let password = lookup("VIEWER_LOGIN_PASSWORD")?;
+
+    let connect_timeout_secs = lookup("VIEWER_LOGIN_TIMEOUT_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(15);
+    let wire_format = lookup("VIEWER_LOGIN_WIRE_FORMAT")
+        .as_deref()
+        .map(parse_wire_format)
+        .unwrap_or(LoginWireFormat::Llsd);
+    let start_location = lookup("VIEWER_LOGIN_START")
+        .as_deref()
+        .map(parse_start_location)
+        .unwrap_or(StartLocationIntent::Saved(StartLocation::Last));
+
+    let receive_bind =
+        lookup("VIEWER_FIRST_SIM_RECEIVE_BIND").unwrap_or_else(|| String::from("0.0.0.0:0"));
+    let receive_timeout_secs = lookup("VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5);
+    let receive_max_packets = lookup("VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(8);
+    let post_movement_tail_packets = lookup("VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4);
+    let post_movement_timeout_secs = lookup("VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS")
+        .and_then(|v| v.parse::<u64>().ok());
+    let stop_on_region_control = lookup("VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL")
+        .map(|v| parse_bool_like(&v))
+        .unwrap_or(false);
+    let run_probe = lookup("VIEWER_APP_IN_PROCESS_PROBE")
+        .map(|v| parse_bool_like(&v))
+        .unwrap_or(true);
+
+    Some(InProcessLiveFeedConfig {
+        endpoint,
+        username,
+        password,
+        connect_timeout_secs,
+        wire_format,
+        start_location,
+        receive_bind,
+        receive_timeout_secs,
+        receive_max_packets,
+        post_movement_tail_packets,
+        post_movement_timeout_secs,
+        stop_on_region_control,
+        run_probe,
+    })
+}
+
+fn spawn_in_process_live_feed(config: InProcessLiveFeedConfig) -> Receiver<LiveVisualSnapshot> {
+    let (tx, rx) = mpsc::channel::<LiveVisualSnapshot>();
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let Ok(runtime) = runtime else {
+            return;
+        };
+        runtime.block_on(async move {
+            run_in_process_live_feed(config, tx).await;
+        });
+    });
+    rx
+}
+
+async fn run_in_process_live_feed(
+    config: InProcessLiveFeedConfig,
+    tx: mpsc::Sender<LiveVisualSnapshot>,
+) {
+    let _ = tx.send(LiveVisualSnapshot {
+        source: String::from("viewer_app_in_process:start"),
+        logged_in: false,
+        first_sim_endpoint: None,
+        first_sim_region_x: None,
+        first_sim_region_y: None,
+        handshake_agent_movement_complete: false,
+        traffic_summary_available: false,
+        post_boundary_observations: 0,
+        region_transition_control_observations: 0,
+        crossed_region: 0,
+        confirm_enable_simulator: 0,
+        likely_broader_traffic: 0,
+        unknown: 0,
+        observed_at_unix_ms: now_unix_ms(),
+    });
+
+    let mut connection = Connection::new(ConnectionConfig {
+        endpoint: config.endpoint.clone(),
+        connect_timeout: std::time::Duration::from_secs(config.connect_timeout_secs),
+        wire_format: config.wire_format,
+    });
+    let adapter = SecondLifeAdapter;
+
+    if connection.connect().await.is_err() {
+        return;
+    }
+
+    let intent = LoginIntent {
+        username: config.username.clone(),
+        password: config.password.clone(),
+        start_location: config.start_location.clone(),
+        agree_to_tos: false,
+        read_critical: true,
+        mfa_token: None,
+    };
+
+    let Ok((result, _trace)) = connection.login_with_trace(&adapter, intent).await else {
+        return;
+    };
+    let mut snapshot = build_live_visual_snapshot_from_result(&result);
+    let _ = tx.send(snapshot.clone());
+
+    if config.run_probe && matches!(result, GridLoginResult::Success(_)) {
+        let _ = connection
+            .probe_first_simulator_handshake_window_with_policy(
+                &config.receive_bind,
+                std::time::Duration::from_secs(config.receive_timeout_secs),
+                config.receive_max_packets,
+                config.post_movement_tail_packets,
+                config.post_movement_timeout_secs
+                    .map(std::time::Duration::from_secs),
+                config.stop_on_region_control,
+            )
+            .await;
+    }
+
+    update_live_visual_from_connection(&mut snapshot, &connection);
+    snapshot.source = String::from("viewer_app_in_process:ready");
+    let _ = tx.send(snapshot);
+}
+
+fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisualSnapshot {
+    let mut snapshot = LiveVisualSnapshot {
+        source: String::from("viewer_app_in_process:login"),
+        logged_in: false,
+        first_sim_endpoint: None,
+        first_sim_region_x: None,
+        first_sim_region_y: None,
+        handshake_agent_movement_complete: false,
+        traffic_summary_available: false,
+        post_boundary_observations: 0,
+        region_transition_control_observations: 0,
+        crossed_region: 0,
+        confirm_enable_simulator: 0,
+        likely_broader_traffic: 0,
+        unknown: 0,
+        observed_at_unix_ms: now_unix_ms(),
+    };
+
+    if let GridLoginResult::Success(bootstrap) = result {
+        snapshot.logged_in = true;
+        snapshot.first_sim_endpoint = Some(format!(
+            "{}:{}",
+            bootstrap.first_sim.sim_ip, bootstrap.first_sim.sim_port
+        ));
+        snapshot.first_sim_region_x = Some(bootstrap.first_sim.region_x);
+        snapshot.first_sim_region_y = Some(bootstrap.first_sim.region_y);
+    }
+
+    snapshot
+}
+
+fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connection: &Connection) {
+    snapshot.observed_at_unix_ms = now_unix_ms();
+    snapshot.handshake_agent_movement_complete = connection
+        .first_simulator_handshake_state()
+        .map(|state| state.stage == viewer_net::FirstSimulatorHandshakeStage::AgentMovementComplete)
+        .unwrap_or(false);
+
+    let region = connection.summarize_region_transition_control();
+    snapshot.region_transition_control_observations = region.observations as u32;
+    snapshot.crossed_region = region.crossed_region as u32;
+    snapshot.confirm_enable_simulator = region.confirm_enable_simulator as u32;
+
+    let receive = connection.first_simulator_handshake_receive_diagnostics();
+    snapshot.traffic_summary_available = !receive.is_empty();
+    snapshot.post_boundary_observations = receive.len() as u32;
+    snapshot.likely_broader_traffic = receive
+        .iter()
+        .filter(|diag| diag.scope == FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic)
+        .count() as u32;
+    snapshot.unknown = receive
+        .iter()
+        .filter(|diag| diag.scope == FirstSimulatorInboundTrafficScope::Unknown)
+        .count() as u32;
+}
+
+fn parse_wire_format(value: &str) -> LoginWireFormat {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "json" => LoginWireFormat::Json,
+        "xmlrpc" | "xml-rpc" => LoginWireFormat::XmlRpc,
+        _ => LoginWireFormat::Llsd,
+    }
+}
+
+fn parse_start_location(value: &str) -> StartLocationIntent {
+    if value.eq_ignore_ascii_case("home") {
+        StartLocationIntent::Saved(StartLocation::Home)
+    } else if value.eq_ignore_ascii_case("last") {
+        StartLocationIntent::Saved(StartLocation::Last)
+    } else {
+        StartLocationIntent::Uri(value.to_string())
+    }
+}
+
+fn parse_bool_like(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl ViewerApp {
@@ -310,5 +582,71 @@ impl ApplicationHandler for ViewerApp {
         if let Some(state) = self.state.as_ref() {
             state.window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn in_process_config_requires_endpoint_username_and_password() {
+        let vars = HashMap::<String, String>::new();
+        let cfg = in_process_live_feed_config_from_lookup(|k| vars.get(k).cloned());
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn in_process_config_parses_defaults_and_overrides() {
+        let mut vars = HashMap::<String, String>::new();
+        vars.insert(
+            String::from("VIEWER_LOGIN_ENDPOINT"),
+            String::from("https://example.invalid/login"),
+        );
+        vars.insert(String::from("VIEWER_LOGIN_USERNAME"), String::from("user"));
+        vars.insert(String::from("VIEWER_LOGIN_PASSWORD"), String::from("pass"));
+        vars.insert(
+            String::from("VIEWER_LOGIN_WIRE_FORMAT"),
+            String::from("xmlrpc"),
+        );
+        vars.insert(
+            String::from("VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS"),
+            String::from("16"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_IN_PROCESS_PROBE"),
+            String::from("false"),
+        );
+        let cfg = in_process_live_feed_config_from_lookup(|k| vars.get(k).cloned())
+            .expect("config should parse");
+        assert_eq!(cfg.wire_format, LoginWireFormat::XmlRpc);
+        assert_eq!(cfg.receive_max_packets, 16);
+        assert!(!cfg.run_probe);
+    }
+
+    #[test]
+    fn parse_start_location_maps_home_last_and_uri() {
+        assert_eq!(
+            parse_start_location("home"),
+            StartLocationIntent::Saved(StartLocation::Home)
+        );
+        assert_eq!(
+            parse_start_location("last"),
+            StartLocationIntent::Saved(StartLocation::Last)
+        );
+        assert_eq!(
+            parse_start_location("my://region/128/128/25"),
+            StartLocationIntent::Uri(String::from("my://region/128/128/25"))
+        );
+    }
+
+    #[test]
+    fn parse_bool_like_accepts_expected_truthy_forms() {
+        assert!(parse_bool_like("true"));
+        assert!(parse_bool_like("1"));
+        assert!(parse_bool_like("YES"));
+        assert!(!parse_bool_like("false"));
+        assert!(!parse_bool_like("0"));
     }
 }

@@ -2,6 +2,49 @@
 
 ## Last Completed Work
 
+- Completed the first world-facing placeholder bridge on top of the in-process live state feed:
+  - `viewer_core::Scene` now tracks instance purpose via `InstanceRole` (`SceneStatic`, `LivePlaceholder`)
+  - `Scene::apply_live_visual_snapshot(...)` now maintains a dedicated live placeholder marker in world space
+  - placeholder transform and color are driven by sanitized live state:
+    - offline/logged-out fallback
+    - logged-in pre-AMC
+    - AMC reached
+    - region-coordinate offsets when region coordinates are present
+- Kept crate boundaries intact:
+  - no protocol changes in `viewer_net`/`viewer_grid`
+  - no orchestration boundary changes in `viewer_app`
+  - no renderer ownership changes in `viewer_render`
+- Added focused regression tests in `viewer_core`:
+  - placeholder creation/update in offline/logged-in/AMC states
+  - region-coordinate-driven placeholder positioning
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
+- Replaced the first live visual slice's primary bridge with an in-process connected-state feed:
+  - `viewer_app` now builds a narrow in-process worker path using real `viewer_net` login/bootstrap/handshake probes
+  - worker emits sanitized `LiveVisualSnapshot` updates over in-process channel
+  - app consumes those updates directly each frame and only uses file snapshot as fallback
+- Expanded connected diagnostics visible on-screen:
+  - `viewer_ui` now renders richer live status lines from shared live snapshot data
+  - scene indicator became richer than color-only:
+    - cube color + scale reflect offline / logged-in / AMC-reached states
+- Kept strict boundaries:
+  - `viewer_net` remained transport/session/handshake/traffic diagnostics
+  - `viewer_core` now owns shared `LiveVisualSnapshot` domain model + scene application behavior
+  - `viewer_app` orchestrates in-process feed wiring
+  - `viewer_ui` remains display/debug-only
+- Added focused tests for this phase:
+  - `viewer_app` config/bridge parsing behavior tests
+  - `viewer_core` scene live-state application tests
+  - `viewer_ui` live debug-line mapping tests
+- Manual live validation:
+  - `viewer_net` manual example run still succeeds for login/seed/probe
+  - sanitized snapshot output remains valid for fallback path
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Implemented first live visual slice bridge (diagnostic-first, reversible):
   - added shared `viewer_core::LiveVisualSnapshot` model for minimal live-derived visual state
   - manual `viewer_net` example now writes sanitized snapshot JSON after login/probe:

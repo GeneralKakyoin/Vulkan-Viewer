@@ -3662,9 +3662,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "viewer_core",
+ "viewer_grid",
+ "viewer_net",
  "viewer_platform",
  "viewer_render",
  "viewer_ui",

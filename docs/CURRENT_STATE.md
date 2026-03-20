@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First live visual slice (diagnostic bridge)
+Phase E - First world-facing live placeholder slice
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -19,13 +19,19 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 - world-axis marker
 - depth buffer
 - corrected controls
-- viewer_app now supports a bounded live visual bridge via sanitized snapshot ingest:
-  - loads `LiveVisualSnapshot` JSON (default `live_visual_snapshot.json`, overridable by `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH`)
+- viewer_app now supports a bounded in-process live-state feed (primary path) with file fallback:
+  - spawns a narrow background live-feed worker when login env vars are present
+  - uses real `viewer_net` login/bootstrap/handshake probe state in-process
+  - falls back to sanitized snapshot ingest (`live_visual_snapshot.json`) when in-process feed is unavailable
   - debug overlay displays live-derived connection/handshake/traffic summary fields
-  - sandbox cube color now reflects live state:
-    - default/offline: red
-    - logged-in but pre-AMC: yellow
-    - AMC reached: green
+- sandbox cube visual indicator now reflects live state:
+    - default/offline: red, scale 1.0
+    - logged-in but pre-AMC: yellow, scale 1.1
+    - AMC reached: green, scale 1.25
+- first world-facing live placeholder marker now renders from the in-process live state bridge:
+  - dedicated scene role (`LivePlaceholder`) separate from static sandbox geometry
+  - world-space axis marker appears even before broad world/object decoding
+  - placeholder transform/color are driven by login/handshake/region-derived snapshot fields
 
 ### Architecture
 - clear crate boundaries
@@ -162,7 +168,7 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - policy probe behavior is covered for:
     - post-AMC timeout override
     - optional early-stop on first observed region-transition control packet
-- sanitized live visual snapshot production now exists in the manual `viewer_net` path:
+- sanitized live visual snapshot production remains in the manual `viewer_net` path (fallback/dev tool):
   - `llsd_login_attempt` writes `LiveVisualSnapshot` JSON after successful login/probe
   - output path: `VIEWER_LIVE_VISUAL_SNAPSHOT_PATH` or default `live_visual_snapshot.json`
   - snapshot excludes sensitive session IDs/seed URLs
@@ -195,7 +201,7 @@ Current concrete blocker inside bootstrap:
   - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
   - early simulator traffic consolidation remains stable
   - hard stop remains: no broad object/world-state decoding in current scope
-  - next gap is transitioning from file-based diagnostic visual bridge to in-process live connection feed without introducing broad world/object decoding
+  - next gap is moving from placeholder diagnostics to the first bounded world-state bridge (still no broad object/world decode)
 
 ---
 
@@ -222,7 +228,7 @@ Current concrete blocker inside bootstrap:
 
 The smallest correct next step is:
 
-**stabilize the first live visual slice by preserving the diagnostic snapshot bridge and preparing a narrow in-process live-state feed path (still no world/object decoding)**
+**add the smallest bounded world-facing state bridge beyond placeholders (for example a typed pre-world-state landmark feed), while keeping broad object/world decode out of scope**
 
 ---
 

@@ -175,6 +175,16 @@ Status update:
   - replace file-based bridge with narrow in-process live-state feed
   - keep scope diagnostic-first and stop before broad object/world-state rendering
 
+Status update (latest):
+- in-process live-state feed is now the primary app path when login env vars are present
+- file-based snapshot bridge remains as bounded fallback/dev path
+- connected-view diagnostics are richer and test-protected (app/core/ui)
+- first world-facing placeholder bridge is now implemented:
+  - dedicated scene-level `LivePlaceholder` role
+  - world-space marker driven by real live-derived state (login/AMC/region-coordinates)
+  - focused `viewer_core` tests protect placeholder behavior/mapping
+- next T8 slice should add the first bounded world-facing state bridge beyond placeholders while still stopping before broad object/world decoding
+
 ---
 
 ## Explicitly Deferred
