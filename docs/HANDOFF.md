@@ -2,6 +2,30 @@
 
 ## Last Completed Work
 
+- Implemented first minimal real simulator-payload decode through the existing seam:
+  - added bounded payload decode in `viewer_net` for inbound `CoarseLocationUpdate` body:
+    - decoded location count
+    - decoded first coarse XYZ triplet
+  - added transport-side decode summary:
+    - `Connection::simulator_payload_decode_summary()`
+- Bridged decoded simulator payload into app-owned live state:
+  - `LiveVisualSnapshot` now carries decoded coarse fields:
+    - `decoded_coarse_updates`
+    - `decoded_coarse_location_count`
+    - `decoded_coarse_first_x/y/z`
+  - app/example snapshot update paths now map connection decode summary into these fields
+- Extended seam with simulator-derived decoded lane in `viewer_core`:
+  - new lane: `DecodedCoarseLocationPayload`
+  - new seam-owned scene role: `WorldIngestionDecodedCoarseLocationPayload`
+  - marker transform/color are driven by decoded coarse payload values
+- Added focused tests for decode -> seam -> scene path:
+  - `viewer_net`: coarse decode function + connection summary update tests
+  - `viewer_core`: seam lane inclusion test for decoded coarse payload
+  - existing scene/seam tests remain green
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Implemented the first tiny decoded world/object input lane through the existing seam in `viewer_core`:
   - new seam lane: `DecodedSimulatorEndpointPayload`
   - bounded decoded fields added to seam item:

@@ -95,6 +95,16 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - seam-owned marker `WorldIngestionDecodedEndpointPayload`
     - marker transform/color are driven by decoded endpoint values
   - this remains diagnostic-first and does not introduce broad object/world decoding
+- seam now carries a first minimal real simulator-payload decode lane:
+  - new lane: `DecodedCoarseLocationPayload`
+  - decoded source is simulator-side inbound `CoarseLocationUpdate` packet body (medium `0x0000ff06`)
+  - minimal decoded fields:
+    - decoded location block count
+    - decoded first coarse XYZ triplet when available
+  - scene reflection:
+    - seam-owned marker `WorldIngestionDecodedCoarseLocationPayload`
+    - marker transform/color are driven by decoded coarse payload values
+  - decode remains tiny, typed, reversible, and below broad world/object decoding scope
 
 ### Architecture
 - clear crate boundaries
@@ -168,6 +178,12 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `AttachedSound`
   - available via `Connection::early_simulator_traffic_observations()`
   - summary available via `Connection::summarize_early_simulator_traffic()`
+- minimal simulator payload decode summary now exists in `viewer_net`:
+  - `Connection::simulator_payload_decode_summary()`
+  - currently captures bounded `CoarseLocationUpdate` body decode signals:
+    - `coarse_location_updates`
+    - last decoded coarse location count
+    - last decoded first coarse XYZ sample
 - bounded region-transition control visibility diagnostics now exist:
   - dedicated scope: `RegionTransitionControl`
   - run-level summary available via `Connection::summarize_region_transition_control()`
@@ -255,8 +271,8 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 - we now have connected live diagnostics, a meaningful world-facing composition, a typed ingestion seam, and explicit app-owned startup orchestration
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
 - first tiny decoded seam input is now implemented; next steps must decide between:
-  - adding one more bounded decoded payload category, or
-  - starting the first minimal real simulator payload decode into the same seam
+  - adding a second bounded simulator-payload decode category, or
+  - starting first bounded multi-input simulator payload ingestion through the same seam
 - either path must still avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
@@ -264,7 +280,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 ## Most Likely Immediate Work
 
-- extend seam payload categories beyond decoded endpoint input while preserving current bounded seam ownership
+- extend seam payload categories beyond decoded endpoint + coarse-location inputs while preserving current bounded seam ownership
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
@@ -277,7 +293,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**add one more bounded decoded payload through the existing seam (or first tiny simulator-payload decode), while keeping broad object/world decode out of scope**
+**add one more bounded simulator-payload decode lane through the existing seam (or begin bounded multi-input ingestion), while keeping broad object/world decode out of scope**
 
 ---
 

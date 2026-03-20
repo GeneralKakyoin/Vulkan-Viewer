@@ -348,6 +348,11 @@ async fn run_in_process_live_feed(
         confirm_enable_simulator: 0,
         likely_broader_traffic: 0,
         unknown: 0,
+        decoded_coarse_updates: 0,
+        decoded_coarse_location_count: None,
+        decoded_coarse_first_x: None,
+        decoded_coarse_first_y: None,
+        decoded_coarse_first_z: None,
         observed_at_unix_ms: now_unix_ms(),
     }));
 
@@ -424,6 +429,11 @@ fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisua
         confirm_enable_simulator: 0,
         likely_broader_traffic: 0,
         unknown: 0,
+        decoded_coarse_updates: 0,
+        decoded_coarse_location_count: None,
+        decoded_coarse_first_x: None,
+        decoded_coarse_first_y: None,
+        decoded_coarse_first_z: None,
         observed_at_unix_ms: now_unix_ms(),
     };
 
@@ -463,6 +473,13 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
         .iter()
         .filter(|diag| diag.scope == FirstSimulatorInboundTrafficScope::Unknown)
         .count() as u32;
+
+    let decoded = connection.simulator_payload_decode_summary();
+    snapshot.decoded_coarse_updates = decoded.coarse_location_updates as u32;
+    snapshot.decoded_coarse_location_count = decoded.coarse_location_last_count;
+    snapshot.decoded_coarse_first_x = decoded.coarse_location_last_first.map(|xyz| xyz[0]);
+    snapshot.decoded_coarse_first_y = decoded.coarse_location_last_first.map(|xyz| xyz[1]);
+    snapshot.decoded_coarse_first_z = decoded.coarse_location_last_first.map(|xyz| xyz[2]);
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -819,3 +836,5 @@ mod tests {
         assert!(matches!(plan.startup_status, LiveStartupStatus::Failed(_)));
     }
 }
+
+

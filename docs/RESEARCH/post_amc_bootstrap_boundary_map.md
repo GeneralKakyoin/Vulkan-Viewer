@@ -42,6 +42,12 @@ Do not start broad world-state decoding from this map alone.
   - `EarlySimulatorTrafficKind`
   - `EarlySimulatorTrafficObservation`
   - scoped to currently observed non-bootstrap early traffic only (no broad world/object decode).
+- bounded simulator-payload decode now exists for this phase:
+  - source: `CoarseLocationUpdate` body
+  - currently decoded minimally:
+    - location block count
+    - first coarse XYZ sample (when present)
+  - this decode is intentionally tiny and is used as a seam-fed diagnostic input, not as broad world/object ingestion.
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.

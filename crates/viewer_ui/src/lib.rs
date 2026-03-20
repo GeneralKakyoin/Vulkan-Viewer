@@ -209,6 +209,11 @@ mod tests {
             confirm_enable_simulator: 0,
             likely_broader_traffic: 3,
             unknown: 1,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
             observed_at_unix_ms: 1,
         };
         let lines = live_visual_lines(Some(&snapshot));

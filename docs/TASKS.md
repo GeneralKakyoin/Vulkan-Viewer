@@ -218,13 +218,20 @@ Status update (latest):
     - decoded host-tail octet
     - decoded port
   - seam-owned marker `WorldIngestionDecodedEndpointPayload` reflects this decoded payload in scene space
+- first minimal real simulator-payload decode path is now implemented:
+  - new seam lane: `DecodedCoarseLocationPayload`
+  - transport decode source: inbound `CoarseLocationUpdate` body in `viewer_net`
+  - bounded decoded fields propagated via live snapshot:
+    - decoded location count
+    - decoded first coarse XYZ sample
+  - seam-owned marker `WorldIngestionDecodedCoarseLocationPayload` reflects this simulator-derived decoded payload in scene space
 - viewer_app-owned live startup orchestration is now first-class:
   - startup mode control (`VIEWER_APP_LIVE_STARTUP`: auto/on/off)
   - app-owned startup status mapping and diagnostics
   - app receives worker status + snapshot updates and feeds seam/scene path
 - next T8 slice should either:
-  - add one more bounded decoded payload category through seam, or
-  - start first bounded real simulator payload decode path beyond endpoint-derived fields
+  - add a second bounded simulator-payload decode category through seam, or
+  - begin first bounded multi-input simulator payload ingestion through seam
   while preserving the hard stop before broad object/world decoding
 
 ---

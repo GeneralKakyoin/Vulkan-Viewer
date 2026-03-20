@@ -936,6 +936,19 @@ pub struct EarlySimulatorTrafficSummary {
     pub attached_sound: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedCoarseLocationUpdate {
+    pub location_count: u8,
+    pub first_location: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulatorPayloadDecodeSummary {
+    pub coarse_location_updates: usize,
+    pub coarse_location_last_count: Option<u8>,
+    pub coarse_location_last_first: Option<[u8; 3]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorHandshakeProbeReport {
     pub observations: Vec<FirstSimulatorHandshakeProbeObservation>,
@@ -1055,6 +1068,7 @@ pub struct Connection {
     first_simulator_handshake_receive_diagnostics: Vec<FirstSimulatorHandshakeReceiveDiagnostic>,
     early_simulator_traffic_observations: Vec<EarlySimulatorTrafficObservation>,
     region_transition_control_observations: Vec<RegionTransitionControlObservation>,
+    simulator_payload_decode_summary: SimulatorPayloadDecodeSummary,
     next_first_simulator_packet_id: u32,
 }
 
@@ -1070,6 +1084,7 @@ impl Connection {
             first_simulator_handshake_receive_diagnostics: Vec::new(),
             early_simulator_traffic_observations: Vec::new(),
             region_transition_control_observations: Vec::new(),
+            simulator_payload_decode_summary: SimulatorPayloadDecodeSummary::default(),
             next_first_simulator_packet_id: 1,
         }
     }
@@ -1110,6 +1125,10 @@ impl Connection {
         &self,
     ) -> &[RegionTransitionControlObservation] {
         &self.region_transition_control_observations
+    }
+
+    pub fn simulator_payload_decode_summary(&self) -> &SimulatorPayloadDecodeSummary {
+        &self.simulator_payload_decode_summary
     }
 
     pub fn summarize_early_simulator_traffic(&self) -> EarlySimulatorTrafficSummary {
@@ -1180,6 +1199,7 @@ impl Connection {
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
+        self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -1292,6 +1312,7 @@ impl Connection {
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
+        self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::Disconnected;
         Ok(())
@@ -1510,6 +1531,17 @@ impl Connection {
                     payload_len: payload.len(),
                     signal: classification.signal.clone(),
                 });
+        }
+        if classification.kind == FirstSimulatorInboundMessageKind::CoarseLocationUpdate
+            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        {
+            if let Some(decoded) = decode_coarse_location_update(payload) {
+                self.simulator_payload_decode_summary.coarse_location_updates += 1;
+                self.simulator_payload_decode_summary.coarse_location_last_count =
+                    Some(decoded.location_count);
+                self.simulator_payload_decode_summary.coarse_location_last_first =
+                    decoded.first_location;
+            }
         }
         if let Some(kind) = to_region_transition_control_kind(classification.kind) {
             self.region_transition_control_observations
@@ -2187,6 +2219,7 @@ impl Connection {
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
+        self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
         self.next_first_simulator_packet_id = 1;
     }
 
@@ -2402,6 +2435,7 @@ fn decode_lludp_packet_id(payload: &[u8]) -> Option<u32> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FirstSimulatorPacketHeader {
     message_number: u32,
+    body_offset: usize,
 }
 
 fn lludp_low_frequency_message_number(message_id: u16) -> u32 {
@@ -2417,29 +2451,35 @@ fn decode_first_simulator_packet_header(payload: &[u8]) -> Option<FirstSimulator
         return None;
     }
 
-    let header = &payload[LLUDP_PACKET_ID_SIZE..];
+    let extra_header_len = usize::from(payload[LLUDP_PACKET_ID_SIZE - 1]);
+    let header_start = LLUDP_PACKET_ID_SIZE.checked_add(extra_header_len)?;
+    if payload.len() <= header_start {
+        return None;
+    }
+
+    let header = &payload[header_start..];
     if header.is_empty() {
         return None;
     }
 
-    let message_number = if header[0] != LLUDP_MESSAGE_PREFIX {
-        u32::from(header[0])
-    } else if payload.len() >= LLUDP_MINIMUM_VALID_PACKET_SIZE + 1
-        && header.get(1).is_some()
-        && header[1] != LLUDP_MESSAGE_PREFIX
-    {
-        (u32::from(LLUDP_MESSAGE_PREFIX) << 8) | u32::from(header[1])
-    } else if payload.len() >= LLUDP_MINIMUM_VALID_PACKET_SIZE + 3
-        && header.len() >= 4
-        && header[1] == LLUDP_MESSAGE_PREFIX
-    {
+    let (message_number, consumed_header_bytes) = if header[0] != LLUDP_MESSAGE_PREFIX {
+        (u32::from(header[0]), 1usize)
+    } else if header.len() >= 2 && header[1] != LLUDP_MESSAGE_PREFIX {
+        (
+            (u32::from(LLUDP_MESSAGE_PREFIX) << 8) | u32::from(header[1]),
+            2usize,
+        )
+    } else if header.len() >= 4 && header[1] == LLUDP_MESSAGE_PREFIX {
         let low = u16::from_be_bytes([header[2], header[3]]);
-        lludp_low_frequency_message_number(low)
+        (lludp_low_frequency_message_number(low), 4usize)
     } else {
         return None;
     };
 
-    Some(FirstSimulatorPacketHeader { message_number })
+    Some(FirstSimulatorPacketHeader {
+        message_number,
+        body_offset: header_start + consumed_header_bytes,
+    })
 }
 
 fn classify_first_simulator_inbound_from_packet(
@@ -2624,6 +2664,30 @@ fn to_region_transition_control_kind(
         }
         _ => None,
     }
+}
+
+fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocationUpdate> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number
+        != lludp_medium_frequency_message_number(LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let location_count = *body.first()?;
+    let needed = 1usize.saturating_add(usize::from(location_count).saturating_mul(3));
+    if body.len() < needed {
+        return None;
+    }
+    let first_location = if location_count > 0 {
+        Some([body[1], body[2], body[3]])
+    } else {
+        None
+    };
+    Some(DecodedCoarseLocationUpdate {
+        location_count,
+        first_location,
+    })
 }
 
 fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInboundClassification {
@@ -3153,6 +3217,12 @@ mod tests {
             0x00, // extra header offset
             0xFF, medium_id, // medium-frequency message number
         ]
+    }
+
+    fn make_medium_frequency_packet_with_body(medium_id: u8, body: &[u8]) -> Vec<u8> {
+        let mut payload = make_medium_frequency_packet(medium_id);
+        payload.extend_from_slice(body);
+        payload
     }
 
     fn decode_outbound_handshake_payload(payload: &[u8]) -> (u8, u32, u32, &[u8]) {
@@ -4780,8 +4850,8 @@ mod tests {
             irrelevant.decode_source,
             FirstSimulatorInboundDecodeSource::Unknown
         );
-        assert!(irrelevant.packet_message_number.is_some());
-        assert!(irrelevant.signal.starts_with("packet:0x"));
+        assert_eq!(irrelevant.packet_message_number, None);
+        assert_eq!(irrelevant.signal, "text:none");
 
         let unknown_packet = classify_first_simulator_inbound_message(&make_low_frequency_packet(42));
         assert_eq!(unknown_packet.kind, FirstSimulatorInboundMessageKind::Irrelevant);
@@ -4792,6 +4862,31 @@ mod tests {
         );
         assert_eq!(unknown_packet.signal, "packet:0xffff002a:unmapped");
         assert_eq!(unknown_packet.packet_message_number, Some(0xffff002a));
+    }
+
+    #[test]
+    fn decode_coarse_location_update_extracts_count_and_first_location() {
+        let payload = make_medium_frequency_packet_with_body(6, &[2, 10, 20, 8, 30, 40, 9]);
+        let decoded = decode_coarse_location_update(&payload)
+            .expect("coarse location update should decode from medium packet body");
+        assert_eq!(decoded.location_count, 2);
+        assert_eq!(decoded.first_location, Some([10, 20, 8]));
+    }
+
+    #[test]
+    fn observe_coarse_location_update_updates_payload_decode_summary() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let payload = make_medium_frequency_packet_with_body(6, &[1, 64, 32, 12]);
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("coarse location update should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.coarse_location_updates, 1);
+        assert_eq!(summary.coarse_location_last_count, Some(1));
+        assert_eq!(summary.coarse_location_last_first, Some([64, 32, 12]));
     }
 
     #[tokio::test]
