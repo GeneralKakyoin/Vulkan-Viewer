@@ -57,6 +57,10 @@ Do not start broad world-state decoding from this map alone.
   - current decoded lanes (`CoarseLocationUpdate` + `HealthMessage`) now drive one seam-owned composite beacon role
   - composition is gated on both decoded lanes being present
   - this is treated as object-like diagnostic composition, not broad object/world-state decoding
+- bounded object/state slice note:
+  - seam now carries an explicit object/state seed lane derived from the same bounded decoded inputs
+  - scene now applies a small seam-owned body+aura composition from this lane
+  - this remains below broad world/object decoding and is intended as the first step toward narrow multi-entity ingestion
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.

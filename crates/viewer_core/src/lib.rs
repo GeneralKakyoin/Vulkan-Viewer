@@ -30,6 +30,8 @@ pub enum InstanceRole {
     WorldIngestionDecodedCoarseLocationPayload,
     WorldIngestionDecodedHealthPayload,
     WorldIngestionDecodedCompositeBeacon,
+    WorldObjectStateEntityBody,
+    WorldObjectStateEntityAura,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +176,7 @@ pub enum WorldObjectIngestionLane {
     DecodedSimulatorEndpointPayload,
     DecodedCoarseLocationPayload,
     DecodedHealthPayload,
+    ObjectStateEntitySeedPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +349,47 @@ impl WorldObjectIngestionSeam {
                 decoded_coarse_first_xyz: None,
                 decoded_health_basis_points: Some(health_basis_points),
             });
+        }
+        if let Some(state) = snapshot {
+            let coarse_xyz = match (
+                state.decoded_coarse_first_x,
+                state.decoded_coarse_first_y,
+                state.decoded_coarse_first_z,
+            ) {
+                (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                _ => None,
+            };
+            if let (Some(health_basis_points), Some(coarse_count), Some(coarse_first_xyz)) = (
+                state.decoded_health_last_basis_points,
+                state.decoded_coarse_location_count,
+                coarse_xyz,
+            ) {
+                let stage = if state.logged_in && state.handshake_agent_movement_complete {
+                    WorldEntryStage::EnteredFirstRegion
+                } else if state.logged_in {
+                    WorldEntryStage::Connected
+                } else {
+                    WorldEntryStage::Offline
+                };
+                let region_coords = match (state.first_sim_region_x, state.first_sim_region_y) {
+                    (Some(x), Some(y)) => Some([x, y]),
+                    _ => None,
+                };
+                seam.items.push(WorldObjectIngestionItem {
+                    lane: WorldObjectIngestionLane::ObjectStateEntitySeedPayload,
+                    stage,
+                    region_coords,
+                    simulator_target_present: state.first_sim_endpoint.is_some(),
+                    traffic_broader_count: 0,
+                    traffic_unknown_count: 0,
+                    traffic_region_control_count: 0,
+                    decoded_endpoint_port: None,
+                    decoded_endpoint_host_tail: None,
+                    decoded_coarse_location_count: Some(coarse_count),
+                    decoded_coarse_first_xyz: Some(coarse_first_xyz),
+                    decoded_health_basis_points: Some(health_basis_points),
+                });
+            }
         }
         seam
     }
@@ -596,6 +640,31 @@ impl Scene {
                 &mut self.instances,
                 InstanceRole::WorldIngestionDecodedCompositeBeacon,
             );
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntitySeedPayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityBody,
+                MeshKind::Cube,
+                world_object_state_entity_body_transform(item),
+                world_object_state_entity_body_color(item),
+            );
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityAura,
+                MeshKind::AxisMarker,
+                world_object_state_entity_aura_transform(item),
+                world_object_state_entity_aura_color(item),
+            );
+        } else {
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityBody);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityAura);
         }
     }
 }
@@ -922,6 +991,40 @@ fn world_ingestion_decoded_composite_color(health: WorldObjectIngestionItem) -> 
     [0.92 - h * 0.52, 0.35 + h * 0.55, 0.86 - h * 0.62]
 }
 
+fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let [cx, cy, cz] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
+    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let x = 3.0 + offset_x + ((f32::from(cx) / 255.0) - 0.5) * 1.3;
+    let z = offset_z - 3.05 + ((f32::from(cy) / 255.0) - 0.5) * 1.3;
+    let y = 0.30 + (f32::from(cz) / 255.0) * 0.9 + health * 0.25;
+    let scale = (0.22 + health * 0.18).clamp(0.22, 0.44);
+    Transform {
+        position: [x, y, z],
+        scale: [scale, scale * 1.25, scale],
+    }
+}
+
+fn world_object_state_entity_body_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    [0.24 + health * 0.32, 0.30 + health * 0.58, 0.36 + health * 0.22]
+}
+
+fn world_object_state_entity_aura_transform(item: WorldObjectIngestionItem) -> Transform {
+    let body = world_object_state_entity_body_transform(item);
+    let coarse_count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
+    let aura_scale = (body.scale[0] + 0.18 + coarse_count * 0.01).clamp(0.32, 0.68);
+    Transform {
+        position: [body.position[0], body.position[1] + 0.42, body.position[2]],
+        scale: [aura_scale, aura_scale, aura_scale],
+    }
+}
+
+fn world_object_state_entity_aura_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    [0.96, 0.42 + health * 0.44, 0.26 + health * 0.52]
+}
+
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
     match snapshot {
         Some(state) if state.logged_in => {
@@ -1102,6 +1205,18 @@ mod tests {
                     instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
                 })
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
+        );
     }
 
     #[test]
@@ -1177,6 +1292,18 @@ mod tests {
                     instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
                 })
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
+        );
     }
 
     #[test]
@@ -1250,6 +1377,18 @@ mod tests {
                 .all(|instance| {
                     instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
                 })
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
     }
 
@@ -1368,6 +1507,19 @@ mod tests {
             .expect("decoded composite beacon should exist");
         assert_eq!(composite.mesh, MeshKind::Cube);
         assert!(composite.transform.position[1] > 0.3);
+        let entity_body = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
+            .expect("object-state entity body should exist");
+        assert_eq!(entity_body.mesh, MeshKind::Cube);
+        let entity_aura = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityAura)
+            .expect("object-state entity aura should exist");
+        assert_eq!(entity_aura.mesh, MeshKind::AxisMarker);
+        assert!(entity_aura.transform.position[1] > entity_body.transform.position[1]);
     }
 
     #[test]
@@ -1630,11 +1782,11 @@ mod tests {
             confirm_enable_simulator: 0,
             likely_broader_traffic: 3,
             unknown: 1,
-            decoded_coarse_updates: 0,
-            decoded_coarse_location_count: None,
-            decoded_coarse_first_x: None,
-            decoded_coarse_first_y: None,
-            decoded_coarse_first_z: None,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
             decoded_health_updates: 2,
             decoded_health_last_basis_points: Some(6200),
             observed_at_unix_ms: 9,
@@ -1646,6 +1798,14 @@ mod tests {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
             .expect("decoded health payload should exist");
         assert_eq!(decoded.decoded_health_basis_points, Some(6200));
+        let entity_seed = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntitySeedPayload)
+            .expect("object-state entity seed payload should exist when coarse+health are present");
+        assert_eq!(entity_seed.decoded_health_basis_points, Some(6200));
+        assert_eq!(entity_seed.decoded_coarse_location_count, Some(2));
+        assert_eq!(entity_seed.decoded_coarse_first_xyz, Some([64, 32, 12]));
     }
 
     #[test]
@@ -1678,6 +1838,14 @@ mod tests {
         assert!(scene.instances.iter().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura));
 
         let mut health_only = coarse_only.clone();
         health_only.decoded_coarse_location_count = None;
@@ -1690,6 +1858,14 @@ mod tests {
         assert!(scene.instances.iter().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura));
     }
 
     #[test]
@@ -1780,6 +1956,18 @@ mod tests {
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
     }
 }

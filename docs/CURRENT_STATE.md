@@ -123,6 +123,15 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - composition appears only when both decoded inputs are present
   - composition transform/color blend coarse placement + health influence
   - remains diagnostic-first and below broad object/world decoding
+- first bounded object/state-like payload category now exists through the seam:
+  - new lane: `ObjectStateEntitySeedPayload`
+  - lane is emitted only when both decoded inputs are present:
+    - coarse decoded sample
+    - health decoded basis points
+  - seam-owned object/state composition now includes:
+    - `WorldObjectStateEntityBody`
+    - `WorldObjectStateEntityAura`
+  - this slice is visibly more entity-like than marker-only diagnostics while remaining bounded
 
 ### Architecture
 - clear crate boundaries
@@ -291,9 +300,9 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 - we now have connected live diagnostics, a meaningful world-facing composition, a typed ingestion seam, and explicit app-owned startup orchestration
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
-- multi-input seam ingestion and first bounded object-like decoded composition are now in place; next steps must decide between:
+- multi-input seam ingestion and first bounded object/state slice are now in place; next steps must decide between:
   - adding one more bounded simulator decode lane, or
-  - starting first tiny real object/state ingestion step from current decoded composition
+  - starting first narrow multi-entity ingestion step from current object/state lane
 - either path must still avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
@@ -301,7 +310,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 ## Most Likely Immediate Work
 
-- extend seam/object-like composition behavior beyond decoded endpoint + coarse + health inputs while preserving current bounded seam ownership
+- extend seam/object-state composition behavior beyond decoded endpoint + coarse + health inputs while preserving current bounded seam ownership
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
@@ -314,7 +323,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**add one more bounded simulator-payload decode lane (or begin first tiny real object/state ingestion from current decoded composition), while keeping broad object/world decode out of scope**
+**add one more bounded simulator-payload decode lane (or begin first narrow multi-entity ingestion from the new object/state lane), while keeping broad object/world decode out of scope**
 
 ---
 

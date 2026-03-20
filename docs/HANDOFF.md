@@ -2,6 +2,28 @@
 
 ## Last Completed Work
 
+- Implemented the first bounded object/state slice on top of existing decoded lanes in `viewer_core`:
+  - new seam payload category:
+    - `ObjectStateEntitySeedPayload`
+  - lane gating:
+    - emitted only when both decoded coarse + decoded health inputs are present
+- Added seam-owned object/state composition roles:
+  - `WorldObjectStateEntityBody`
+  - `WorldObjectStateEntityAura`
+  - both are applied/removed only via `Scene::apply_world_object_ingestion_seam(...)`
+- Preserved existing decoded lanes and composite behavior:
+  - `DecodedCoarseLocationPayload`
+  - `DecodedHealthPayload`
+  - `WorldIngestionDecodedCompositeBeacon`
+- Strengthened tests for bounded object/state behavior:
+  - object/state payload lane presence from decoded inputs
+  - body/aura presence when composite inputs exist
+  - body/aura absence when inputs are incomplete
+  - seam-empty removal coverage includes object/state roles
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Added the first bounded object-like decoded composition from existing multi-input lanes:
   - composition inputs:
     - `DecodedCoarseLocationPayload`

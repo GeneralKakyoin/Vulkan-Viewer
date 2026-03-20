@@ -235,13 +235,19 @@ Status update (latest):
   - seam-owned composite role: `WorldIngestionDecodedCompositeBeacon`
   - composition inputs: `DecodedCoarseLocationPayload` + `DecodedHealthPayload`
   - composition appears only when both decoded lanes are present
+- first bounded object/state slice is now complete:
+  - seam payload category: `ObjectStateEntitySeedPayload`
+  - seam-owned composition roles:
+    - `WorldObjectStateEntityBody`
+    - `WorldObjectStateEntityAura`
+  - payload/category and roles are gated by decoded coarse + health availability
 - viewer_app-owned live startup orchestration is now first-class:
   - startup mode control (`VIEWER_APP_LIVE_STARTUP`: auto/on/off)
   - app-owned startup status mapping and diagnostics
   - app receives worker status + snapshot updates and feeds seam/scene path
 - next T8 slice should either:
   - add one more bounded simulator-payload decode lane through seam, or
-  - begin first tiny real object/state ingestion step from current decoded composition
+  - begin first narrow multi-entity ingestion step from the new object/state lane
   while preserving the hard stop before broad object/world decoding
 
 ---
