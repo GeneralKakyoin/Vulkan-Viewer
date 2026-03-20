@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First narrow typed payload path through ingestion seam
+Phase E - First object-facing bounded payload path through ingestion seam
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -70,6 +70,13 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - scene reflection:
     - seam-owned marker `WorldIngestionTrafficPayload`
     - marker transform/scale/color driven by typed traffic payload
+- seam now carries a second, more object-facing bounded payload category:
+  - lane: `FirstRegionPresenceProxy` remains as entry proxy payload
+  - lane: `TrafficSignalPayload` remains as traffic-shaped payload
+  - new object-facing seam-owned marker behavior now composes both categories:
+    - `WorldIngestionProxy` (entry/presence object-like proxy)
+    - `WorldIngestionTrafficPayload` (typed traffic payload marker)
+  - seam lanes now represent multi-category payload ingestion behavior while staying pre-decode
 
 ### Architecture
 - clear crate boundaries
@@ -230,8 +237,8 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 - we now have connected live diagnostics, a meaningful world-facing composition, and a typed ingestion seam
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
 - next steps must decide between:
-  - extending seam payload categories (still bounded), or
-  - first bounded real world/object payload ingestion beyond diagnostic-derived fields
+  - adding one more bounded object-like seam payload category, or
+  - first tiny real decoded world/object input into the existing seam
 - either path must avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
@@ -239,7 +246,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 ## Most Likely Immediate Work
 
-- extend seam payload categories from diagnostic-derived fields toward the first bounded real world/object payload adapter
+- extend seam payload categories toward first tiny decoded world/object input while preserving current bounded seam ownership
 - keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability

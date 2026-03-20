@@ -2,7 +2,7 @@
 
 ## Last Completed Work
 
-- Extended the runtime-fed seam to carry a first narrow typed payload category:
+- Extended the runtime-fed seam to carry a first object-facing bounded payload path:
   - added seam lane `TrafficSignalPayload`
   - added typed payload counts on seam item:
     - `traffic_broader_count`
@@ -12,6 +12,9 @@
   - new role `WorldIngestionTrafficPayload`
   - `Scene::apply_world_object_ingestion_seam(...)` now applies/removes this marker from seam items
   - marker transform/scale/color are derived from typed payload counts
+- Kept lane-specific seam ownership explicit:
+  - `FirstRegionPresenceProxy` and `TrafficSignalPayload` are both applied through seam lanes
+  - tests now prefer lane-based assertions over index/order assumptions
 - Preserved existing diagnostic world-facing behavior and existing seam proxy path.
 - Added focused tests:
   - lane-specific seam payload presence for traffic category
