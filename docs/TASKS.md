@@ -198,10 +198,13 @@ Status update (latest):
     - `WorldTrafficRegionControlPillar`
   - composition remains diagnostic-first and reversible
   - focused tests now protect traffic-slice mapping and pillar scaling behavior
-- next T8 slice should decide between:
-  - first bounded world/object-state ingestion seam, or
-  - one final scene-side diagnostic consolidation pass
-  while preserving the hard stop before broad object/world decoding
+- first typed world/object-state ingestion seam is now implemented:
+  - `WorldObjectIngestionSeam`
+  - `WorldObjectIngestionItem`
+  - `WorldObjectIngestionLane`
+  - seam-driven scene placeholder role: `WorldIngestionProxy`
+  - focused tests now protect seam mapping and seam-driven scene behavior
+- next T8 slice should extend this seam to the first bounded real ingestion adapter while preserving the hard stop before broad object/world decoding
 
 ---
 

@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First meaningful live world-facing diagnostic slice
+Phase E - First typed world/object ingestion seam (bounded)
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -48,6 +48,15 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `WorldTrafficUnknownPillar`
     - `WorldTrafficRegionControlPillar`
   - the scene now communicates stage + region + target + bounded traffic shape without broad world/object ingestion
+- first typed world/object-state ingestion seam now exists in `viewer_core`:
+  - seam model:
+    - `WorldObjectIngestionSeam`
+    - `WorldObjectIngestionItem`
+    - `WorldObjectIngestionLane`
+  - seam input remains bounded to existing sanitized diagnostics (`WorldDiagnosticSlice`)
+  - seam output drives a dedicated scene placeholder role:
+    - `WorldIngestionProxy`
+  - this creates a clear, testable ingress boundary for future world/object state without broad decode
 
 ### Architecture
 - clear crate boundaries
@@ -205,10 +214,10 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 
 The immediate blocker is no longer login/bootstrap transport viability. The current blocker is phase control:
 
-- we now have connected live diagnostics and a first meaningful world-facing composition in scene space
+- we now have connected live diagnostics, a meaningful world-facing composition, and a typed ingestion seam
 - next steps must decide between:
-  - one more scene-side diagnostic consolidation pass, or
-  - first bounded world/object-state ingestion
+  - extending the seam to the first truly ingested bounded world/object payload, or
+  - one final seam/diagnostic consolidation pass
 - either path must avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
@@ -216,8 +225,8 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 ## Most Likely Immediate Work
 
-- extend the bounded world-state bridge with one additional typed, scene-facing landmark summary (still diagnostic-first)
-- choose and prepare the first bounded world/object-state ingestion seam (typed and reversible) or perform one final diagnostic composition pass
+- extend the new ingestion seam from diagnostic-derived items to the first bounded ingested payload adapter
+- keep the seam reversible and testable before introducing any broader decode paths
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
 - optionally expose the new bounded state summary in debug UI without adding product UI features
@@ -229,7 +238,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**choose the next bounded step: either first typed world/object-state ingestion seam or one final scene-side diagnostic consolidation pass, while keeping broad object/world decode out of scope**
+**extend the typed ingestion seam to the first bounded real ingestion adapter while keeping broad object/world decode out of scope**
 
 ---
 

@@ -2,6 +2,23 @@
 
 ## Last Completed Work
 
+- Added the first typed world/object ingestion seam in `viewer_core`:
+  - new seam types:
+    - `WorldObjectIngestionSeam`
+    - `WorldObjectIngestionItem`
+    - `WorldObjectIngestionLane`
+  - seam is intentionally bounded and sourced from existing diagnostic state (`WorldDiagnosticSlice`)
+  - seam now drives a dedicated scene placeholder role:
+    - `WorldIngestionProxy`
+- Preserved all existing bounded world-facing diagnostic composition behavior.
+- Added focused seam tests in `viewer_core`:
+  - seam mapping from live snapshot
+  - region/target hint propagation in seam items
+  - seam-driven scene proxy behavior across offline/connected/AMC transitions
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Broadened the bounded world-state bridge into a meaningful world-facing diagnostic composition in `viewer_core`:
   - added typed bounded live slice model:
     - `WorldDiagnosticSlice`
