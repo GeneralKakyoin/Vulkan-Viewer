@@ -1,7 +1,7 @@
 # CURRENT_STATE.md
 
 ## Current Phase
-Phase E - First world-facing live placeholder slice
+Phase E - First bounded world-state bridge (diagnostic-first)
 
 Real login compatibility is now proven against the live Second Life endpoint. The active focus has moved to safe post-login bootstrap sequencing, beginning with seed capability handling.
 Bootstrap capability probing is now sufficiently characterized to begin first-simulator handshake sequencing research/documentation.
@@ -32,6 +32,15 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
   - dedicated scene role (`LivePlaceholder`) separate from static sandbox geometry
   - world-space axis marker appears even before broad world/object decoding
   - placeholder transform/color are driven by login/handshake/region-derived snapshot fields
+- first bounded world-state bridge beyond placeholders now exists in `viewer_core`:
+  - typed region/world-entry-facing model:
+    - `FirstRegionPresence`
+    - `WorldEntryStage` (`Offline`, `Connected`, `EnteredFirstRegion`)
+  - additional world-space diagnostics rendered from typed state:
+    - `WorldRegionAnchor` marker
+    - `WorldEntryBeacon` marker
+  - markers are driven only by already-proven sanitized live inputs (login, AMC, region endpoint/coords)
+  - implementation remains diagnostic-first and intentionally stops before broad world/object decode
 
 ### Architecture
 - clear crate boundaries
@@ -187,40 +196,21 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 
 ## Current Blocker
 
-Login payload compatibility is no longer the primary blocker. The immediate blocker is implementing post-login bootstrap safely while preserving crate boundaries and avoiding premature simulator/world integration.
+The immediate blocker is no longer login/bootstrap transport viability. The current blocker is phase control:
 
-Current concrete blocker inside bootstrap:
-- EventQueueGet one-shot now reaches the service path but currently returns upstream proxy/server failure in live conditions (no event payload yet).
-- EventQueueGet one-shot now has bounded retry diagnostics; live attempts show retryable mixed failures (HTTP 500 proxy-style responses and occasional transport send failure) with no events returned yet.
-- SimulatorFeatures one-shot still returns HTTP 503 in live conditions (request method/shape now aligned to observed Firestorm behavior: GET).
-- MapLayer one-shot remains non-parseable by HTTP and is now classified as likely legacy-UDP behavior for this viewer path (live 405 + Firestorm behavior evidence).
-- Current handshake blocker narrowed to post-movement inbound coverage:
-  - first inbound progression to `AgentMovementComplete` is now observed and classified
-  - immediate post-movement tail is now observable in bounded live runs
-  - repeated `0xfffffffb` is now classified as transport-control `PacketAck`
-  - no additional repeated post-AMC packet IDs have been confirmed as bootstrap-gating so far
-  - early simulator traffic consolidation remains stable
-  - hard stop remains: no broad object/world-state decoding in current scope
-  - next gap is moving from placeholder diagnostics to the first bounded world-state bridge (still no broad object/world decode)
+- we now have connected live diagnostics and a first bounded world-state bridge in scene space
+- next steps must increase world-facing utility without drifting into broad object/world decoding
+- hard stop remains: no broad object/world-state protocol ingestion in this scope
 
 ---
 
 ## Most Likely Immediate Work
 
-- seed capability bootstrap kickoff
-- expand capability interpretation typing in `viewer_grid` while keeping transport in `viewer_net`
-- fetch and inspect early bootstrap capability responses from live login state
-- stabilize one-shot EventQueueGet transport behavior and capture first event envelope
-- stabilize one-shot SimulatorFeatures/EventQueueGet against live upstream instability and capture first parseable capability payload
-- bind first-simulator handshake scaffold stages to minimal transport-side send/ack stubs in `viewer_net`
-- add bounded receive/ack classification for first-simulator handshake transport actions without starting world integration
-- improve outbound handshake packet fidelity toward real LLUDP message layout while preserving current scaffold boundaries
-- extend typed UDP decode from message identity into minimal block/field extraction for handshake-relevant inbound messages
-- classify and observe additional early inbound low-frequency packets that appear before `AgentMovementComplete` in live traffic
-- expand typed coverage for additional early post-movement inbound traffic while keeping handshake scope bounded
-- map and type only repeated bootstrap-relevant post-movement packet IDs; keep transport-control and broader-traffic diagnostics explicit
-- keep capability/bootstrap logic separate from simulator transport
-- expand diagnostics for post-login bootstrap flow
+- extend the bounded world-state bridge with one additional typed, scene-facing landmark summary (still diagnostic-first)
+- keep deriving state only from already-proven sanitized live fields
+- strengthen scene mapping tests for role/marker stability
+- optionally expose the new bounded state summary in debug UI without adding product UI features
+- preserve strict stop-line before broad world/object protocol ingestion
 
 ---
 
@@ -229,6 +219,7 @@ Current concrete blocker inside bootstrap:
 The smallest correct next step is:
 
 **add the smallest bounded world-facing state bridge beyond placeholders (for example a typed pre-world-state landmark feed), while keeping broad object/world decode out of scope**
+**extend the bounded world-state bridge with one more typed diagnostic landmark/state summary, while keeping broad object/world decode out of scope**
 
 ---
 

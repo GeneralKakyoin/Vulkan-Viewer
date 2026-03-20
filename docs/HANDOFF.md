@@ -2,6 +2,23 @@
 
 ## Last Completed Work
 
+- Implemented the first bounded world-state bridge beyond placeholders in `viewer_core`:
+  - added typed world-entry/region-presence model:
+    - `WorldEntryStage` (`Offline`, `Connected`, `EnteredFirstRegion`)
+    - `FirstRegionPresence` derived from `LiveVisualSnapshot`
+  - extended scene roles with bounded world-facing diagnostic markers:
+    - `WorldRegionAnchor`
+    - `WorldEntryBeacon`
+  - markers are world-space and live-driven from sanitized state (login/AMC/region coords)
+  - existing `LivePlaceholder` behavior remains intact
+- Added focused regression tests in `viewer_core`:
+  - stage mapping from snapshot -> typed world-entry model
+  - endpoint/region coordinate mapping
+  - role-based marker behavior across offline/connected/AMC states
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Completed the first world-facing placeholder bridge on top of the in-process live state feed:
   - `viewer_core::Scene` now tracks instance purpose via `InstanceRole` (`SceneStatic`, `LivePlaceholder`)
   - `Scene::apply_live_visual_snapshot(...)` now maintains a dedicated live placeholder marker in world space
@@ -478,45 +495,28 @@
 
 Focus only on:
 
-**seed capability bootstrap using successful login output already available in-session**
+**extend bounded world-facing diagnostics one step further (for example richer typed landmarks/summary) without starting broad object/world decoding**
 
 This includes:
-- expand capability typing/interpretation boundary in `viewer_grid`
-- exercise seed capability fetch against live successful login state
-- continue one-shot EventQueueGet transport stabilization until first parseable event envelope is observed
-- use one-shot SimulatorFeatures inspection as parallel bootstrap evidence while EventQueueGet remains unstable
-- keep MapLayer classified as likely legacy/unsupported for HTTP one-shot inspection unless new evidence suggests otherwise
-- derive minimal Rust-facing handshake stage model from documented Firestorm first-region sequence (documentation/planning only)
-- wire `UseCircuitCode` and `CompleteAgentMovement` scaffold stages to minimal transport send/ack mechanics in `viewer_net` (without world integration)
-- add bounded ack/receive diagnostics and transition classification for first-simulator handshake actions
-- improve receive classification from heuristic signal matching to a minimal typed decoder aligned to real packet schema
-- extend typed decode from message identity to minimal block/field extraction for `AgentMovementComplete` while preserving current send/receive stage flow
-- improve outbound `UseCircuitCode`/`CompleteAgentMovement` packet wire fidelity to unlock first real inbound handshake packet observation
-- continue typed inbound expansion/progression analysis from `AgentDataUpdate` toward first observed `AgentMovementComplete`
-- extend typed inbound coverage for the next early post-movement packets and add minimal field-level decode where it most helps diagnostics
-- classify repeated unmapped post-movement packet IDs observed in bounded-tail runs and add the smallest bootstrap-relevant typed mappings
-- classify only repeated bootstrap-relevant post-AMC packet IDs, while leaving transport-control (`PacketAck`) and likely broader traffic explicitly categorized
-- hold the bootstrap boundary and plan the first bounded post-bootstrap simulator-traffic slice without starting broad world-state implementation
-- if needed next, type only narrow medium IDs that help early handoff visibility (`CrossedRegion`/`ConfirmEnableSimulator`) while still avoiding broad world/object decode
-- keep extending only this typed observation scaffold until the next phase boundary requires deliberate world/object decode design
-- next phase should stay bounded to medium handoff/control visibility only (`CrossedRegion`, `ConfirmEnableSimulator`) before any world/object-state decode planning
-- keep this boundary strict: only type those handoff/control IDs once observed repeatedly in live traces
-- this run established the diagnostics and typing rails for those IDs without forcing payload decode or broad world/object work
-- capture and classify early bootstrap capability payloads without sensitive value leakage
-- keep bootstrap diagnostics explicit and sanitized
+- keep `viewer_net` unchanged as transport/session/handshake diagnostics source
+- keep world-facing work in `viewer_core` (typed state + scene mapping)
+- optionally project bounded typed world-entry state into debug display (without product UI feature work)
+- preserve strict stop-line before broad object/world protocol ingestion
 
 Keep the current boundaries intact:
-- `viewer_net` = transport/session/codec and capability HTTP mechanics
-- `viewer_grid` = grid-specific meaning and typed interpretation
+- `viewer_net` = transport/session/handshake diagnostics
+- `viewer_core` = bounded world-facing typed state and scene mapping
+- `viewer_app` = orchestration only
+- `viewer_ui` = debug display only
 
 ---
 
 ## Constraints
 
 Do not:
-- start simulator connection work
+- start broad object/world-state decoding
 - start world streaming/integration
-- integrate login/bootstrap into `viewer_app`
+- integrate product features into `viewer_ui`
 - do broad refactors
 - break JSON or LLSD compatibility paths
 - copy Firestorm code
@@ -526,20 +526,18 @@ Do not:
 ## Files Most Likely Involved Next
 
 - `crates/viewer_net/src/lib.rs`
-- `crates/viewer_grid/src/lib.rs`
-- `crates/viewer_net/examples/llsd_login_attempt.rs`
-- `crates/viewer_net/examples/README.md`
-- first-simulator handshake tests in `crates/viewer_net/src/lib.rs`
-- `docs/RESEARCH/firestorm_login_flow.md`
-- `docs/RESEARCH/firestorm_first_simulator_handshake.md`
-- new capability/bootstrap research notes in `docs/RESEARCH/*`
+- `crates/viewer_core/src/lib.rs`
+- `crates/viewer_ui/src/lib.rs` (optional bounded debug projection)
+- `docs/CURRENT_STATE.md`
+- `docs/HANDOFF.md`
+- `docs/TASKS.md`
 
 ---
 
 ## What To Check After The Next Change
 
-- does seed capability fetch return a valid, parseable response?
-- are capability responses logged in a sanitized way?
-- are capability/bootstrap interpretations staying in `viewer_grid`?
+- is bounded world-facing state still derived only from sanitized live data?
+- are scene markers/stages stable across offline/connected/AMC transitions?
+- are crate boundaries still clean (`viewer_net` transport, `viewer_core` mapping)?
 - do automated tests still pass?
 - were `CURRENT_STATE.md`, `HANDOFF.md`, `MASTER_PLAN.md`, and `TASKS.md` updated when project state changed?

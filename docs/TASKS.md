@@ -1,7 +1,7 @@
 # TASKS.md
 
 ## Current Focus
-Only work on the smallest steps that advance post-login bootstrap while preserving crate boundaries.
+Only work on the smallest steps that advance bounded world-facing live diagnostics while preserving crate boundaries and stopping before broad object/world decoding.
 
 ---
 
@@ -183,7 +183,13 @@ Status update (latest):
   - dedicated scene-level `LivePlaceholder` role
   - world-space marker driven by real live-derived state (login/AMC/region-coordinates)
   - focused `viewer_core` tests protect placeholder behavior/mapping
-- next T8 slice should add the first bounded world-facing state bridge beyond placeholders while still stopping before broad object/world decoding
+- first bounded world-state bridge beyond placeholders is now implemented in `viewer_core`:
+  - typed `FirstRegionPresence` + `WorldEntryStage` model
+  - bounded world-space diagnostic roles:
+    - `WorldRegionAnchor`
+    - `WorldEntryBeacon`
+  - focused tests now cover typed mapping and marker behavior
+- next T8 slice should add one richer typed landmark/summary layer while preserving the hard stop before broad object/world decoding
 
 ---
 
