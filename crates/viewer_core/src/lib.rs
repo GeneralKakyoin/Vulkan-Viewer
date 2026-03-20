@@ -32,6 +32,13 @@ pub enum InstanceRole {
     WorldIngestionDecodedCompositeBeacon,
     WorldObjectStateEntityBody,
     WorldObjectStateEntityAura,
+    WorldObjectStateEntityWingBody,
+    WorldObjectStateEntityWingAura,
+    WorldObjectStateEntityGuardBody,
+    WorldObjectStateEntityGuardAura,
+    WorldObjectStateEntityClusterCore,
+    WorldObjectStateEntityPulse,
+    WorldObjectStateEntityStability,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +69,7 @@ pub struct Scene {
     pub instances: Vec<RenderableInstance>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveVisualSnapshot {
     pub source: String,
     pub logged_in: bool,
@@ -177,6 +184,7 @@ pub enum WorldObjectIngestionLane {
     DecodedCoarseLocationPayload,
     DecodedHealthPayload,
     ObjectStateEntitySeedPayload,
+    ObjectStateEntityLifecyclePayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +200,8 @@ pub struct WorldObjectIngestionItem {
     pub decoded_endpoint_host_tail: Option<u8>,
     pub decoded_coarse_location_count: Option<u8>,
     pub decoded_coarse_first_xyz: Option<[u8; 3]>,
+    pub decoded_coarse_updates: Option<u32>,
+    pub decoded_health_updates: Option<u32>,
     pub decoded_health_basis_points: Option<u16>,
 }
 
@@ -217,6 +227,8 @@ impl WorldObjectIngestionSeam {
             decoded_endpoint_host_tail: None,
             decoded_coarse_location_count: None,
             decoded_coarse_first_xyz: None,
+            decoded_coarse_updates: None,
+            decoded_health_updates: None,
             decoded_health_basis_points: None,
         }];
         if slice.traffic.available {
@@ -232,6 +244,8 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_coarse_updates: None,
+                decoded_health_updates: None,
                 decoded_health_basis_points: None,
             });
         }
@@ -274,6 +288,8 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: Some(endpoint_host_tail),
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_coarse_updates: None,
+                decoded_health_updates: None,
                 decoded_health_basis_points: None,
             });
         }
@@ -314,6 +330,8 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: Some(location_count),
                 decoded_coarse_first_xyz: first_xyz,
+                decoded_coarse_updates: snapshot.map(|s| s.decoded_coarse_updates),
+                decoded_health_updates: None,
                 decoded_health_basis_points: None,
             });
         }
@@ -347,6 +365,8 @@ impl WorldObjectIngestionSeam {
                 decoded_endpoint_host_tail: None,
                 decoded_coarse_location_count: None,
                 decoded_coarse_first_xyz: None,
+                decoded_coarse_updates: None,
+                decoded_health_updates: snapshot.map(|s| s.decoded_health_updates),
                 decoded_health_basis_points: Some(health_basis_points),
             });
         }
@@ -387,6 +407,24 @@ impl WorldObjectIngestionSeam {
                     decoded_endpoint_host_tail: None,
                     decoded_coarse_location_count: Some(coarse_count),
                     decoded_coarse_first_xyz: Some(coarse_first_xyz),
+                    decoded_coarse_updates: Some(state.decoded_coarse_updates),
+                    decoded_health_updates: Some(state.decoded_health_updates),
+                    decoded_health_basis_points: Some(health_basis_points),
+                });
+                seam.items.push(WorldObjectIngestionItem {
+                    lane: WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload,
+                    stage,
+                    region_coords,
+                    simulator_target_present: state.first_sim_endpoint.is_some(),
+                    traffic_broader_count: 0,
+                    traffic_unknown_count: 0,
+                    traffic_region_control_count: 0,
+                    decoded_endpoint_port: None,
+                    decoded_endpoint_host_tail: None,
+                    decoded_coarse_location_count: Some(coarse_count),
+                    decoded_coarse_first_xyz: Some(coarse_first_xyz),
+                    decoded_coarse_updates: Some(state.decoded_coarse_updates),
+                    decoded_health_updates: Some(state.decoded_health_updates),
                     decoded_health_basis_points: Some(health_basis_points),
                 });
             }
@@ -648,23 +686,99 @@ impl Scene {
             .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntitySeedPayload)
         {
+            let entity_count = world_object_state_entity_count(item);
             upsert_instance(
                 &mut self.instances,
                 InstanceRole::WorldObjectStateEntityBody,
                 MeshKind::Cube,
-                world_object_state_entity_body_transform(item),
-                world_object_state_entity_body_color(item),
+                world_object_state_entity_body_transform(item, 0),
+                world_object_state_entity_body_color(item, 0),
             );
             upsert_instance(
                 &mut self.instances,
                 InstanceRole::WorldObjectStateEntityAura,
                 MeshKind::AxisMarker,
-                world_object_state_entity_aura_transform(item),
-                world_object_state_entity_aura_color(item),
+                world_object_state_entity_aura_transform(item, 0),
+                world_object_state_entity_aura_color(item, 0),
+            );
+            if entity_count >= 2 {
+                upsert_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityWingBody,
+                    MeshKind::Cube,
+                    world_object_state_entity_body_transform(item, 1),
+                    world_object_state_entity_body_color(item, 1),
+                );
+                upsert_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityWingAura,
+                    MeshKind::AxisMarker,
+                    world_object_state_entity_aura_transform(item, 1),
+                    world_object_state_entity_aura_color(item, 1),
+                );
+            } else {
+                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingBody);
+                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingAura);
+            }
+            if entity_count >= 3 {
+                upsert_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityGuardBody,
+                    MeshKind::Cube,
+                    world_object_state_entity_body_transform(item, 2),
+                    world_object_state_entity_body_color(item, 2),
+                );
+                upsert_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityGuardAura,
+                    MeshKind::AxisMarker,
+                    world_object_state_entity_aura_transform(item, 2),
+                    world_object_state_entity_aura_color(item, 2),
+                );
+            } else {
+                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardBody);
+                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardAura);
+            }
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityClusterCore,
+                MeshKind::AxisMarker,
+                world_object_state_entity_cluster_core_transform(item, entity_count),
+                world_object_state_entity_cluster_core_color(item, entity_count),
             );
         } else {
             remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityBody);
             remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityAura);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingBody);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingAura);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardBody);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardAura);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityClusterCore);
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityPulse,
+                MeshKind::AxisMarker,
+                world_object_state_entity_pulse_transform(item),
+                world_object_state_entity_pulse_color(item),
+            );
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityStability,
+                MeshKind::Cube,
+                world_object_state_entity_stability_transform(item),
+                world_object_state_entity_stability_color(item),
+            );
+        } else {
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityPulse);
+            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityStability);
         }
     }
 }
@@ -991,38 +1105,161 @@ fn world_ingestion_decoded_composite_color(health: WorldObjectIngestionItem) -> 
     [0.92 - h * 0.52, 0.35 + h * 0.55, 0.86 - h * 0.62]
 }
 
-fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
+    match item.decoded_coarse_location_count.unwrap_or(0) {
+        0..=1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    }
+}
+
+fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
     let [offset_x, offset_z] = world_presence_offset(item.region_coords);
     let [cx, cy, cz] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
-    let x = 3.0 + offset_x + ((f32::from(cx) / 255.0) - 0.5) * 1.3;
-    let z = offset_z - 3.05 + ((f32::from(cy) / 255.0) - 0.5) * 1.3;
+    let phase = ((item.decoded_coarse_updates.unwrap_or(0) % 32) as f32 / 32.0)
+        * core::f32::consts::TAU;
+    let (orbit_radius, orbit_angle, y_bias, scale_bias) = match variant {
+        1 => (0.58, phase + 0.8, 0.05, -0.03),
+        2 => (0.86, phase + 2.35, 0.10, -0.05),
+        _ => (0.0, phase, 0.0, 0.0),
+    };
+    let x = 3.0
+        + offset_x
+        + ((f32::from(cx) / 255.0) - 0.5) * 1.3
+        + orbit_radius * orbit_angle.cos();
+    let z = offset_z
+        - 3.05
+        + ((f32::from(cy) / 255.0) - 0.5) * 1.3
+        + orbit_radius * orbit_angle.sin();
     let y = 0.30 + (f32::from(cz) / 255.0) * 0.9 + health * 0.25;
-    let scale = (0.22 + health * 0.18).clamp(0.22, 0.44);
+    let scale = (0.22 + health * 0.18 + scale_bias).clamp(0.18, 0.44);
     Transform {
-        position: [x, y, z],
+        position: [x, y + y_bias, z],
         scale: [scale, scale * 1.25, scale],
     }
 }
 
-fn world_object_state_entity_body_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_object_state_entity_body_color(item: WorldObjectIngestionItem, variant: usize) -> [f32; 3] {
     let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
-    [0.24 + health * 0.32, 0.30 + health * 0.58, 0.36 + health * 0.22]
+    match variant {
+        1 => [0.28 + health * 0.26, 0.24 + health * 0.44, 0.58 + health * 0.20],
+        2 => [0.42 + health * 0.22, 0.30 + health * 0.34, 0.30 + health * 0.18],
+        _ => [0.24 + health * 0.32, 0.30 + health * 0.58, 0.36 + health * 0.22],
+    }
 }
 
-fn world_object_state_entity_aura_transform(item: WorldObjectIngestionItem) -> Transform {
-    let body = world_object_state_entity_body_transform(item);
+fn world_object_state_entity_aura_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
+    let body = world_object_state_entity_body_transform(item, variant);
     let coarse_count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
-    let aura_scale = (body.scale[0] + 0.18 + coarse_count * 0.01).clamp(0.32, 0.68);
+    let aura_scale_bias = match variant {
+        1 => 0.08,
+        2 => 0.12,
+        _ => 0.18,
+    };
+    let aura_scale = (body.scale[0] + aura_scale_bias + coarse_count * 0.01).clamp(0.28, 0.72);
     Transform {
         position: [body.position[0], body.position[1] + 0.42, body.position[2]],
         scale: [aura_scale, aura_scale, aura_scale],
     }
 }
 
-fn world_object_state_entity_aura_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_object_state_entity_aura_color(item: WorldObjectIngestionItem, variant: usize) -> [f32; 3] {
     let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
-    [0.96, 0.42 + health * 0.44, 0.26 + health * 0.52]
+    match variant {
+        1 => [0.44 + health * 0.38, 0.36 + health * 0.48, 0.96],
+        2 => [0.96, 0.54 + health * 0.28, 0.34 + health * 0.42],
+        _ => [0.96, 0.42 + health * 0.44, 0.26 + health * 0.52],
+    }
+}
+
+fn world_object_state_entity_cluster_core_transform(
+    item: WorldObjectIngestionItem,
+    entity_count: usize,
+) -> Transform {
+    let primary = world_object_state_entity_body_transform(item, 0);
+    let scale = (0.16 + entity_count as f32 * 0.06).clamp(0.22, 0.44);
+    Transform {
+        position: [primary.position[0], primary.position[1] + 0.88, primary.position[2]],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_object_state_entity_cluster_core_color(
+    item: WorldObjectIngestionItem,
+    entity_count: usize,
+) -> [f32; 3] {
+    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let richness = (entity_count as f32 / 3.0).clamp(0.33, 1.0);
+    [0.24 + richness * 0.46, 0.52 + health * 0.38, 0.94 - richness * 0.34]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectStateLifecyclePhase {
+    Dormant,
+    Warming,
+    Active,
+    Strained,
+}
+
+fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLifecyclePhase {
+    let health = item.decoded_health_basis_points.unwrap_or(0);
+    let coarse_updates = item.decoded_coarse_updates.unwrap_or(0);
+    let health_updates = item.decoded_health_updates.unwrap_or(0);
+    if health < 2_800 {
+        ObjectStateLifecyclePhase::Strained
+    } else if coarse_updates + health_updates >= 4 {
+        ObjectStateLifecyclePhase::Active
+    } else if coarse_updates + health_updates >= 1 {
+        ObjectStateLifecyclePhase::Warming
+    } else {
+        ObjectStateLifecyclePhase::Dormant
+    }
+}
+
+fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> Transform {
+    let core = world_object_state_entity_cluster_core_transform(item, world_object_state_entity_count(item));
+    let phase = object_state_lifecycle_phase(item);
+    let phase_lift = match phase {
+        ObjectStateLifecyclePhase::Dormant => 0.18,
+        ObjectStateLifecyclePhase::Warming => 0.26,
+        ObjectStateLifecyclePhase::Active => 0.34,
+        ObjectStateLifecyclePhase::Strained => 0.30,
+    };
+    let cadence = ((item.decoded_coarse_updates.unwrap_or(0) + item.decoded_health_updates.unwrap_or(0)) % 10)
+        as f32
+        / 10.0;
+    let scale = (core.scale[0] + 0.10 + cadence * 0.16).clamp(0.26, 0.64);
+    Transform {
+        position: [core.position[0], core.position[1] + phase_lift, core.position[2]],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_object_state_entity_pulse_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    match object_state_lifecycle_phase(item) {
+        ObjectStateLifecyclePhase::Dormant => [0.48, 0.52, 0.66],
+        ObjectStateLifecyclePhase::Warming => [0.62, 0.74, 0.96],
+        ObjectStateLifecyclePhase::Active => [0.26, 0.92, 0.62],
+        ObjectStateLifecyclePhase::Strained => [0.98, 0.42, 0.30],
+    }
+}
+
+fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem) -> Transform {
+    let primary = world_object_state_entity_body_transform(item, 0);
+    let health_norm = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let instability = 1.0 - health_norm;
+    let height = 0.16 + instability * 0.72;
+    let width = 0.10 + (item.decoded_coarse_location_count.unwrap_or(0) as f32 / 24.0).clamp(0.0, 0.24);
+    Transform {
+        position: [primary.position[0] + 0.18, 0.12 + height * 0.5, primary.position[2] + 0.12],
+        scale: [width, height, width],
+    }
+}
+
+fn world_object_state_entity_stability_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    let health_norm = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    [0.96 - health_norm * 0.56, 0.26 + health_norm * 0.58, 0.38]
 }
 
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
@@ -1520,6 +1757,46 @@ mod tests {
             .expect("object-state entity aura should exist");
         assert_eq!(entity_aura.mesh, MeshKind::AxisMarker);
         assert!(entity_aura.transform.position[1] > entity_body.transform.position[1]);
+        let wing_body = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
+            .expect("object-state wing body should exist");
+        assert_eq!(wing_body.mesh, MeshKind::Cube);
+        let wing_aura = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingAura)
+            .expect("object-state wing aura should exist");
+        assert_eq!(wing_aura.mesh, MeshKind::AxisMarker);
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura));
+        let cluster_core = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
+            .expect("object-state cluster core should exist");
+        assert_eq!(cluster_core.mesh, MeshKind::AxisMarker);
+        assert!(cluster_core.transform.position[1] > entity_aura.transform.position[1]);
+        let pulse = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+            .expect("object-state pulse should exist");
+        assert_eq!(pulse.mesh, MeshKind::AxisMarker);
+        let stability = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
+            .expect("object-state stability should exist");
+        assert_eq!(stability.mesh, MeshKind::Cube);
+        assert!(stability.transform.scale[1] > stability.transform.scale[0]);
     }
 
     #[test]
@@ -1806,6 +2083,15 @@ mod tests {
         assert_eq!(entity_seed.decoded_health_basis_points, Some(6200));
         assert_eq!(entity_seed.decoded_coarse_location_count, Some(2));
         assert_eq!(entity_seed.decoded_coarse_first_xyz, Some([64, 32, 12]));
+        assert_eq!(entity_seed.decoded_coarse_updates, Some(1));
+        assert_eq!(entity_seed.decoded_health_updates, Some(2));
+        let lifecycle = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload)
+            .expect("object-state lifecycle payload should exist when coarse+health are present");
+        assert_eq!(lifecycle.decoded_health_updates, Some(2));
+        assert_eq!(lifecycle.decoded_coarse_updates, Some(1));
     }
 
     #[test]
@@ -1846,6 +2132,34 @@ mod tests {
             .instances
             .iter()
             .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability));
 
         let mut health_only = coarse_only.clone();
         health_only.decoded_coarse_location_count = None;
@@ -1866,6 +2180,160 @@ mod tests {
             .instances
             .iter()
             .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse));
+        assert!(scene
+            .instances
+            .iter()
+            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability));
+    }
+
+    #[test]
+    fn scene_object_state_entity_family_count_is_gated_by_coarse_count() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_coarse_location_count = Some(1);
+        snapshot.decoded_coarse_first_x = Some(64);
+        snapshot.decoded_coarse_first_y = Some(32);
+        snapshot.decoded_coarse_first_z = Some(12);
+        snapshot.decoded_coarse_updates = 3;
+        snapshot.decoded_health_last_basis_points = Some(7000);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
+        );
+
+        snapshot.decoded_coarse_location_count = Some(3);
+        snapshot.decoded_coarse_updates = 4;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+
+        snapshot.decoded_coarse_location_count = Some(7);
+        snapshot.decoded_coarse_updates = 5;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+    }
+
+    #[test]
+    fn object_state_lifecycle_phase_tracks_update_and_health_signals() {
+        let base = WorldObjectIngestionItem {
+            lane: WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload,
+            stage: WorldEntryStage::EnteredFirstRegion,
+            region_coords: Some([1024, 2048]),
+            simulator_target_present: true,
+            traffic_broader_count: 0,
+            traffic_unknown_count: 0,
+            traffic_region_control_count: 0,
+            decoded_endpoint_port: None,
+            decoded_endpoint_host_tail: None,
+            decoded_coarse_location_count: Some(4),
+            decoded_coarse_first_xyz: Some([64, 32, 12]),
+            decoded_coarse_updates: Some(0),
+            decoded_health_updates: Some(0),
+            decoded_health_basis_points: Some(6400),
+        };
+        assert_eq!(object_state_lifecycle_phase(base), ObjectStateLifecyclePhase::Dormant);
+        assert_eq!(
+            object_state_lifecycle_phase(WorldObjectIngestionItem {
+                decoded_coarse_updates: Some(1),
+                ..base
+            }),
+            ObjectStateLifecyclePhase::Warming
+        );
+        assert_eq!(
+            object_state_lifecycle_phase(WorldObjectIngestionItem {
+                decoded_coarse_updates: Some(3),
+                decoded_health_updates: Some(2),
+                ..base
+            }),
+            ObjectStateLifecyclePhase::Active
+        );
+        assert_eq!(
+            object_state_lifecycle_phase(WorldObjectIngestionItem {
+                decoded_health_basis_points: Some(2200),
+                decoded_coarse_updates: Some(6),
+                decoded_health_updates: Some(4),
+                ..base
+            }),
+            ObjectStateLifecyclePhase::Strained
+        );
     }
 
     #[test]
@@ -1968,6 +2436,48 @@ mod tests {
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
         );
     }
 }

@@ -241,13 +241,37 @@ Status update (latest):
     - `WorldObjectStateEntityBody`
     - `WorldObjectStateEntityAura`
   - payload/category and roles are gated by decoded coarse + health availability
+- bounded object/state slice now supports a first narrow multi-entity family:
+  - deterministic entity-count gating from decoded coarse count:
+    - low coarse count -> primary body+aura
+    - medium coarse count -> adds wing body+aura
+    - higher coarse count -> adds guard body+aura
+  - seam-owned cluster role added:
+    - `WorldObjectStateEntityClusterCore`
+  - one tiny supporting decoded input added to seam payload:
+    - `decoded_coarse_updates` for deterministic bounded spatial variation
+- app runtime now applies seam updates on dirty-only changes:
+  - seam adaptation still runs in app-owned startup/redraw flow
+  - scene seam application is skipped when seam content is unchanged
+- bounded object/state slice now includes lifecycle semantics as a dedicated seam lane:
+  - new lane: `ObjectStateEntityLifecyclePayload`
+  - lane carries bounded counters:
+    - `decoded_coarse_updates`
+    - `decoded_health_updates`
+  - seam-owned lifecycle roles:
+    - `WorldObjectStateEntityPulse`
+    - `WorldObjectStateEntityStability`
+  - deterministic lifecycle phase mapping is now explicit:
+    - `Dormant`, `Warming`, `Active`, `Strained`
+- app runtime now also applies live snapshot scene updates on dirty-only changes:
+  - snapshot apply is skipped when `LiveVisualSnapshot` content is unchanged
 - viewer_app-owned live startup orchestration is now first-class:
   - startup mode control (`VIEWER_APP_LIVE_STARTUP`: auto/on/off)
   - app-owned startup status mapping and diagnostics
   - app receives worker status + snapshot updates and feeds seam/scene path
-- next T8 slice should either:
-  - add one more bounded simulator-payload decode lane through seam, or
-  - begin first narrow multi-entity ingestion step from the new object/state lane
+- next T8 slice should:
+  - refine lifecycle-aware multi-entity behavior (for example bounded phase transitions or lane-local stability semantics), or
+  - add one tiny supporting simulator-derived decoded input if it clearly improves the lifecycle slice,
   while preserving the hard stop before broad object/world decoding
 
 ---

@@ -44,6 +44,8 @@ struct AppState {
     camera: Camera,
     scene: Scene,
     world_ingestion_seam: WorldObjectIngestionSeam,
+    last_applied_live_visual_snapshot: Option<LiveVisualSnapshot>,
+    last_applied_world_ingestion_seam: Option<WorldObjectIngestionSeam>,
     input: InputState,
     live_visual_state: LiveVisualState,
     last_frame_time: Instant,
@@ -520,6 +522,23 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn should_apply_world_ingestion_seam(
+    previous: Option<&WorldObjectIngestionSeam>,
+    next: &WorldObjectIngestionSeam,
+) -> bool {
+    match previous {
+        Some(prev) => prev != next,
+        None => true,
+    }
+}
+
+fn should_apply_live_visual_snapshot(
+    previous: Option<&LiveVisualSnapshot>,
+    next: Option<&LiveVisualSnapshot>,
+) -> bool {
+    previous != next
+}
+
 impl ViewerApp {
     fn init_window(event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
         let window = event_loop
@@ -545,6 +564,8 @@ impl ViewerApp {
             camera: Camera::default(),
             scene: Scene::prototype(),
             world_ingestion_seam: WorldObjectIngestionSeam::default(),
+            last_applied_live_visual_snapshot: None,
+            last_applied_world_ingestion_seam: None,
             input: InputState::default(),
             live_visual_state: LiveVisualState::from_env(),
             last_frame_time: Instant::now(),
@@ -566,17 +587,31 @@ impl AppState {
         self.camera.add_look_delta(look_x, look_y);
         self.input.update_camera(&mut self.camera, dt_seconds);
         self.live_visual_state.refresh();
-        self.world_ingestion_seam =
-            WorldObjectIngestionAdapter::adapt(self.live_visual_state.snapshot.as_ref());
-        self.scene
-            .apply_live_visual_snapshot(self.live_visual_state.snapshot.as_ref());
-        self.scene
-            .apply_world_object_ingestion_seam(&self.world_ingestion_seam);
+        let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
+        let next_world_ingestion_seam =
+            WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref());
+        if should_apply_live_visual_snapshot(
+            self.last_applied_live_visual_snapshot.as_ref(),
+            next_live_visual_snapshot.as_ref(),
+        ) {
+            self.scene
+                .apply_live_visual_snapshot(next_live_visual_snapshot.as_ref());
+            self.last_applied_live_visual_snapshot = next_live_visual_snapshot.clone();
+        }
+        if should_apply_world_ingestion_seam(
+            self.last_applied_world_ingestion_seam.as_ref(),
+            &next_world_ingestion_seam,
+        ) {
+            self.scene
+                .apply_world_object_ingestion_seam(&next_world_ingestion_seam);
+            self.last_applied_world_ingestion_seam = Some(next_world_ingestion_seam.clone());
+        }
+        self.world_ingestion_seam = next_world_ingestion_seam;
 
         let window = self.window.clone();
         let ui = &mut self.ui;
         let camera = self.camera;
-        let live_visual = self.live_visual_state.snapshot.clone();
+        let live_visual = next_live_visual_snapshot;
         let live_startup_status = self.live_visual_state.startup_status_line();
 
         self.renderer.render_frame(
@@ -840,6 +875,73 @@ mod tests {
         assert!(!plan.enabled);
         assert!(plan.config.is_none());
         assert!(matches!(plan.startup_status, LiveStartupStatus::Failed(_)));
+    }
+
+    #[test]
+    fn should_apply_world_ingestion_seam_only_when_changed() {
+        let empty = WorldObjectIngestionSeam::default();
+        assert!(should_apply_world_ingestion_seam(None, &empty));
+        assert!(!should_apply_world_ingestion_seam(Some(&empty), &empty));
+
+        let changed = WorldObjectIngestionAdapter::adapt(Some(&LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 2,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 1,
+            unknown: 0,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
+            decoded_health_updates: 1,
+            decoded_health_last_basis_points: Some(6200),
+            observed_at_unix_ms: 1,
+        }));
+        assert!(should_apply_world_ingestion_seam(Some(&empty), &changed));
+        assert!(!should_apply_world_ingestion_seam(Some(&changed), &changed));
+    }
+
+    #[test]
+    fn should_apply_live_visual_snapshot_only_when_changed() {
+        assert!(!should_apply_live_visual_snapshot(None, None));
+        let first = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 2,
+            region_transition_control_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 1,
+            unknown: 0,
+            decoded_coarse_updates: 1,
+            decoded_coarse_location_count: Some(2),
+            decoded_coarse_first_x: Some(64),
+            decoded_coarse_first_y: Some(32),
+            decoded_coarse_first_z: Some(12),
+            decoded_health_updates: 1,
+            decoded_health_last_basis_points: Some(6200),
+            observed_at_unix_ms: 1,
+        };
+        assert!(should_apply_live_visual_snapshot(None, Some(&first)));
+        assert!(!should_apply_live_visual_snapshot(Some(&first), Some(&first)));
+        let mut second = first.clone();
+        second.observed_at_unix_ms = 2;
+        assert!(should_apply_live_visual_snapshot(Some(&first), Some(&second)));
+        assert!(should_apply_live_visual_snapshot(Some(&first), None));
     }
 }
 

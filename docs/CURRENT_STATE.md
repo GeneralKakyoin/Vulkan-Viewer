@@ -132,6 +132,41 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
     - `WorldObjectStateEntityBody`
     - `WorldObjectStateEntityAura`
   - this slice is visibly more entity-like than marker-only diagnostics while remaining bounded
+- bounded seam-driven object/state composition now supports a first narrow multi-entity family:
+  - still sourced only from `ObjectStateEntitySeedPayload` (no broad decode expansion)
+  - deterministic entity-count gating from bounded decoded coarse count:
+    - 1 entity for low coarse counts
+    - 2 entities for medium coarse counts
+    - 3 entities for higher coarse counts
+  - seam-owned multi-entity roles now include:
+    - `WorldObjectStateEntityBody` + `WorldObjectStateEntityAura` (primary)
+    - `WorldObjectStateEntityWingBody` + `WorldObjectStateEntityWingAura` (secondary)
+    - `WorldObjectStateEntityGuardBody` + `WorldObjectStateEntityGuardAura` (tertiary)
+    - `WorldObjectStateEntityClusterCore` (cluster beacon)
+  - one additional tiny supporting decoded input is now carried on the seed payload:
+    - `decoded_coarse_updates`
+    - used only for deterministic bounded spatial variation inside this object/state family
+- bounded seam-driven object/state slice now includes a dedicated lifecycle payload lane:
+  - new lane: `ObjectStateEntityLifecyclePayload`
+  - lane remains gated on the same bounded decoded prerequisites as the seed payload (coarse+health present)
+  - lifecycle lane carries tiny bounded update counters:
+    - `decoded_coarse_updates`
+    - `decoded_health_updates`
+  - seam-owned lifecycle scene roles now include:
+    - `WorldObjectStateEntityPulse`
+    - `WorldObjectStateEntityStability`
+  - lifecycle behavior is deterministic and bounded:
+    - phase classification (`Dormant`, `Warming`, `Active`, `Strained`) from update counters + health basis points
+    - pulse/stability transforms and colors derive only from existing bounded decoded fields
+  - this advances scene-system liveliness while remaining below broad object/world decoding
+- app runtime now avoids unnecessary seam/scene churn when seam content is unchanged:
+  - `viewer_app` compares previous vs newly adapted seam each frame
+  - seam application runs only on change (`dirty-only` path)
+  - preserves app-owned startup orchestration while reducing no-change seam writes
+- app runtime now also avoids unnecessary live-snapshot scene churn:
+  - `viewer_app` compares previous vs current `LiveVisualSnapshot` before applying `Scene::apply_live_visual_snapshot(...)`
+  - snapshot application runs only on change (`dirty-only` path)
+  - seam adaptation still runs each frame in app orchestration flow
 
 ### Architecture
 - clear crate boundaries
@@ -302,7 +337,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 - seam feed is now explicit in orchestration/runtime path (app -> seam adapter -> scene seam application)
 - multi-input seam ingestion and first bounded object/state slice are now in place; next steps must decide between:
   - adding one more bounded simulator decode lane, or
-  - starting first narrow multi-entity ingestion step from current object/state lane
+  - extending bounded object/state behavior with lane-local temporal/lifecycle refinement
 - either path must still avoid broad object/world decoding
 - hard stop remains: no broad object/world-state protocol ingestion in this scope
 
@@ -323,7 +358,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**add one more bounded simulator-payload decode lane (or begin first narrow multi-entity ingestion from the new object/state lane), while keeping broad object/world decode out of scope**
+**extend the bounded lifecycle-aware multi-entity object/state slice with one small lane-local behavior refinement (or one tiny supporting decoded lane), while keeping broad object/world decode out of scope**
 
 ---
 

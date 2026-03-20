@@ -2,6 +2,66 @@
 
 ## Last Completed Work
 
+- Extended the bounded multi-entity object/state seam slice with lifecycle semantics in `viewer_core`:
+  - added dedicated lifecycle lane:
+    - `ObjectStateEntityLifecyclePayload`
+  - lane is emitted only when bounded object/state seed prerequisites are present (decoded coarse + decoded health)
+  - lifecycle payload carries tiny bounded update counters:
+    - `decoded_coarse_updates`
+    - `decoded_health_updates`
+  - added seam-owned lifecycle scene roles:
+    - `WorldObjectStateEntityPulse`
+    - `WorldObjectStateEntityStability`
+  - lifecycle phase classification is now explicit and test-covered:
+    - `Dormant`
+    - `Warming`
+    - `Active`
+    - `Strained`
+- Strengthened runtime dirty-only behavior in `viewer_app`:
+  - seam dirty-check behavior remains in place
+  - live snapshot scene application is now also dirty-only:
+    - `Scene::apply_live_visual_snapshot(...)` runs only when snapshot content changed
+  - app still adapts seam each frame as orchestration owner
+- Strengthened focused tests:
+  - `viewer_core`:
+    - lifecycle lane presence and update-counter propagation from seam mapping
+    - lifecycle role presence/absence assertions in scene mapping tests
+    - lifecycle phase classification behavior test
+  - `viewer_app`:
+    - dirty-only live snapshot application helper test
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
+- Extended the bounded seam-owned object/state seed slice into a first narrow multi-entity composition in `viewer_core`:
+  - seed lane remains `ObjectStateEntitySeedPayload` (still gated on decoded coarse + decoded health)
+  - deterministic entity-count gating from bounded decoded coarse count:
+    - low count -> primary entity only
+    - medium count -> primary + wing entity
+    - higher count -> primary + wing + guard entity
+  - seam-owned scene roles now include:
+    - `WorldObjectStateEntityBody` + `WorldObjectStateEntityAura`
+    - `WorldObjectStateEntityWingBody` + `WorldObjectStateEntityWingAura`
+    - `WorldObjectStateEntityGuardBody` + `WorldObjectStateEntityGuardAura`
+    - `WorldObjectStateEntityClusterCore`
+- Added one tiny supporting decoded field for this bounded slice:
+  - `decoded_coarse_updates` now rides on seam payload items
+  - used only for deterministic entity-family spatial variation
+  - no new broad lane family and no broad object/world decode expansion
+- Added app runtime dirty-only seam behavior in `viewer_app`:
+  - app now compares previous vs next seam and applies seam to scene only when changed
+  - preserves app-owned orchestration path and reduces no-change seam churn
+- Strengthened focused tests:
+  - `viewer_core`:
+    - multi-entity family count gating behavior from coarse counts
+    - seam payload now asserts `decoded_coarse_updates` propagation
+    - absence-path tests now cover all new seam-owned entity-family roles
+  - `viewer_app`:
+    - seam dirty-check helper test (`apply only when changed`)
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Implemented the first bounded object/state slice on top of existing decoded lanes in `viewer_core`:
   - new seam payload category:
     - `ObjectStateEntitySeedPayload`
@@ -697,13 +757,19 @@
 
 Focus only on:
 
-**extend bounded world-facing diagnostics one step further (for example richer typed landmarks/summary) without starting broad object/world decoding**
+**extend the new bounded multi-entity object/state seam slice with one narrow temporal/lifecycle behavior (or one tiny supporting decoded lane) without starting broad object/world decoding**
 
 This includes:
-- keep `viewer_net` unchanged as transport/session/handshake diagnostics source
-- keep world-facing work in `viewer_core` (typed state + scene mapping)
-- optionally project bounded typed world-entry state into debug display (without product UI feature work)
+- keep `viewer_net` unchanged as transport/session/handshake diagnostics source unless a tiny decoded field is clearly justified
+- keep world-facing/object-state work in `viewer_core` seam mapping and scene composition
+- keep runtime orchestration refinements in `viewer_app` only
 - preserve strict stop-line before broad object/world protocol ingestion
+
+Status update:
+- this lifecycle step is now complete:
+  - lifecycle lane exists
+  - lifecycle scene roles exist
+  - dirty-only snapshot/seam application exists in app orchestration
 
 Keep the current boundaries intact:
 - `viewer_net` = transport/session/handshake diagnostics
@@ -727,9 +793,9 @@ Do not:
 
 ## Files Most Likely Involved Next
 
-- `crates/viewer_net/src/lib.rs`
 - `crates/viewer_core/src/lib.rs`
-- `crates/viewer_ui/src/lib.rs` (optional bounded debug projection)
+- `crates/viewer_app/src/main.rs`
+- `crates/viewer_net/src/lib.rs` (only if one tiny decoded field is added)
 - `docs/CURRENT_STATE.md`
 - `docs/HANDOFF.md`
 - `docs/TASKS.md`
