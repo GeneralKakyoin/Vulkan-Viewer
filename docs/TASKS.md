@@ -208,7 +208,14 @@ Status update (latest):
   - `WorldObjectIngestionAdapter` maps runtime `LiveVisualSnapshot` -> seam
   - `viewer_app` applies seam each frame through explicit seam API
   - seam now owns proxy injection/removal path in scene flow
-- next T8 slice should extend seam item content to a first truly ingested narrow world/object payload adapter while preserving the hard stop before broad object/world decoding
+- first narrow typed payload path through seam is now implemented:
+  - new seam lane: `TrafficSignalPayload`
+  - seam now carries typed traffic payload counts
+  - seam-owned marker `WorldIngestionTrafficPayload` reflects this payload in scene space
+- next T8 slice should either:
+  - add one more bounded payload category through seam, or
+  - start first bounded real world/object payload ingestion beyond diagnostic-derived fields
+  while preserving the hard stop before broad object/world decoding
 
 ---
 

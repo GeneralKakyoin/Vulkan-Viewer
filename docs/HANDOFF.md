@@ -2,6 +2,25 @@
 
 ## Last Completed Work
 
+- Extended the runtime-fed seam to carry a first narrow typed payload category:
+  - added seam lane `TrafficSignalPayload`
+  - added typed payload counts on seam item:
+    - `traffic_broader_count`
+    - `traffic_unknown_count`
+    - `traffic_region_control_count`
+- Added seam-owned scene reflection for this payload:
+  - new role `WorldIngestionTrafficPayload`
+  - `Scene::apply_world_object_ingestion_seam(...)` now applies/removes this marker from seam items
+  - marker transform/scale/color are derived from typed payload counts
+- Preserved existing diagnostic world-facing behavior and existing seam proxy path.
+- Added focused tests:
+  - lane-specific seam payload presence for traffic category
+  - scene seam behavior includes/removes traffic payload marker correctly
+  - existing seam and adapter mapping tests remain green
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+
 - Implemented the first bounded real ingestion adapter feed into the existing seam:
   - added `WorldObjectIngestionAdapter` in `viewer_core`
   - adapter maps runtime `LiveVisualSnapshot` -> `WorldObjectIngestionSeam`

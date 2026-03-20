@@ -25,6 +25,7 @@ pub enum InstanceRole {
     WorldTrafficUnknownPillar,
     WorldTrafficRegionControlPillar,
     WorldIngestionProxy,
+    WorldIngestionTrafficPayload,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,6 +152,7 @@ impl WorldDiagnosticSlice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldObjectIngestionLane {
     FirstRegionPresenceProxy,
+    TrafficSignalPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +161,9 @@ pub struct WorldObjectIngestionItem {
     pub stage: WorldEntryStage,
     pub region_coords: Option<[u32; 2]>,
     pub simulator_target_present: bool,
+    pub traffic_broader_count: u32,
+    pub traffic_unknown_count: u32,
+    pub traffic_region_control_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -171,13 +176,28 @@ impl WorldObjectIngestionSeam {
         if slice.presence.stage == WorldEntryStage::Offline {
             return Self::default();
         }
-        Self {
-            items: vec![WorldObjectIngestionItem {
-                lane: WorldObjectIngestionLane::FirstRegionPresenceProxy,
+        let mut items = vec![WorldObjectIngestionItem {
+            lane: WorldObjectIngestionLane::FirstRegionPresenceProxy,
+            stage: slice.presence.stage,
+            region_coords: slice.presence.region_coords,
+            simulator_target_present: slice.presence.has_sim_endpoint,
+            traffic_broader_count: 0,
+            traffic_unknown_count: 0,
+            traffic_region_control_count: 0,
+        }];
+        if slice.traffic.available {
+            items.push(WorldObjectIngestionItem {
+                lane: WorldObjectIngestionLane::TrafficSignalPayload,
                 stage: slice.presence.stage,
                 region_coords: slice.presence.region_coords,
-                simulator_target_present: slice.presence.has_sim_endpoint,
-            }],
+                simulator_target_present: false,
+                traffic_broader_count: slice.traffic.likely_broader,
+                traffic_unknown_count: slice.traffic.unknown,
+                traffic_region_control_count: slice.traffic.region_control,
+            });
+        }
+        Self {
+            items,
         }
     }
 
@@ -329,6 +349,23 @@ impl Scene {
             );
         } else {
             remove_instance(&mut self.instances, InstanceRole::WorldIngestionProxy);
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
+            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::TrafficSignalPayload)
+        {
+            upsert_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionTrafficPayload,
+                MeshKind::AxisMarker,
+                world_ingestion_traffic_payload_transform(item),
+                world_ingestion_traffic_payload_color(item),
+            );
+        } else {
+            remove_instance(&mut self.instances, InstanceRole::WorldIngestionTrafficPayload);
         }
     }
 }
@@ -528,6 +565,31 @@ fn world_ingestion_proxy_color(item: WorldObjectIngestionItem) -> [f32; 3] {
     }
 }
 
+fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> Transform {
+    let [offset_x, offset_z] = world_presence_offset(item.region_coords);
+    let weighted = item
+        .traffic_broader_count
+        .saturating_add(item.traffic_unknown_count.saturating_mul(2))
+        .saturating_add(item.traffic_region_control_count.saturating_mul(3))
+        .min(30) as f32;
+    let y = 0.42 + weighted * 0.015;
+    let scale = 0.22 + weighted * 0.006;
+    Transform {
+        position: [3.0 + offset_x + 0.85, y, offset_z - 0.85],
+        scale: [scale, scale, scale],
+    }
+}
+
+fn world_ingestion_traffic_payload_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+    if item.traffic_region_control_count > 0 {
+        [0.48, 0.88, 0.56]
+    } else if item.traffic_unknown_count > 0 {
+        [0.94, 0.46, 0.30]
+    } else {
+        [0.30, 0.72, 0.94]
+    }
+}
+
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
     match snapshot {
         Some(state) if state.logged_in => {
@@ -675,6 +737,12 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionProxy)
         );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
     }
 
     #[test]
@@ -724,6 +792,12 @@ mod tests {
             .expect("ingestion seam proxy should exist");
         assert_eq!(seam_proxy.mesh, MeshKind::Cube);
         assert_eq!(seam_proxy.transform.position[1], 0.24);
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
     }
 
     #[test]
@@ -772,6 +846,12 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
         assert_eq!(seam_proxy.transform.position[1], 0.32);
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
     }
 
     #[test]
@@ -844,6 +924,14 @@ mod tests {
             .expect("ingestion seam proxy should exist");
         assert_ne!(seam_proxy.transform.position, [3.0, 0.32, -0.85]);
         assert_eq!(seam_proxy.color, [0.20, 0.78, 0.96]);
+        let traffic_payload = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldIngestionTrafficPayload)
+            .expect("ingestion traffic payload marker should exist");
+        assert_eq!(traffic_payload.mesh, MeshKind::AxisMarker);
+        assert!(traffic_payload.transform.scale[0] > 0.22);
+        assert_eq!(traffic_payload.color, [0.30, 0.72, 0.94]);
     }
 
     #[test]
@@ -935,6 +1023,36 @@ mod tests {
     }
 
     #[test]
+    fn world_object_ingestion_seam_includes_traffic_signal_payload_when_available() {
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("198.51.100.10:13009")),
+            first_sim_region_x: Some(1024),
+            first_sim_region_y: Some(2048),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            post_boundary_observations: 14,
+            region_transition_control_observations: 2,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            likely_broader_traffic: 11,
+            unknown: 3,
+            observed_at_unix_ms: 9,
+        };
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        assert_eq!(seam.items.len(), 2);
+        let traffic = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::TrafficSignalPayload)
+            .expect("traffic payload should exist");
+        assert_eq!(traffic.traffic_broader_count, 11);
+        assert_eq!(traffic.traffic_unknown_count, 3);
+        assert_eq!(traffic.traffic_region_control_count, 2);
+    }
+
+    #[test]
     fn world_object_ingestion_seam_carries_region_and_target_hints() {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
@@ -953,8 +1071,11 @@ mod tests {
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
-        assert_eq!(seam.items.len(), 1);
-        let item = seam.items[0];
+        let item = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy)
+            .expect("first-region presence payload should exist");
         assert_eq!(item.stage, WorldEntryStage::EnteredFirstRegion);
         assert!(item.simulator_target_present);
         assert_eq!(item.region_coords, Some([1024, 2048]));
@@ -986,6 +1107,12 @@ mod tests {
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionProxy)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
     }
 }
