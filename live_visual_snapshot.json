@@ -1,9 +1,9 @@
 {
   "source": "viewer_net_manual_example",
-  "logged_in": true,
-  "first_sim_endpoint": "44.243.240.239:13009",
-  "first_sim_region_x": 461824,
-  "first_sim_region_y": 307200,
+  "logged_in": false,
+  "first_sim_endpoint": null,
+  "first_sim_region_x": null,
+  "first_sim_region_y": null,
   "handshake_agent_movement_complete": false,
   "traffic_summary_available": false,
   "post_boundary_observations": 0,
@@ -28,5 +28,5 @@
   "decoded_viewer_time_updates": 0,
   "decoded_viewer_time_body_len": null,
   "decoded_viewer_time_signature": null,
-  "observed_at_unix_ms": 1774082126622
+  "observed_at_unix_ms": 1774113813531
 }
