@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod legacy_login;
+
+pub use legacy_login::{
+    LegacyLoginName, classify_legacy_login_name, normalize_legacy_passwd, split_legacy_name,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartLocation {
     Last,
@@ -33,6 +39,7 @@ pub struct GridLoginRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridLoginRequestParams {
     pub username: String,
+    #[serde(rename = "passwd")]
     pub password: String,
     pub start: String,
     pub agree_to_tos: bool,
@@ -192,11 +199,12 @@ impl GridLoginAdapter for SecondLifeAdapter {
             StartLocationIntent::Uri(uri) => uri.clone(),
         };
 
+        let normalized_password = normalize_legacy_passwd(&intent.password);
         GridLoginRequest {
             method: String::from("login_to_simulator"),
             params: GridLoginRequestParams {
                 username: intent.username.clone(),
-                password: intent.password.clone(),
+                password: normalized_password,
                 start,
                 agree_to_tos: intent.agree_to_tos,
                 read_critical: intent.read_critical,
@@ -356,5 +364,14 @@ mod tests {
     fn secondlife_request_options_include_event_queue() {
         let request = SecondLifeAdapter.shape_login_request(&make_intent());
         assert!(request.options.iter().any(|opt| opt == "event_queue"));
+    }
+
+    #[test]
+    fn secondlife_request_hashes_password() {
+        let request = SecondLifeAdapter.shape_login_request(&make_intent());
+        assert_eq!(
+            request.params.password,
+            "$1$5ebe2294ecd0e0f08eab7690d2a6ee69"
+        );
     }
 }

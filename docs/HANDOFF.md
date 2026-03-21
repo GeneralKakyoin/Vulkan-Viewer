@@ -21,6 +21,8 @@
 - Validation:
   - `cargo check` passed
   - `cargo test -p viewer_core -p viewer_net -p viewer_ui` passed
+- Login stack now normalizes JSON/LLSD/XML payloads to the Firestorm-style legacy `$1$<md5>` `passwd` (see `reference/firestorm/indra/newview/llsecapi.cpp`), so the live SL login endpoint sees the same credential shape regardless of wire format.
+- In-process login now respects `VIEWER_LOGIN_AGREE_TOS`, `VIEWER_LOGIN_READ_CRITICAL`, and `VIEWER_LOGIN_MFA_TOKEN`, so TOS/MFA-gated logins can be driven from env without code changes.
 
 ## Immediate Next Task
 - Replace placeholder geometry with first asset-backed avatar proxies while preserving the same coarse/self tracking and label pipeline.

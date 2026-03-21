@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
+use viewer_grid::legacy_login::{
+    classify_legacy_login_name, normalize_legacy_passwd, split_legacy_name,
+};
 use viewer_grid::{
     FriendBootstrapEntry, GridAdapterError, GridLoginAdapter, GridLoginRequest, GridLoginResponse,
     GridLoginResult, LoginIntent, SessionBootstrap,
@@ -375,78 +378,6 @@ fn xmlrpc_member_array_of_strings(xml: &mut String, name: &str, values: &[String
     }
     xml.push_str("</data></array></value>");
     xml.push_str("</member>");
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LegacyLoginName {
-    first: String,
-    last: String,
-}
-
-fn classify_legacy_login_name(raw: &str) -> LegacyLoginName {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return LegacyLoginName {
-            first: String::new(),
-            last: String::new(),
-        };
-    }
-
-    if let Some((first, last)) = trimmed.split_once('.') {
-        if !first.is_empty() && !last.is_empty() {
-            return LegacyLoginName {
-                first: first.to_string(),
-                last: last.to_string(),
-            };
-        }
-    }
-
-    let mut parts = trimmed.split_whitespace();
-    if let Some(first) = parts.next() {
-        let remainder: Vec<&str> = parts.collect();
-        if !remainder.is_empty() {
-            return LegacyLoginName {
-                first: first.to_string(),
-                last: remainder.join(" "),
-            };
-        }
-    }
-
-    LegacyLoginName {
-        first: trimmed.to_string(),
-        last: String::from("Resident"),
-    }
-}
-
-fn split_legacy_name(username: &str) -> Option<(String, String)> {
-    let trimmed = username.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((first, last)) = trimmed.split_once('.') {
-        if !first.is_empty() && !last.is_empty() {
-            return Some((first.to_string(), last.to_string()));
-        }
-    }
-
-    let mut parts = trimmed.split_whitespace();
-    let first = parts.next()?;
-    let remainder: Vec<&str> = parts.collect();
-    if remainder.is_empty() {
-        return None;
-    }
-
-    Some((first.to_string(), remainder.join(" ")))
-}
-
-fn normalize_legacy_passwd(passwd: &str) -> String {
-    if passwd.starts_with("$1$") {
-        return passwd.to_string();
-    }
-
-    let digest = md5::compute(passwd.as_bytes());
-    format!("$1${digest:x}")
 }
 
 #[derive(Debug, Clone)]

@@ -2834,15 +2834,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redb"
-version = "2.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3401,19 +3392,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempfile"
-version = "3.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
-dependencies = [
- "fastrand",
- "getrandom 0.4.2",
- "once_cell",
- "rustix 1.1.4",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3878,13 +3856,10 @@ dependencies = [
 name = "viewer_asset"
 version = "0.1.0"
 dependencies = [
- "redb",
  "serde",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
  "viewer_core",
 ]
 
@@ -3901,6 +3876,7 @@ dependencies = [
 name = "viewer_grid"
 version = "0.1.0"
 dependencies = [
+ "md5",
  "serde",
  "thiserror 2.0.18",
  "viewer_core",
@@ -3910,7 +3886,6 @@ dependencies = [
 name = "viewer_net"
 version = "0.1.0"
 dependencies = [
- "md5",
  "quick-xml 0.30.0",
  "reqwest",
  "roxmltree",

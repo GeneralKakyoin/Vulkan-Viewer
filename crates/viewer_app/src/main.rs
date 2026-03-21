@@ -112,6 +112,9 @@ struct InProcessLiveFeedConfig {
     connect_timeout_secs: u64,
     wire_format: LoginWireFormat,
     start_location: StartLocationIntent,
+    agree_to_tos: bool,
+    read_critical: bool,
+    mfa_token: Option<String>,
     receive_bind: String,
     receive_timeout_secs: u64,
     receive_max_packets: usize,
@@ -396,6 +399,13 @@ where
         .as_deref()
         .map(parse_start_location)
         .unwrap_or(StartLocationIntent::Saved(StartLocation::Last));
+    let agree_to_tos = lookup("VIEWER_LOGIN_AGREE_TOS")
+        .map(|v| parse_bool_like(&v))
+        .unwrap_or(false);
+    let read_critical = lookup("VIEWER_LOGIN_READ_CRITICAL")
+        .map(|v| parse_bool_like(&v))
+        .unwrap_or(true);
+    let mfa_token = lookup("VIEWER_LOGIN_MFA_TOKEN");
 
     let receive_bind =
         lookup("VIEWER_FIRST_SIM_RECEIVE_BIND").unwrap_or_else(|| String::from("0.0.0.0:0"));
@@ -464,6 +474,9 @@ where
         connect_timeout_secs,
         wire_format,
         start_location,
+        agree_to_tos,
+        read_critical,
+        mfa_token,
         receive_bind,
         receive_timeout_secs,
         receive_max_packets,
@@ -611,9 +624,9 @@ async fn run_in_process_live_feed(
             username: config.username.clone(),
             password: config.password.clone(),
             start_location: config.start_location.clone(),
-            agree_to_tos: false,
-            read_critical: true,
-            mfa_token: None,
+            agree_to_tos: config.agree_to_tos,
+            read_critical: config.read_critical,
+            mfa_token: config.mfa_token.clone(),
         };
 
         let Ok((result, _trace)) = connection.login_with_trace(&adapter, intent).await else {
@@ -3058,6 +3071,15 @@ mod tests {
             String::from("VIEWER_APP_WORKER_TICK_MS"),
             String::from("25"),
         );
+        vars.insert(String::from("VIEWER_LOGIN_AGREE_TOS"), String::from("true"));
+        vars.insert(
+            String::from("VIEWER_LOGIN_READ_CRITICAL"),
+            String::from("false"),
+        );
+        vars.insert(
+            String::from("VIEWER_LOGIN_MFA_TOKEN"),
+            String::from("token123"),
+        );
         let cfg = in_process_live_feed_config_from_lookup(|k| vars.get(k).cloned())
             .expect("config should parse");
         assert_eq!(cfg.wire_format, LoginWireFormat::XmlRpc);
@@ -3065,6 +3087,9 @@ mod tests {
         assert!(!cfg.run_probe);
         assert_eq!(cfg.event_queue_failures_before_reconnect, 9);
         assert_eq!(cfg.worker_tick_ms, 25);
+        assert!(cfg.agree_to_tos);
+        assert!(!cfg.read_critical);
+        assert_eq!(cfg.mfa_token.as_deref(), Some("token123"));
     }
 
     #[test]

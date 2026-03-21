@@ -10,3 +10,5 @@ serde.workspace = true
 thiserror.workspace = true
 
 viewer_core = { path = "../viewer_core" }
+
+md5 = "0.7"

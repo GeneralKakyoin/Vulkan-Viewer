@@ -50,6 +50,10 @@ Within this phase, the bounded pre-world object/state slice is now substantially
     - `VIEWER_APP_LIVE_STARTUP=auto` (default)
     - `VIEWER_APP_LIVE_STARTUP=on`
     - `VIEWER_APP_LIVE_STARTUP=off`
+  - in-process live login now honors:
+    - `VIEWER_LOGIN_AGREE_TOS`
+    - `VIEWER_LOGIN_READ_CRITICAL`
+    - `VIEWER_LOGIN_MFA_TOKEN`
   - app now surfaces explicit startup status in UI (`starting`, `connected`, `disabled`, `failed`)
   - debug overlay displays live-derived connection/handshake/traffic summary fields
 - sandbox cube visual indicator now reflects live state:
@@ -255,6 +259,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
 - typed login request/result/bootstrap models
 - login diagnostics/trace
 - JSON codec
+- JSON codec now emits the Firestorm-inspired legacy `$1$<md5>` `passwd` field (with first/last derived per the login handler reference), matching the real endpoint's expectation across wire formats
 - minimal LLSD codec
 - experimental XML-RPC `login_to_simulator` codec path in `viewer_net`
 - LLSD `passwd` normalization to legacy `$1$<md5>` form
