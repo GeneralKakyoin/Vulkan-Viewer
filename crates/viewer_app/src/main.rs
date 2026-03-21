@@ -71,6 +71,7 @@ struct AppState {
     world_avatars: Vec<WorldAvatarPlaceholder>,
     avatar_name_cache: BTreeMap<String, String>,
     world_sim_name: Option<String>,
+    startup_sim_name_fallback: Option<String>,
     world_self_location: Option<[f32; 3]>,
     profile_state: Option<AvatarProfileState>,
     profile_image_bytes: BTreeMap<String, Vec<u8>>,
@@ -201,7 +202,8 @@ enum LiveFeedUpdate {
     },
     WorldAvatars {
         avatars: Vec<WorkerWorldAvatarSample>,
-        sim_name: Option<String>,
+        decoded_sim_name: Option<String>,
+        startup_sim_name: Option<String>,
         self_location: Option<[f32; 3]>,
         observed_at_unix_ms: u64,
     },
@@ -236,6 +238,7 @@ struct WorkerWorldAvatarSample {
     agent_id: Option<String>,
     xyz: [u8; 3],
     is_self: bool,
+    sim_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -866,8 +869,8 @@ async fn run_in_process_live_feed(
         let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
         let _ = tx.send(LiveFeedUpdate::WorldAvatars {
             avatars: extract_worker_world_avatar_samples(&connection, &local_agent_id),
-            sim_name: extract_worker_world_sim_name(&connection)
-                .or_else(|| startup_sim_name.clone()),
+            decoded_sim_name: extract_worker_world_sim_name(&connection),
+            startup_sim_name: startup_sim_name.clone(),
             self_location: extract_worker_self_location(&connection),
             observed_at_unix_ms: now_unix_ms(),
         });
@@ -1489,8 +1492,8 @@ async fn run_in_process_live_feed(
             let avatar_samples = extract_worker_world_avatar_samples(&connection, &local_agent_id);
             let _ = tx.send(LiveFeedUpdate::WorldAvatars {
                 avatars: avatar_samples.clone(),
-                sim_name: extract_worker_world_sim_name(&connection)
-                    .or_else(|| startup_sim_name.clone()),
+                decoded_sim_name: extract_worker_world_sim_name(&connection),
+                startup_sim_name: startup_sim_name.clone(),
                 self_location: extract_worker_self_location(&connection),
                 observed_at_unix_ms: now_unix_ms(),
             });
@@ -2105,11 +2108,46 @@ fn format_avatar_label_with_cache(
     format_avatar_label(agent_id, social_state)
 }
 
+fn normalize_sim_name(sim_name: Option<&str>) -> Option<String> {
+    sim_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn resolve_avatar_sim_name(
+    sample_sim_name: Option<&str>,
+    decoded_world_sim_name: Option<&str>,
+    startup_sim_name_fallback: Option<&str>,
+) -> String {
+    normalize_sim_name(sample_sim_name)
+        .or_else(|| normalize_sim_name(decoded_world_sim_name))
+        .or_else(|| normalize_sim_name(startup_sim_name_fallback))
+        .unwrap_or_else(|| String::from("unknown"))
+}
+
+fn update_world_sim_name_state(
+    world_sim_name: &mut Option<String>,
+    startup_sim_name_fallback: &mut Option<String>,
+    decoded_sim_name: Option<&str>,
+    startup_sim_name: Option<&str>,
+) {
+    if let Some(startup_name) = normalize_sim_name(startup_sim_name) {
+        *startup_sim_name_fallback = Some(startup_name);
+    }
+    if let Some(decoded_name) = normalize_sim_name(decoded_sim_name) {
+        *world_sim_name = Some(decoded_name);
+    } else if world_sim_name.is_none() {
+        *world_sim_name = startup_sim_name_fallback.clone();
+    }
+}
+
 fn merge_world_avatar_samples(
     current: &mut Vec<WorldAvatarPlaceholder>,
     social_state: &SocialState,
     avatar_name_cache: &BTreeMap<String, String>,
-    sim_name: Option<&str>,
+    decoded_world_sim_name: Option<&str>,
+    startup_sim_name_fallback: Option<&str>,
     samples: &[WorkerWorldAvatarSample],
     region_coords: Option<[u32; 2]>,
     observed_at_unix_ms: u64,
@@ -2130,6 +2168,11 @@ fn merge_world_avatar_samples(
         } else {
             format_avatar_label_with_cache(&agent_id, social_state, avatar_name_cache)
         };
+        let resolved_sim_name = resolve_avatar_sim_name(
+            sample.sim_name.as_deref(),
+            decoded_world_sim_name,
+            startup_sim_name_fallback,
+        );
         if let Some(existing) = current
             .iter_mut()
             .find(|avatar| avatar.agent_id == agent_id)
@@ -2138,7 +2181,7 @@ fn merge_world_avatar_samples(
             let old_display = existing.display_name.clone();
             existing.world_position = world_position;
             existing.local_position = Some(sample.xyz);
-            existing.sim_name = sim_name.map(ToString::to_string);
+            existing.sim_name = Some(resolved_sim_name.clone());
             existing.display_name = display_name.clone();
             existing.is_self = sample.is_self;
             existing.last_update_unix_ms = observed_at_unix_ms;
@@ -2157,7 +2200,7 @@ fn merge_world_avatar_samples(
                 agent_id: agent_id.clone(),
                 world_position,
                 local_position: Some(sample.xyz),
-                sim_name: sim_name.map(ToString::to_string),
+                sim_name: Some(resolved_sim_name),
                 display_name: display_name.clone(),
                 is_self: sample.is_self,
                 last_update_unix_ms: observed_at_unix_ms,
@@ -2196,6 +2239,7 @@ fn extract_worker_world_avatar_samples(
     local_agent_id: &str,
 ) -> Vec<WorkerWorldAvatarSample> {
     let summary = connection.simulator_payload_decode_summary();
+    let sample_sim_name = summary.region_handshake_last_sim_name.clone();
     let mut samples = Vec::new();
     for (idx, avatar) in summary.coarse_location_last_avatars.iter().enumerate() {
         let is_self = summary
@@ -2207,6 +2251,7 @@ fn extract_worker_world_avatar_samples(
             agent_id: avatar.agent_id.clone(),
             xyz: avatar.xyz,
             is_self,
+            sim_name: sample_sim_name.clone(),
         });
     }
     if samples.is_empty() {
@@ -2215,6 +2260,7 @@ fn extract_worker_world_avatar_samples(
                 agent_id: None,
                 xyz,
                 is_self: false,
+                sim_name: sample_sim_name.clone(),
             });
         }
         if let Some(xyz) = summary.coarse_location_last_second {
@@ -2222,6 +2268,7 @@ fn extract_worker_world_avatar_samples(
                 agent_id: None,
                 xyz,
                 is_self: false,
+                sim_name: sample_sim_name.clone(),
             });
         }
         if let Some(xyz) = summary.coarse_location_last_third {
@@ -2229,6 +2276,7 @@ fn extract_worker_world_avatar_samples(
                 agent_id: None,
                 xyz,
                 is_self: false,
+                sim_name: sample_sim_name.clone(),
             });
         }
     }
@@ -2242,6 +2290,7 @@ fn extract_worker_world_avatar_samples(
             agent_id: Some(local_agent_id.to_string()),
             xyz: fallback_xyz,
             is_self: true,
+            sim_name: sample_sim_name,
         });
     }
     samples
@@ -2642,6 +2691,7 @@ impl ViewerApp {
             world_avatars: Vec::new(),
             avatar_name_cache,
             world_sim_name: None,
+            startup_sim_name_fallback: None,
             world_self_location: None,
             profile_state: None,
             profile_image_bytes: BTreeMap::new(),
@@ -2778,11 +2828,17 @@ impl AppState {
                 }
                 LiveFeedUpdate::WorldAvatars {
                     avatars,
-                    sim_name,
+                    decoded_sim_name,
+                    startup_sim_name,
                     self_location,
                     observed_at_unix_ms,
                 } => {
-                    self.world_sim_name = sim_name.clone();
+                    update_world_sim_name_state(
+                        &mut self.world_sim_name,
+                        &mut self.startup_sim_name_fallback,
+                        decoded_sim_name.as_deref(),
+                        startup_sim_name.as_deref(),
+                    );
                     self.world_self_location = self_location;
                     let region_coords =
                         self.live_visual_state
@@ -2796,6 +2852,7 @@ impl AppState {
                         &self.social_state,
                         &self.avatar_name_cache,
                         self.world_sim_name.as_deref(),
+                        self.startup_sim_name_fallback.as_deref(),
                         &avatars,
                         region_coords,
                         observed_at_unix_ms,
@@ -3504,6 +3561,46 @@ mod tests {
                     && instance.mesh == viewer_core::MeshKind::Cube
             })
         );
+    }
+
+    #[test]
+    fn resolve_avatar_sim_name_uses_priority_order() {
+        assert_eq!(
+            resolve_avatar_sim_name(Some("SampleSim"), Some("Decoded"), Some("Startup")),
+            "SampleSim"
+        );
+        assert_eq!(
+            resolve_avatar_sim_name(None, Some("Decoded"), Some("Startup")),
+            "Decoded"
+        );
+        assert_eq!(
+            resolve_avatar_sim_name(None, None, Some("Startup")),
+            "Startup"
+        );
+        assert_eq!(resolve_avatar_sim_name(None, None, None), "unknown");
+    }
+
+    #[test]
+    fn update_world_sim_name_state_preserves_last_known_non_empty() {
+        let mut world_sim_name = Some(String::from("DecodedOne"));
+        let mut startup_fallback = Some(String::from("BootstrapOne"));
+        update_world_sim_name_state(&mut world_sim_name, &mut startup_fallback, None, None);
+        assert_eq!(world_sim_name.as_deref(), Some("DecodedOne"));
+
+        update_world_sim_name_state(
+            &mut world_sim_name,
+            &mut startup_fallback,
+            Some("DecodedTwo"),
+            Some("BootstrapTwo"),
+        );
+        assert_eq!(world_sim_name.as_deref(), Some("DecodedTwo"));
+        assert_eq!(startup_fallback.as_deref(), Some("BootstrapTwo"));
+
+        let mut empty_world = None;
+        let mut empty_startup = None;
+        update_world_sim_name_state(&mut empty_world, &mut empty_startup, None, Some("Fallback"));
+        assert_eq!(empty_world.as_deref(), Some("Fallback"));
+        assert_eq!(empty_startup.as_deref(), Some("Fallback"));
     }
 
     #[test]

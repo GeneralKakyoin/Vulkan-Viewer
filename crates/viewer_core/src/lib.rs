@@ -483,6 +483,65 @@ impl WorldAvatarPlaceholder {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearbyPersonEntry {
+    pub agent_id: String,
+    pub display_label: String,
+    pub sim_name: String,
+    pub is_friend: bool,
+    pub stale: bool,
+    pub is_self: bool,
+    pub last_update_unix_ms: u64,
+}
+
+impl NearbyPersonEntry {
+    pub fn from_avatar(avatar: &WorldAvatarPlaceholder, social_state: &SocialState) -> Self {
+        let is_friend = social_state
+            .friends
+            .iter()
+            .any(|friend| friend.id == avatar.agent_id);
+        let display_label = if avatar.display_name.trim().is_empty() {
+            avatar.short_agent_id()
+        } else {
+            avatar.display_name.clone()
+        };
+        let sim_name = avatar
+            .sim_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        Self {
+            agent_id: avatar.agent_id.clone(),
+            display_label,
+            sim_name,
+            is_friend,
+            stale: avatar.stale,
+            is_self: avatar.is_self,
+            last_update_unix_ms: avatar.last_update_unix_ms,
+        }
+    }
+}
+
+pub fn project_nearby_people(
+    avatars: &[WorldAvatarPlaceholder],
+    social_state: &SocialState,
+) -> Vec<NearbyPersonEntry> {
+    let mut entries = avatars
+        .iter()
+        .filter(|avatar| !avatar.is_self)
+        .map(|avatar| NearbyPersonEntry::from_avatar(avatar, social_state))
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        a.stale
+            .cmp(&b.stale)
+            .then_with(|| a.display_label.to_ascii_lowercase().cmp(&b.display_label.to_ascii_lowercase()))
+            .then_with(|| a.agent_id.cmp(&b.agent_id))
+    });
+    entries
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AvatarProfileTab {
     SecondLife,
@@ -4429,6 +4488,62 @@ mod tests {
         assert_eq!(avatar.mesh, MeshKind::Cube);
         assert_eq!(avatar.color, [0.30, 0.74, 0.98]);
         assert_eq!(avatar.transform.scale, [0.30, 1.10, 0.30]);
+    }
+
+    #[test]
+    fn project_nearby_people_excludes_self_and_sorts_non_stale_first() {
+        let social = SocialState {
+            friends: vec![FriendEntry {
+                id: String::from("friend-a"),
+                display_name: Some(String::from("Friend A")),
+                name_source: Some(String::from("test")),
+                last_name_resolved_unix_ms: Some(1),
+                online: true,
+                rights_has: 0,
+                rights_given: 0,
+                last_changed_unix_ms: 1,
+            }],
+            ..SocialState::default()
+        };
+        let avatars = vec![
+            WorldAvatarPlaceholder {
+                agent_id: String::from("self-id"),
+                world_position: [0.0, 0.0, 0.0],
+                local_position: None,
+                sim_name: Some(String::from("Alpha")),
+                display_name: String::from("You"),
+                is_self: true,
+                last_update_unix_ms: 1,
+                stale: false,
+            },
+            WorldAvatarPlaceholder {
+                agent_id: String::from("friend-a"),
+                world_position: [0.0, 0.0, 0.0],
+                local_position: None,
+                sim_name: Some(String::from("Alpha")),
+                display_name: String::from("Friend A"),
+                is_self: false,
+                last_update_unix_ms: 2,
+                stale: false,
+            },
+            WorldAvatarPlaceholder {
+                agent_id: String::from("nearby-b"),
+                world_position: [0.0, 0.0, 0.0],
+                local_position: None,
+                sim_name: Some(String::from("Beta")),
+                display_name: String::from("Nearby B"),
+                is_self: false,
+                last_update_unix_ms: 3,
+                stale: true,
+            },
+        ];
+
+        let entries = project_nearby_people(&avatars, &social);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].agent_id, "friend-a");
+        assert!(entries[0].is_friend);
+        assert_eq!(entries[1].agent_id, "nearby-b");
+        assert!(entries[1].stale);
     }
 
     #[test]

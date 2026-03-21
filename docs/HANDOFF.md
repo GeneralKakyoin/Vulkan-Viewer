@@ -2,6 +2,34 @@
 
 ## Last Completed Work
 
+- Implemented **Nearby-vs-Friends UI separation + sim-name readability** while preserving existing chat/IM/profile flows and crate boundaries:
+  - `Chat + IM` left pane now has explicit grouped sections:
+    - `Nearby People` (live avatars, self excluded)
+    - `Friends` (existing filtered/unread thread list)
+    - `Nearby` chat remains separate from both lists
+  - nearby rows now show compact sim context and state hints (`friend`, `stale`)
+  - nearby quick actions added (existing paths only):
+    - `Profile`
+    - `Start IM` (selects Direct IM target using existing IM plumbing)
+  - direct IM header label now resolves from friends first, then nearby person projection
+- Added app-level deterministic sim-name resolution without new protocol work:
+  - priority order:
+    1) sample sim name
+    2) decoded world sim name
+    3) startup/bootstrap fallback
+    4) `unknown`
+  - app preserves last known non-empty world sim name across transient missing updates
+- Added minimal `viewer_core` UI-facing helper projection:
+  - `NearbyPersonEntry`
+  - `project_nearby_people(...)` (self exclusion + deterministic ordering)
+- Added focused tests:
+  - `viewer_core`: nearby projection excludes self and keeps non-stale-first deterministic order
+  - `viewer_app`: sim-name priority and world-sim-name state preservation
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+  - `cargo run -p viewer_app` launched; CLI timed out as expected because app is interactive/non-terminating
+
 - Implemented **Avatar Proxy Visuals V1** (bounded AVI milestone) across `viewer_core` -> `viewer_render` -> `viewer_app` -> `viewer_ui`:
   - added dedicated avatar mesh kind in shared scene model (`MeshKind::AvatarProxy`)
   - replaced avatar placeholder scene emission with mode-aware avatar visual emission:
@@ -101,8 +129,8 @@
 - In-process login now respects `VIEWER_LOGIN_AGREE_TOS`, `VIEWER_LOGIN_READ_CRITICAL`, and `VIEWER_LOGIN_MFA_TOKEN`, so TOS/MFA-gated logins can be driven from env without code changes.
 
 ## Immediate Next Task
-- Add first world-avatar interaction hooks (open profile / IM) from existing avatar surfaces without adding new backend workflows.
-- Keep current avatar proxy/fallback diagnostics and coarse+self pipeline intact while expanding interaction usability.
+- Add lightweight nearby-person detail ergonomics in right pane (optional compact card) without adding backend workflows.
+- Keep current nearby/friends split stable while improving keyboard navigation and selection persistence.
 
 ## Files Likely Involved (next step)
 - `crates/viewer_app/src/main.rs`

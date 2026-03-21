@@ -1,11 +1,20 @@
 # CURRENT_STATE.md
 
-## Latest Update (Avatar Proxy Visuals V1)
-- world avatars now render as shared asset-backed proxy meshes from the same coarse+self pipeline
-- proxy visuals keep the same lifecycle semantics (`seen/updated/stale/removed`) with self/other/stale tint+scale mapping
-- runtime fallback path is now explicit:
-  - if avatar proxy rendering is unavailable, avatars fall back to box placeholders in the same frame
-  - fallback can be forced for diagnostics with `VIEWER_RENDER_FORCE_AVATAR_PROXY_FALLBACK=1`
+## Latest Update (Nearby-vs-Friends UI Separation + Sim Name Readability)
+- Chat+IM left pane is now structurally separated into:
+  - `Nearby People` (live world avatars, excluding self)
+  - `Friends` (existing social list + unread/filter behavior)
+  - `Nearby` chat remains a distinct conversation entry
+- nearby people rows now include decoded/resolved sim name and compact state hints (`friend`, `stale`)
+- nearby selection now supports quick actions:
+  - `Profile`
+  - `Start IM` (selects Direct IM target via existing app flow)
+- sim-name projection in app now uses deterministic priority:
+  - sample sim name
+  - decoded world sim name
+  - startup/bootstrap fallback
+  - `"unknown"`
+- app now preserves last known non-empty world sim name so transient decode gaps do not blank nearby entries
 - avatar labels continue to render as projected 2D overlays above each in-world avatar
 - label precedence in app runtime:
   - live resolved name
