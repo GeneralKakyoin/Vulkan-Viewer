@@ -3,6 +3,10 @@
 ## Current Focus
 Only work on the smallest steps that advance bounded world-facing live diagnostics while preserving crate boundaries and stopping before broad object/world decoding.
 
+Latest priority shift:
+- avatar placeholder slice is now in place (coarse + self + projected labels)
+- next smallest step is improving placeholder fidelity (asset-backed proxies) without widening transport scope
+
 Status note:
 - bounded pre-world object/state phase is now substantially complete
 - bounded broader-ingestion phase is now substantially complete:
@@ -13,6 +17,22 @@ Status note:
 ---
 
 ## Active Tasks
+
+### T0 - Avatar Placeholder V1 stabilization
+Why it matters:
+The first in-world avatar visibility path now exists and should be stabilized before broader world decoding.
+
+Dependencies:
+- current coarse decode summary in `viewer_net`
+- current app merge/supervision and label projection behavior
+
+Done when:
+- placeholder lifecycle (seen/updated/stale/removed) remains stable through reconnect cycles
+- self placeholder remains present even when coarse ID blocks are missing
+- label projection remains readable while camera moves
+- no regressions in chat/IM/profile windows
+
+---
 
 ### T1 - Seed capability bootstrap kickoff
 Why it matters:

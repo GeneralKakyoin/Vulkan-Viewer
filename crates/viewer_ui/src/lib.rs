@@ -1,6 +1,10 @@
 use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
-use viewer_core::{Camera, LiveVisualSnapshot};
+use std::collections::{BTreeMap, HashMap};
+use viewer_core::{
+    AvatarProfileState, AvatarProfileTab, Camera, ChatConnectionState, ChatSendStatus, ChatState,
+    LiveVisualSnapshot, ProfileLoadStatus, RuntimeRelayLevel, SocialState, WorldAvatarPlaceholder,
+};
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, StoreOp, TextureFormat, TextureView,
@@ -48,11 +52,166 @@ fn live_visual_lines(snapshot: Option<&LiveVisualSnapshot>) -> Vec<String> {
     }
 }
 
+fn render_profile_image(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    image_bytes: &BTreeMap<String, Vec<u8>>,
+    texture_cache: &mut HashMap<String, egui::TextureHandle>,
+    decode_failures: &mut HashMap<String, String>,
+    image_id: Option<&str>,
+    tag: &str,
+) {
+    let Some(image_id) = image_id else {
+        ui.label("Image: n/a");
+        return;
+    };
+    if let Some(texture) = texture_cache.get(image_id) {
+        let size = texture.size_vec2();
+        let scale = (220.0 / size.x.max(1.0))
+            .min(160.0 / size.y.max(1.0))
+            .min(1.0);
+        ui.image((texture.id(), egui::vec2(size.x * scale, size.y * scale)));
+        return;
+    }
+    if let Some(reason) = decode_failures.get(image_id) {
+        ui.weak(format!("Image {image_id}: {reason}"));
+        return;
+    }
+    let Some(bytes) = image_bytes.get(image_id) else {
+        ui.weak(format!("Image {image_id}: loading"));
+        return;
+    };
+    match decode_profile_image_color(bytes) {
+        Ok(color_image) => {
+            let handle = ctx.load_texture(
+                format!("profile_image_{tag}_{image_id}"),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            texture_cache.insert(image_id.to_string(), handle);
+            if let Some(texture) = texture_cache.get(image_id) {
+                let size = texture.size_vec2();
+                let scale = (220.0 / size.x.max(1.0))
+                    .min(160.0 / size.y.max(1.0))
+                    .min(1.0);
+                ui.image((texture.id(), egui::vec2(size.x * scale, size.y * scale)));
+            }
+        }
+        Err(err) => {
+            decode_failures.insert(image_id.to_string(), String::from("unsupported format"));
+            ui.weak(format!("Image {image_id}: unsupported format ({err})"));
+        }
+    }
+}
+
+fn decode_profile_image_color(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    if let Ok(decoded) = image::load_from_memory(bytes) {
+        let rgba = decoded.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        return Ok(egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            rgba.as_raw(),
+        ));
+    }
+
+    if let Ok(j2k) = jpeg2k::Image::from_bytes(bytes) {
+        if let Ok(decoded) = image::DynamicImage::try_from(&j2k) {
+            let rgba = decoded.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            return Ok(egui::ColorImage::from_rgba_unmultiplied(
+                size,
+                rgba.as_raw(),
+            ));
+        }
+    }
+
+    let jp2 = justjp2::decode(bytes).map_err(|err| err.to_string())?;
+    if jp2.components.is_empty() || jp2.width == 0 || jp2.height == 0 {
+        return Err(String::from("empty JP2 image"));
+    }
+    let width = jp2.width as usize;
+    let height = jp2.height as usize;
+    let mut rgba = vec![0u8; width * height * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let r = sample_jp2_component_u8(&jp2.components, 0, x, y, width, height);
+            let g = sample_jp2_component_u8(&jp2.components, 1, x, y, width, height);
+            let b = sample_jp2_component_u8(&jp2.components, 2, x, y, width, height);
+            let alpha = sample_jp2_component_u8(&jp2.components, 3, x, y, width, height);
+            let idx = (y * width + x) * 4;
+            rgba[idx] = r;
+            rgba[idx + 1] = g;
+            rgba[idx + 2] = b;
+            rgba[idx + 3] = if jp2.components.len() >= 4 {
+                alpha
+            } else {
+                255
+            };
+        }
+    }
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [width, height],
+        &rgba,
+    ))
+}
+
+fn sample_jp2_component_u8(
+    components: &[justjp2::Component],
+    component_idx: usize,
+    x: usize,
+    y: usize,
+    out_width: usize,
+    out_height: usize,
+) -> u8 {
+    let component = components
+        .get(component_idx)
+        .or_else(|| components.first())
+        .expect("jp2 components non-empty");
+    let comp_width = component.width.max(1) as usize;
+    let comp_height = component.height.max(1) as usize;
+    let sx = (x * comp_width) / out_width.max(1);
+    let sy = (y * comp_height) / out_height.max(1);
+    let idx = sy.saturating_mul(comp_width).saturating_add(sx);
+    let sample = *component.data.get(idx).unwrap_or(&0);
+    let precision = component.precision.clamp(1, 31);
+    let max = ((1i64 << precision) - 1).max(1);
+    let normalized = if component.signed {
+        let bias = 1i64 << (precision - 1);
+        (i64::from(sample) + bias).clamp(0, max)
+    } else {
+        i64::from(sample).clamp(0, max)
+    };
+    ((normalized * 255) / max) as u8
+}
+
+fn short_id(value: &str) -> String {
+    value.chars().take(8).collect()
+}
+
 /// Thin wrapper for all egui pieces that the viewer exposes.
 pub struct UiSystem {
     egui_ctx: egui::Context,
     egui_state: State,
     egui_renderer: Renderer,
+    active_chat_tab: ChatPanelTab,
+    profile_texture_cache: HashMap<String, egui::TextureHandle>,
+    profile_texture_failures: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatPanelTab {
+    Nearby,
+    DirectIm,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiActions {
+    pub nearby_chat_send: Option<String>,
+    pub direct_im_send: Option<(String, String)>,
+    pub open_avatar_profile: Option<String>,
+    pub select_avatar_profile_tab: Option<(String, AvatarProfileTab)>,
+    pub refresh_avatar_profile: Option<(String, Option<AvatarProfileTab>)>,
+    pub open_external_url: Option<String>,
 }
 
 impl UiSystem {
@@ -73,6 +232,9 @@ impl UiSystem {
             egui_ctx,
             egui_state,
             egui_renderer,
+            active_chat_tab: ChatPanelTab::Nearby,
+            profile_texture_cache: HashMap::new(),
+            profile_texture_failures: HashMap::new(),
         }
     }
 
@@ -95,12 +257,22 @@ impl UiSystem {
         camera: &Camera,
         live_visual: Option<&LiveVisualSnapshot>,
         live_startup_status: &str,
-    ) {
+        chat_state: &mut ChatState,
+        social_state: &mut SocialState,
+        world_avatars: &[WorldAvatarPlaceholder],
+        world_sim_name: Option<&str>,
+        world_self_location: Option<[f32; 3]>,
+        profile_state: &mut Option<AvatarProfileState>,
+        profile_image_bytes: &BTreeMap<String, Vec<u8>>,
+        fps: f32,
+        frame_ms: f32,
+    ) -> UiActions {
         if surface_size.width == 0 || surface_size.height == 0 {
-            return;
+            return UiActions::default();
         }
 
         let raw_input = self.egui_state.take_egui_input(window);
+        let mut actions = UiActions::default();
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -132,7 +304,604 @@ impl UiSystem {
                     for line in live_visual_lines(live_visual) {
                         ui.label(line);
                     }
+                    ui.separator();
+                    ui.label(format!("Sim: {}", world_sim_name.unwrap_or("unknown")));
+                    if let Some([x, y, z]) = world_self_location {
+                        ui.label(format!("Location: {:.1}, {:.1}, {:.1}", x, y, z));
+                    } else {
+                        ui.label("Location: unknown");
+                    }
                 });
+
+            egui::Window::new("Performance")
+                .default_pos(egui::pos2(16.0, 252.0))
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("FPS: {:.1}", fps));
+                    ui.label(format!("Frame: {:.2} ms", frame_ms));
+                });
+
+            egui::Window::new("Chat + IM")
+                .default_pos(egui::pos2(16.0, 340.0))
+                .default_size(egui::vec2(560.0, 300.0))
+                .min_size(egui::vec2(360.0, 220.0))
+                .max_size(egui::vec2(900.0, 640.0))
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let (connection_text, color) = match &chat_state.connection {
+                        ChatConnectionState::Disabled => ("disabled", egui::Color32::GRAY),
+                        ChatConnectionState::Connecting => ("connecting", egui::Color32::YELLOW),
+                        ChatConnectionState::Connected => ("connected", egui::Color32::GREEN),
+                        ChatConnectionState::Reconnecting => {
+                            ("reconnecting", egui::Color32::YELLOW)
+                        }
+                        ChatConnectionState::Failed(_) => ("failed", egui::Color32::RED),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label("Status:");
+                        ui.colored_label(color, connection_text);
+                    });
+                    if let ChatConnectionState::Failed(reason) = &chat_state.connection {
+                        ui.label(format!("Connection error: {reason}"));
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let nearby_selected = self.active_chat_tab == ChatPanelTab::Nearby;
+                        if ui.selectable_label(nearby_selected, "Nearby").clicked() {
+                            self.active_chat_tab = ChatPanelTab::Nearby;
+                        }
+                        let im_selected = self.active_chat_tab == ChatPanelTab::DirectIm;
+                        if ui.selectable_label(im_selected, "Direct IM").clicked() {
+                            self.active_chat_tab = ChatPanelTab::DirectIm;
+                        }
+                    });
+                    ui.separator();
+
+                    match self.active_chat_tab {
+                        ChatPanelTab::Nearby => {
+                            match &chat_state.send_status {
+                                ChatSendStatus::Idle => {}
+                                ChatSendStatus::Sending => {
+                                    ui.label("Sending...");
+                                }
+                                ChatSendStatus::Sent => {
+                                    ui.colored_label(egui::Color32::LIGHT_GREEN, "Sent");
+                                }
+                                ChatSendStatus::Failed(reason) => {
+                                    ui.colored_label(
+                                        egui::Color32::RED,
+                                        format!("Send failed: {reason}"),
+                                    );
+                                }
+                            }
+                            egui::ScrollArea::vertical()
+                                .id_salt("nearby_messages_tabbed")
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for message in &chat_state.messages {
+                                        ui.label(format!("{}: {}", message.sender, message.text));
+                                    }
+                                });
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                let input_width = (ui.available_width() - 70.0).max(120.0);
+                                let text_edit = ui.add_sized(
+                                    egui::vec2(input_width, 24.0),
+                                    egui::TextEdit::singleline(&mut chat_state.draft.text)
+                                        .hint_text("Type nearby chat"),
+                                );
+                                let can_send = !chat_state.draft.text.trim().is_empty();
+                                let mut submit = false;
+                                if text_edit.lost_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                                {
+                                    submit = true;
+                                }
+                                if ui
+                                    .add_enabled(can_send, egui::Button::new("Send"))
+                                    .clicked()
+                                {
+                                    submit = true;
+                                }
+                                if submit && can_send {
+                                    actions.nearby_chat_send =
+                                        Some(chat_state.draft.text.trim().to_string());
+                                }
+                            });
+                        }
+                        ChatPanelTab::DirectIm => {
+                            if social_state.selected_friend_id.is_none() {
+                                social_state.selected_friend_id =
+                                    social_state.friends.first().map(|friend| friend.id.clone());
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Friend:");
+                                let selected_id = social_state.selected_friend_id.clone();
+                                let selected_label = selected_id
+                                    .as_ref()
+                                    .and_then(|id| {
+                                        social_state
+                                            .friends
+                                            .iter()
+                                            .find(|friend| &friend.id == id)
+                                            .map(SocialState::friend_display_label)
+                                    })
+                                    .unwrap_or_else(|| String::from("Select friend"));
+                                egui::ComboBox::from_id_salt("direct_im_friend_selector")
+                                    .selected_text(selected_label)
+                                    .show_ui(ui, |ui| {
+                                        for friend in &social_state.friends {
+                                            let label = SocialState::friend_display_label(friend);
+                                            ui.selectable_value(
+                                                &mut social_state.selected_friend_id,
+                                                Some(friend.id.clone()),
+                                                label,
+                                            );
+                                        }
+                                    });
+                                if let Some(selected) = social_state.selected_friend_id.clone() {
+                                    if ui.button("Profile").clicked() {
+                                        actions.open_avatar_profile = Some(selected);
+                                    }
+                                }
+                            });
+                            ui.separator();
+                            if let Some(selected) = social_state.selected_friend_id.clone() {
+                                let thread_label = social_state
+                                    .friends
+                                    .iter()
+                                    .find(|f| f.id == selected)
+                                    .map(SocialState::friend_display_label)
+                                    .unwrap_or_else(|| selected.clone());
+                                ui.label(format!("Thread: {thread_label}"));
+                                if let Some(thread) = social_state.im_threads.iter().find(|t| {
+                                    t.participant_id == selected || t.session_id == selected
+                                }) {
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("direct_im_messages_tabbed")
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            for msg in &thread.messages {
+                                                let prefix = if msg.outgoing {
+                                                    "You"
+                                                } else {
+                                                    msg.from_name.as_str()
+                                                };
+                                                ui.label(format!("{prefix}: {}", msg.text));
+                                            }
+                                        });
+                                } else {
+                                    ui.label("No IM history yet.");
+                                }
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    let input_width = (ui.available_width() - 70.0).max(120.0);
+                                    let text_edit = ui.add_sized(
+                                        egui::vec2(input_width, 24.0),
+                                        egui::TextEdit::singleline(&mut social_state.im_draft)
+                                            .hint_text("Type direct IM"),
+                                    );
+                                    let can_send = !social_state.im_draft.trim().is_empty();
+                                    let mut submit = false;
+                                    if text_edit.lost_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                                    {
+                                        submit = true;
+                                    }
+                                    if ui
+                                        .add_enabled(can_send, egui::Button::new("Send"))
+                                        .clicked()
+                                    {
+                                        submit = true;
+                                    }
+                                    if submit && can_send {
+                                        actions.direct_im_send = Some((
+                                            selected,
+                                            social_state.im_draft.trim().to_string(),
+                                        ));
+                                    }
+                                });
+                            } else {
+                                ui.label("No friends available for direct IM.");
+                            }
+                        }
+                    }
+                });
+
+            if let Some(profile) = profile_state.as_mut() {
+                egui::Window::new("Avatar Profile")
+                    .default_pos(egui::pos2(680.0, 340.0))
+                    .default_size(egui::vec2(560.0, 360.0))
+                    .min_size(egui::vec2(400.0, 260.0))
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            let title = profile.display_label();
+                            let width = (ui.available_width() * 0.72).max(180.0);
+                            ui.add_sized([width, 24.0], egui::Label::new(title).truncate());
+                            ui.add_space(6.0);
+                            ui.add(
+                                egui::Label::new(format!(
+                                    "({})",
+                                    short_id(profile.avatar_id.as_str())
+                                ))
+                                .truncate(),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            for (label, tab) in [
+                                ("2nd Life", AvatarProfileTab::SecondLife),
+                                ("Feed", AvatarProfileTab::Feed),
+                                ("Picks", AvatarProfileTab::Picks),
+                                ("Classifieds", AvatarProfileTab::Classifieds),
+                                ("1st Life", AvatarProfileTab::FirstLife),
+                                ("Notes", AvatarProfileTab::Notes),
+                            ] {
+                                if ui
+                                    .selectable_label(profile.selected_tab == tab, label)
+                                    .clicked()
+                                {
+                                    profile.selected_tab = tab;
+                                    actions.select_avatar_profile_tab =
+                                        Some((profile.avatar_id.clone(), tab));
+                                }
+                            }
+                            if ui.button("Refresh").clicked() {
+                                actions.refresh_avatar_profile =
+                                    Some((profile.avatar_id.clone(), Some(profile.selected_tab)));
+                            }
+                        });
+                        ui.separator();
+                        let load = profile.tab_load(profile.selected_tab);
+                        let status_text = match load.status {
+                            ProfileLoadStatus::Idle => "idle",
+                            ProfileLoadStatus::Loading => "loading",
+                            ProfileLoadStatus::Loaded => "loaded",
+                            ProfileLoadStatus::Failed => "failed",
+                        };
+                        let status_color = match load.status {
+                            ProfileLoadStatus::Idle => egui::Color32::GRAY,
+                            ProfileLoadStatus::Loading => egui::Color32::YELLOW,
+                            ProfileLoadStatus::Loaded => egui::Color32::GREEN,
+                            ProfileLoadStatus::Failed => egui::Color32::RED,
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label("Tab status:");
+                            ui.colored_label(status_color, status_text);
+                        });
+                        if let Some(err) = load.error.as_ref() {
+                            ui.colored_label(egui::Color32::RED, err);
+                        }
+                        ui.separator();
+
+                        match profile.selected_tab {
+                            AvatarProfileTab::SecondLife => {
+                                if let Some(second_life) = profile.second_life.as_ref() {
+                                    render_profile_image(
+                                        ui,
+                                        &self.egui_ctx,
+                                        profile_image_bytes,
+                                        &mut self.profile_texture_cache,
+                                        &mut self.profile_texture_failures,
+                                        second_life.image_id.as_deref(),
+                                        "second_life",
+                                    );
+                                    ui.label(format!(
+                                        "Display: {}",
+                                        second_life.display_name.as_deref().unwrap_or("unknown")
+                                    ));
+                                    ui.label(format!(
+                                        "Username: {}",
+                                        second_life.username.as_deref().unwrap_or("unknown")
+                                    ));
+                                    ui.label(format!(
+                                        "Member since: {}",
+                                        second_life.member_since.as_deref().unwrap_or("n/a")
+                                    ));
+                                    ui.label(format!(
+                                        "Online: {}",
+                                        second_life
+                                            .online
+                                            .map(|v| v.to_string())
+                                            .unwrap_or_else(|| String::from("unknown"))
+                                    ));
+                                    ui.separator();
+                                    ui.label("About:");
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("profile_second_life_about")
+                                        .max_height((ui.available_height() * 0.45).max(72.0))
+                                        .show(ui, |ui| {
+                                            ui.label(second_life.about_text.as_str());
+                                        });
+                                    ui.separator();
+                                    ui.label("Groups:");
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("profile_second_life_groups")
+                                        .max_height((ui.available_height() * 0.35).max(72.0))
+                                        .show(ui, |ui| {
+                                            for group in &second_life.groups {
+                                                let label = if group.name.trim().is_empty() {
+                                                    group.id.clone()
+                                                } else {
+                                                    format!(
+                                                        "{} ({})",
+                                                        group.name,
+                                                        short_id(&group.id)
+                                                    )
+                                                };
+                                                ui.add(egui::Label::new(label).truncate());
+                                            }
+                                        });
+                                } else {
+                                    ui.label("No 2nd Life profile data loaded yet.");
+                                }
+                            }
+                            AvatarProfileTab::Feed => {
+                                let feed_url = profile.feed.url.as_deref().unwrap_or("n/a");
+                                ui.label(format!("Feed URL: {feed_url}"));
+                                if let Some(url) = profile.feed.url.as_ref() {
+                                    if ui.button("Open in Browser").clicked() {
+                                        actions.open_external_url = Some(url.clone());
+                                    }
+                                }
+                            }
+                            AvatarProfileTab::Picks => {
+                                if profile.picks.items.is_empty() {
+                                    ui.label("No picks found.");
+                                } else {
+                                    let mut picked_id: Option<String> = None;
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("profile_picks_list")
+                                        .max_height((ui.available_height() * 0.42).max(72.0))
+                                        .show(ui, |ui| {
+                                            for pick in &profile.picks.items {
+                                                let selected = profile
+                                                    .picks
+                                                    .selected_pick_id
+                                                    .as_deref()
+                                                    .map(|id| id == pick.id.as_str())
+                                                    .unwrap_or(false);
+                                                if ui
+                                                    .selectable_label(
+                                                        selected,
+                                                        format!(
+                                                            "{} ({})",
+                                                            pick.name,
+                                                            short_id(&pick.id)
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    picked_id = Some(pick.id.clone());
+                                                }
+                                            }
+                                        });
+                                    if let Some(selected) = picked_id {
+                                        profile.picks.selected_pick_id = Some(selected);
+                                    }
+                                    ui.separator();
+                                    if let Some(selected_id) =
+                                        profile.picks.selected_pick_id.as_ref()
+                                    {
+                                        if let Some(details) =
+                                            profile.picks.details.get(selected_id)
+                                        {
+                                            let pick_title = if details.name.is_empty() {
+                                                short_id(&details.id)
+                                            } else {
+                                                details.name.clone()
+                                            };
+                                            ui.label(format!("Pick: {}", pick_title));
+                                            ui.label(format!("ID: {}", details.id));
+                                            if let Some(description) = details.description.as_ref()
+                                            {
+                                                ui.label(format!("Description: {description}"));
+                                            }
+                                            if let Some(sim_name) = details.sim_name.as_ref() {
+                                                ui.label(format!("Region: {sim_name}"));
+                                            }
+                                            if let Some(parcel_name) = details.parcel_name.as_ref()
+                                            {
+                                                ui.label(format!("Parcel: {parcel_name}"));
+                                            }
+                                            if let Some(snapshot_id) = details.snapshot_id.as_ref()
+                                            {
+                                                render_profile_image(
+                                                    ui,
+                                                    &self.egui_ctx,
+                                                    profile_image_bytes,
+                                                    &mut self.profile_texture_cache,
+                                                    &mut self.profile_texture_failures,
+                                                    Some(snapshot_id.as_str()),
+                                                    "pick",
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            AvatarProfileTab::Classifieds => {
+                                if profile.classifieds.items.is_empty() {
+                                    ui.label("No classifieds found.");
+                                } else {
+                                    let mut picked_id: Option<String> = None;
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("profile_classified_list")
+                                        .max_height((ui.available_height() * 0.42).max(72.0))
+                                        .show(ui, |ui| {
+                                            for classified in &profile.classifieds.items {
+                                                let selected = profile
+                                                    .classifieds
+                                                    .selected_classified_id
+                                                    .as_deref()
+                                                    .map(|id| id == classified.id.as_str())
+                                                    .unwrap_or(false);
+                                                if ui
+                                                    .selectable_label(
+                                                        selected,
+                                                        format!(
+                                                            "{} ({})",
+                                                            classified.name,
+                                                            short_id(&classified.id)
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    picked_id = Some(classified.id.clone());
+                                                }
+                                            }
+                                        });
+                                    if let Some(selected) = picked_id {
+                                        profile.classifieds.selected_classified_id = Some(selected);
+                                    }
+                                    ui.separator();
+                                    if let Some(selected_id) =
+                                        profile.classifieds.selected_classified_id.as_ref()
+                                    {
+                                        if let Some(details) =
+                                            profile.classifieds.details.get(selected_id)
+                                        {
+                                            let classified_title = if details.name.is_empty() {
+                                                short_id(&details.id)
+                                            } else {
+                                                details.name.clone()
+                                            };
+                                            ui.label(format!("Classified: {}", classified_title));
+                                            ui.label(format!("ID: {}", details.id));
+                                            if let Some(description) = details.description.as_ref()
+                                            {
+                                                ui.label(format!("Description: {description}"));
+                                            }
+                                            if let Some(sim_name) = details.sim_name.as_ref() {
+                                                ui.label(format!("Region: {sim_name}"));
+                                            }
+                                            if let Some(parcel_name) = details.parcel_name.as_ref()
+                                            {
+                                                ui.label(format!("Parcel: {parcel_name}"));
+                                            }
+                                            if let Some(price) = details.price_for_listing {
+                                                ui.label(format!("Price: {price}"));
+                                            }
+                                            if let Some(snapshot_id) = details.snapshot_id.as_ref()
+                                            {
+                                                render_profile_image(
+                                                    ui,
+                                                    &self.egui_ctx,
+                                                    profile_image_bytes,
+                                                    &mut self.profile_texture_cache,
+                                                    &mut self.profile_texture_failures,
+                                                    Some(snapshot_id.as_str()),
+                                                    "classified",
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            AvatarProfileTab::FirstLife => {
+                                if let Some(first_life) = profile.first_life.as_ref() {
+                                    render_profile_image(
+                                        ui,
+                                        &self.egui_ctx,
+                                        profile_image_bytes,
+                                        &mut self.profile_texture_cache,
+                                        &mut self.profile_texture_failures,
+                                        first_life.image_id.as_deref(),
+                                        "first_life",
+                                    );
+                                    ui.label("About:");
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("profile_first_life_about")
+                                        .max_height((ui.available_height() * 0.6).max(72.0))
+                                        .show(ui, |ui| {
+                                            ui.label(first_life.about_text.as_str());
+                                        });
+                                } else {
+                                    ui.label("No 1st Life data loaded yet.");
+                                }
+                            }
+                            AvatarProfileTab::Notes => {
+                                if let Some(notes) = profile.notes.as_ref() {
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("profile_notes")
+                                        .max_height((ui.available_height() * 0.7).max(72.0))
+                                        .show(ui, |ui| {
+                                            ui.label(notes.text.as_str());
+                                        });
+                                } else {
+                                    ui.label("No notes loaded yet.");
+                                }
+                            }
+                        }
+                    });
+            }
+
+            egui::Window::new("Runtime Relay")
+                .default_pos(egui::pos2(920.0, 48.0))
+                .default_size(egui::vec2(340.0, 320.0))
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for event in &social_state.relay.events {
+                                let color = match event.level {
+                                    RuntimeRelayLevel::Trace => egui::Color32::GRAY,
+                                    RuntimeRelayLevel::Info => egui::Color32::WHITE,
+                                    RuntimeRelayLevel::Warn => egui::Color32::YELLOW,
+                                    RuntimeRelayLevel::Error => egui::Color32::RED,
+                                };
+                                ui.colored_label(
+                                    color,
+                                    format!(
+                                        "[{}] {}: {}",
+                                        event.at_unix_ms, event.category, event.message
+                                    ),
+                                );
+                            }
+                        });
+                });
+
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("world_avatar_labels_layer"),
+            ));
+            for avatar in world_avatars {
+                let label_position = [
+                    avatar.world_position[0],
+                    avatar.world_position[1] + 0.95,
+                    avatar.world_position[2],
+                ];
+                let Some([sx, sy]) = camera.project_world_to_screen(
+                    label_position,
+                    [surface_size.width as f32, surface_size.height as f32],
+                ) else {
+                    continue;
+                };
+                let text = if avatar.display_name.trim().is_empty() {
+                    avatar.short_agent_id()
+                } else {
+                    let mut base = avatar.display_name.clone();
+                    if let Some(sim_name) = avatar.sim_name.as_deref() {
+                        base = format!("{base} @ {sim_name}");
+                    }
+                    if let Some([x, y, z]) = avatar.local_position {
+                        base = format!("{base} ({x}, {y}, {z})");
+                    }
+                    base
+                };
+                let font_id = egui::FontId::proportional(14.0);
+                let galley = painter.layout_no_wrap(text, font_id.clone(), egui::Color32::WHITE);
+                let rect = egui::Rect::from_center_size(
+                    egui::pos2(sx, sy),
+                    galley.size() + egui::vec2(12.0, 6.0),
+                );
+                painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(180));
+                painter.galley(
+                    egui::pos2(rect.left() + 6.0, rect.top() + 3.0),
+                    galley,
+                    egui::Color32::WHITE,
+                );
+            }
         });
 
         self.egui_state
@@ -180,6 +949,8 @@ impl UiSystem {
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
+
+        actions
     }
 }
 
@@ -190,7 +961,11 @@ mod tests {
     #[test]
     fn live_visual_lines_reports_absent_snapshot() {
         let lines = live_visual_lines(None);
-        assert!(lines.iter().any(|line| line.contains("No live snapshot loaded")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("No live snapshot loaded"))
+        );
     }
 
     #[test]
@@ -233,10 +1008,3 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("CrossedRegion=1")));
     }
 }
-
-
-
-
-
-
-

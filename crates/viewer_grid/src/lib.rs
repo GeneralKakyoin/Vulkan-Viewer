@@ -67,6 +67,18 @@ pub struct GridLoginResponse {
     pub look_at: Option<String>,
     pub home: Option<String>,
     pub motd: Option<String>,
+    #[serde(default, rename = "buddy-list")]
+    pub buddy_list: Vec<FriendBootstrapEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FriendBootstrapEntry {
+    #[serde(default, rename = "buddy_id")]
+    pub buddy_id: String,
+    #[serde(default, rename = "buddy_rights_has")]
+    pub rights_has: i32,
+    #[serde(default, rename = "buddy_rights_given")]
+    pub rights_given: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +93,7 @@ pub struct SessionBootstrap {
     pub look_at: Option<String>,
     pub home: Option<String>,
     pub motd: Option<String>,
+    pub buddy_list: Vec<FriendBootstrapEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +291,7 @@ fn extract_bootstrap(response: &GridLoginResponse) -> Result<SessionBootstrap, G
         look_at: response.look_at.clone(),
         home: response.home.clone(),
         motd: response.motd.clone(),
+        buddy_list: response.buddy_list.clone(),
     })
 }
 

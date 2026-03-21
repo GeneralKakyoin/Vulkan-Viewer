@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -43,6 +44,10 @@ pub enum InstanceRole {
     WorldObjectStateEntityClusterCore,
     WorldObjectStateEntityPulse,
     WorldObjectStateEntityStability,
+    WorldSemanticRelationConnector,
+    WorldSemanticContextRing,
+    WorldAvatarPlaceholderSelf,
+    WorldAvatarPlaceholderOther,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +126,582 @@ pub struct LiveVisualSnapshot {
     #[serde(default)]
     pub decoded_viewer_time_signature: Option<u32>,
     pub observed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub id: u64,
+    pub observed_at_unix_ms: u64,
+    pub sender: String,
+    pub text: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChatDraft {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ChatSendStatus {
+    #[default]
+    Idle,
+    Sending,
+    Sent,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatConnectionState {
+    Disabled,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed(String),
+}
+
+impl Default for ChatConnectionState {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChatState {
+    pub connection: ChatConnectionState,
+    pub draft: ChatDraft,
+    pub send_status: ChatSendStatus,
+    pub messages: Vec<ChatMessage>,
+    next_local_message_id: u64,
+}
+
+impl ChatState {
+    pub fn set_connection(&mut self, connection: ChatConnectionState) {
+        self.connection = connection;
+    }
+
+    pub fn set_draft(&mut self, draft: impl Into<String>) {
+        self.draft.text = draft.into();
+    }
+
+    pub fn mark_sending(&mut self) {
+        self.send_status = ChatSendStatus::Sending;
+    }
+
+    pub fn mark_sent(&mut self) {
+        self.send_status = ChatSendStatus::Sent;
+    }
+
+    pub fn mark_send_failed(&mut self, reason: impl Into<String>) {
+        self.send_status = ChatSendStatus::Failed(reason.into());
+    }
+
+    pub fn reset_send_status(&mut self) {
+        self.send_status = ChatSendStatus::Idle;
+    }
+
+    pub fn allocate_local_message_id(&mut self) -> u64 {
+        self.next_local_message_id = self.next_local_message_id.saturating_add(1);
+        self.next_local_message_id
+    }
+
+    pub fn push_message(&mut self, message: ChatMessage) {
+        if self
+            .messages
+            .iter()
+            .any(|existing| existing.id == message.id)
+        {
+            return;
+        }
+        self.messages.push(message);
+        if self.messages.len() > 200 {
+            let keep_from = self.messages.len() - 200;
+            self.messages.drain(0..keep_from);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriendEntry {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub name_source: Option<String>,
+    pub last_name_resolved_unix_ms: Option<u64>,
+    pub online: bool,
+    pub rights_has: i32,
+    pub rights_given: i32,
+    pub last_changed_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectImMessage {
+    pub id: u64,
+    pub session_id: String,
+    pub peer_id: String,
+    pub from_id: String,
+    pub from_name: String,
+    pub text: String,
+    pub observed_at_unix_ms: u64,
+    pub outgoing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DirectImThread {
+    pub session_id: String,
+    pub participant_id: String,
+    pub messages: Vec<DirectImMessage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRelayLevel {
+    Trace,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRelayEvent {
+    pub at_unix_ms: u64,
+    pub level: RuntimeRelayLevel,
+    pub category: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeRelayState {
+    pub events: Vec<RuntimeRelayEvent>,
+    pub max_events: usize,
+}
+
+impl RuntimeRelayState {
+    pub fn push(&mut self, event: RuntimeRelayEvent) {
+        if self.max_events == 0 {
+            self.max_events = 500;
+        }
+        self.events.push(event);
+        if self.events.len() > self.max_events {
+            let keep_from = self.events.len() - self.max_events;
+            self.events.drain(0..keep_from);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SocialState {
+    pub friends: Vec<FriendEntry>,
+    pub selected_friend_id: Option<String>,
+    pub im_draft: String,
+    pub im_threads: Vec<DirectImThread>,
+    pub relay: RuntimeRelayState,
+    next_im_message_id: u64,
+}
+
+impl SocialState {
+    pub fn upsert_friend(&mut self, friend: FriendEntry) {
+        if let Some(existing) = self.friends.iter_mut().find(|f| f.id == friend.id) {
+            existing.online = friend.online;
+            existing.rights_has = friend.rights_has;
+            existing.rights_given = friend.rights_given;
+            existing.last_changed_unix_ms = friend.last_changed_unix_ms;
+            if friend.display_name.is_some() {
+                existing.display_name = friend.display_name;
+            }
+            if friend.name_source.is_some() {
+                existing.name_source = friend.name_source;
+            }
+            if friend.last_name_resolved_unix_ms.is_some() {
+                existing.last_name_resolved_unix_ms = friend.last_name_resolved_unix_ms;
+            }
+        } else {
+            self.friends.push(friend);
+            self.friends.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+    }
+
+    pub fn set_friend_online(&mut self, id: &str, online: bool, at_unix_ms: u64) {
+        if let Some(existing) = self.friends.iter_mut().find(|f| f.id == id) {
+            existing.online = online;
+            existing.last_changed_unix_ms = at_unix_ms;
+        } else {
+            self.upsert_friend(FriendEntry {
+                id: id.to_string(),
+                display_name: None,
+                name_source: None,
+                last_name_resolved_unix_ms: None,
+                online,
+                rights_has: 0,
+                rights_given: 0,
+                last_changed_unix_ms: at_unix_ms,
+            });
+        }
+    }
+
+    pub fn resolve_friend_name(
+        &mut self,
+        id: &str,
+        display_name: &str,
+        source: &str,
+        at_unix_ms: u64,
+    ) {
+        if display_name.trim().is_empty() {
+            return;
+        }
+        if let Some(existing) = self.friends.iter_mut().find(|f| f.id == id) {
+            existing.display_name = Some(display_name.trim().to_string());
+            existing.name_source = Some(source.to_string());
+            existing.last_name_resolved_unix_ms = Some(at_unix_ms);
+            return;
+        }
+        self.upsert_friend(FriendEntry {
+            id: id.to_string(),
+            display_name: Some(display_name.trim().to_string()),
+            name_source: Some(source.to_string()),
+            last_name_resolved_unix_ms: Some(at_unix_ms),
+            online: false,
+            rights_has: 0,
+            rights_given: 0,
+            last_changed_unix_ms: at_unix_ms,
+        });
+    }
+
+    pub fn friend_display_label(friend: &FriendEntry) -> String {
+        if let Some(name) = friend.display_name.as_deref() {
+            let short = short_uuid(&friend.id);
+            if is_probably_unreadable_label(name) {
+                return format!("{short} ({})", friend.id);
+            }
+            return format!("{name} ({short})");
+        }
+        friend.id.clone()
+    }
+
+    pub fn upsert_thread_message(&mut self, message: DirectImMessage, participant_id: &str) {
+        let session_id = message.session_id.clone();
+        let thread = if let Some(existing) = self
+            .im_threads
+            .iter_mut()
+            .find(|t| t.session_id == session_id)
+        {
+            existing
+        } else {
+            self.im_threads.push(DirectImThread {
+                session_id: session_id.clone(),
+                participant_id: participant_id.to_string(),
+                messages: Vec::new(),
+            });
+            self.im_threads
+                .iter_mut()
+                .find(|t| t.session_id == session_id)
+                .expect("newly pushed thread should exist")
+        };
+        if !thread.messages.iter().any(|m| m.id == message.id) {
+            thread.messages.push(message);
+            if thread.messages.len() > 300 {
+                let keep_from = thread.messages.len() - 300;
+                thread.messages.drain(0..keep_from);
+            }
+        }
+    }
+
+    pub fn next_im_message_id(&mut self) -> u64 {
+        self.next_im_message_id = self.next_im_message_id.saturating_add(1);
+        self.next_im_message_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldAvatarPlaceholder {
+    pub agent_id: String,
+    pub world_position: [f32; 3],
+    pub local_position: Option<[u8; 3]>,
+    pub sim_name: Option<String>,
+    pub display_name: String,
+    pub is_self: bool,
+    pub last_update_unix_ms: u64,
+    pub stale: bool,
+}
+
+impl WorldAvatarPlaceholder {
+    pub fn short_agent_id(&self) -> String {
+        short_uuid(&self.agent_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AvatarProfileTab {
+    SecondLife,
+    Feed,
+    Picks,
+    Classifieds,
+    FirstLife,
+    Notes,
+}
+
+impl Default for AvatarProfileTab {
+    fn default() -> Self {
+        Self::SecondLife
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileLoadStatus {
+    Idle,
+    Loading,
+    Loaded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileLoadState {
+    pub status: ProfileLoadStatus,
+    pub last_updated_unix_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl Default for ProfileLoadState {
+    fn default() -> Self {
+        Self {
+            status: ProfileLoadStatus::Idle,
+            last_updated_unix_ms: None,
+            error: None,
+        }
+    }
+}
+
+impl ProfileLoadState {
+    pub fn mark_loading(&mut self, at_unix_ms: u64) {
+        self.status = ProfileLoadStatus::Loading;
+        self.last_updated_unix_ms = Some(at_unix_ms);
+        self.error = None;
+    }
+
+    pub fn mark_loaded(&mut self, at_unix_ms: u64) {
+        self.status = ProfileLoadStatus::Loaded;
+        self.last_updated_unix_ms = Some(at_unix_ms);
+        self.error = None;
+    }
+
+    pub fn mark_failed(&mut self, at_unix_ms: u64, reason: impl Into<String>) {
+        self.status = ProfileLoadStatus::Failed;
+        self.last_updated_unix_ms = Some(at_unix_ms);
+        self.error = Some(reason.into());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileGroup {
+    pub id: String,
+    pub name: String,
+    pub insignia_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SecondLifeProfile {
+    pub avatar_id: String,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub profile_url: Option<String>,
+    pub about_text: String,
+    pub image_id: Option<String>,
+    pub partner_id: Option<String>,
+    pub member_since: Option<String>,
+    pub allow_publish: Option<bool>,
+    pub online: Option<bool>,
+    pub identified: Option<bool>,
+    pub transacted: Option<bool>,
+    pub groups: Vec<ProfileGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FirstLifeProfile {
+    pub about_text: String,
+    pub image_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileNotes {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfilePickSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfilePickDetails {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub parcel_id: Option<String>,
+    pub sim_name: Option<String>,
+    pub parcel_name: Option<String>,
+    pub global_position: Option<[i32; 3]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfilePicksList {
+    pub items: Vec<ProfilePickSummary>,
+    pub selected_pick_id: Option<String>,
+    pub details: BTreeMap<String, ProfilePickDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileClassifiedSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileClassifiedDetails {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub parcel_id: Option<String>,
+    pub sim_name: Option<String>,
+    pub parcel_name: Option<String>,
+    pub global_position: Option<[i32; 3]>,
+    pub category: Option<u32>,
+    pub flags: Option<u8>,
+    pub price_for_listing: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileClassifiedsList {
+    pub items: Vec<ProfileClassifiedSummary>,
+    pub selected_classified_id: Option<String>,
+    pub details: BTreeMap<String, ProfileClassifiedDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileFeedLinkState {
+    pub url: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AvatarProfileState {
+    pub avatar_id: String,
+    pub selected_tab: AvatarProfileTab,
+    pub second_life: Option<SecondLifeProfile>,
+    pub first_life: Option<FirstLifeProfile>,
+    pub notes: Option<ProfileNotes>,
+    pub picks: ProfilePicksList,
+    pub classifieds: ProfileClassifiedsList,
+    pub feed: ProfileFeedLinkState,
+    pub load_second_life: ProfileLoadState,
+    pub load_feed: ProfileLoadState,
+    pub load_picks: ProfileLoadState,
+    pub load_classifieds: ProfileLoadState,
+    pub load_first_life: ProfileLoadState,
+    pub load_notes: ProfileLoadState,
+}
+
+impl AvatarProfileState {
+    pub fn display_label(&self) -> String {
+        if let Some(sl) = self.second_life.as_ref() {
+            if let Some(name) = sl.display_name.as_ref() {
+                if is_probably_unreadable_label(name) {
+                    if let Some(username) = sl.username.as_ref() {
+                        return format!("{username} ({})", short_uuid(&self.avatar_id));
+                    }
+                    return self.avatar_id.clone();
+                }
+                return format!("{name} ({})", short_uuid(&self.avatar_id));
+            }
+            if let Some(username) = sl.username.as_ref() {
+                return format!("{username} ({})", short_uuid(&self.avatar_id));
+            }
+        }
+        self.avatar_id.clone()
+    }
+
+    pub fn tab_load_mut(&mut self, tab: AvatarProfileTab) -> &mut ProfileLoadState {
+        match tab {
+            AvatarProfileTab::SecondLife => &mut self.load_second_life,
+            AvatarProfileTab::Feed => &mut self.load_feed,
+            AvatarProfileTab::Picks => &mut self.load_picks,
+            AvatarProfileTab::Classifieds => &mut self.load_classifieds,
+            AvatarProfileTab::FirstLife => &mut self.load_first_life,
+            AvatarProfileTab::Notes => &mut self.load_notes,
+        }
+    }
+
+    pub fn tab_load(&self, tab: AvatarProfileTab) -> &ProfileLoadState {
+        match tab {
+            AvatarProfileTab::SecondLife => &self.load_second_life,
+            AvatarProfileTab::Feed => &self.load_feed,
+            AvatarProfileTab::Picks => &self.load_picks,
+            AvatarProfileTab::Classifieds => &self.load_classifieds,
+            AvatarProfileTab::FirstLife => &self.load_first_life,
+            AvatarProfileTab::Notes => &self.load_notes,
+        }
+    }
+}
+
+pub fn compute_p2p_session_id(agent_id: &str, other_agent_id: &str) -> Option<String> {
+    let agent = parse_uuid_bytes(agent_id)?;
+    let other = parse_uuid_bytes(other_agent_id)?;
+    if agent == other {
+        return Some(agent_id.to_ascii_lowercase());
+    }
+    let mut xored = [0u8; 16];
+    for idx in 0..16 {
+        xored[idx] = agent[idx] ^ other[idx];
+    }
+    Some(format_uuid_bytes(xored))
+}
+
+fn parse_uuid_bytes(raw: &str) -> Option<[u8; 16]> {
+    let compact = raw.replace('-', "");
+    if compact.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (idx, slot) in bytes.iter_mut().enumerate() {
+        let start = idx * 2;
+        let end = start + 2;
+        *slot = u8::from_str_radix(&compact[start..end], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+fn short_uuid(uuid: &str) -> String {
+    uuid.chars().take(8).collect()
+}
+
+fn is_probably_unreadable_label(value: &str) -> bool {
+    if value.trim().is_empty() {
+        return true;
+    }
+    let non_ascii = value.chars().filter(|ch| !ch.is_ascii()).count();
+    non_ascii > 0
+}
+
+fn format_uuid_bytes(bytes: [u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,13 +869,12 @@ impl WorldObjectIngestionSeam {
                 decoded_viewer_time_signature: None,
             });
         }
-        Self {
-            items,
-        }
+        Self { items }
     }
 
     pub fn from_live_snapshot(snapshot: Option<&LiveVisualSnapshot>) -> Self {
-        let mut seam = Self::from_diagnostic_slice(WorldDiagnosticSlice::from_live_snapshot(snapshot));
+        let mut seam =
+            Self::from_diagnostic_slice(WorldDiagnosticSlice::from_live_snapshot(snapshot));
         if let Some((endpoint_port, endpoint_host_tail)) =
             decode_simulator_endpoint(snapshot.and_then(|s| s.first_sim_endpoint.as_deref()))
         {
@@ -421,7 +1001,8 @@ impl WorldObjectIngestionSeam {
                 });
             }
         }
-        if let Some(health_basis_points) = snapshot.and_then(|s| s.decoded_health_last_basis_points) {
+        if let Some(health_basis_points) = snapshot.and_then(|s| s.decoded_health_last_basis_points)
+        {
             let (stage, region_coords) = snapshot
                 .map(|s| {
                     (
@@ -498,7 +1079,8 @@ impl WorldObjectIngestionSeam {
                 decoded_health_basis_points: None,
                 decoded_viewer_time_updates: snapshot.map(|s| s.decoded_viewer_time_updates),
                 decoded_viewer_time_body_len: Some(body_len),
-                decoded_viewer_time_signature: snapshot.and_then(|s| s.decoded_viewer_time_signature),
+                decoded_viewer_time_signature: snapshot
+                    .and_then(|s| s.decoded_viewer_time_signature),
             });
         }
         if let Some(state) = snapshot {
@@ -646,13 +1228,9 @@ impl Scene {
     pub fn apply_live_visual_snapshot(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
         let world_presence = FirstRegionPresence::from_live_snapshot(snapshot);
         let world_slice = WorldDiagnosticSlice::from_live_snapshot(snapshot);
-        let Some(cube) = self
-            .instances
-            .iter_mut()
-            .find(|instance| {
-                instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
-            })
-        else {
+        let Some(cube) = self.instances.iter_mut().find(|instance| {
+            instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
+        }) else {
             return;
         };
 
@@ -761,7 +1339,10 @@ impl Scene {
                 world_ingestion_traffic_payload_color(item),
             );
         } else {
-            remove_instance(&mut self.instances, InstanceRole::WorldIngestionTrafficPayload);
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldIngestionTrafficPayload,
+            );
         }
 
         if let Some(item) = seam
@@ -804,11 +1385,10 @@ impl Scene {
             );
         }
 
-        if let Some(item) = seam
-            .items
-            .iter()
-            .copied()
-            .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload)
+        if let Some(item) =
+            seam.items.iter().copied().find(|item| {
+                item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload
+            })
         {
             upsert_instance(
                 &mut self.instances,
@@ -948,8 +1528,14 @@ impl Scene {
                     world_object_state_entity_aura_color(item, 1),
                 );
             } else {
-                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingBody);
-                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingAura);
+                remove_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityWingBody,
+                );
+                remove_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityWingAura,
+                );
             }
             if entity_count >= 3 {
                 upsert_instance(
@@ -967,8 +1553,14 @@ impl Scene {
                     world_object_state_entity_aura_color(item, 2),
                 );
             } else {
-                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardBody);
-                remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardAura);
+                remove_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityGuardBody,
+                );
+                remove_instance(
+                    &mut self.instances,
+                    InstanceRole::WorldObjectStateEntityGuardAura,
+                );
             }
             upsert_instance(
                 &mut self.instances,
@@ -978,20 +1570,40 @@ impl Scene {
                 world_object_state_entity_cluster_core_color(item, entity_count),
             );
         } else {
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityBody);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityAura);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingBody);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityWingAura);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardBody);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityGuardAura);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityClusterCore);
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityBody,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityAura,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityWingBody,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityWingAura,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityGuardBody,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityGuardAura,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityClusterCore,
+            );
         }
 
-        if let Some(item) = seam
-            .items
-            .iter()
-            .copied()
-            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload)
+        if let Some(item) =
+            seam.items.iter().copied().find(|item| {
+                item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload
+            })
         {
             upsert_instance(
                 &mut self.instances,
@@ -1008,8 +1620,46 @@ impl Scene {
                 world_object_state_entity_stability_color(item),
             );
         } else {
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityPulse);
-            remove_instance(&mut self.instances, InstanceRole::WorldObjectStateEntityStability);
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityPulse,
+            );
+            remove_instance(
+                &mut self.instances,
+                InstanceRole::WorldObjectStateEntityStability,
+            );
+        }
+    }
+
+    pub fn apply_world_avatar_placeholders(&mut self, avatars: &[WorldAvatarPlaceholder]) {
+        self.instances.retain(|instance| {
+            instance.role != InstanceRole::WorldAvatarPlaceholderSelf
+                && instance.role != InstanceRole::WorldAvatarPlaceholderOther
+        });
+        for avatar in avatars {
+            self.instances.push(RenderableInstance {
+                mesh: MeshKind::Cube,
+                role: if avatar.is_self {
+                    InstanceRole::WorldAvatarPlaceholderSelf
+                } else {
+                    InstanceRole::WorldAvatarPlaceholderOther
+                },
+                transform: Transform {
+                    position: avatar.world_position,
+                    scale: if avatar.is_self {
+                        [0.32, 1.20, 0.32]
+                    } else {
+                        [0.30, 1.10, 0.30]
+                    },
+                },
+                color: if avatar.is_self {
+                    [0.22, 0.86, 0.40]
+                } else if avatar.stale {
+                    [0.66, 0.50, 0.38]
+                } else {
+                    [0.30, 0.74, 0.98]
+                },
+            });
         }
     }
 }
@@ -1153,7 +1803,10 @@ enum TrafficPillarKind {
     RegionControl,
 }
 
-fn world_traffic_pillar_transform(slice: WorldDiagnosticSlice, kind: TrafficPillarKind) -> Transform {
+fn world_traffic_pillar_transform(
+    slice: WorldDiagnosticSlice,
+    kind: TrafficPillarKind,
+) -> Transform {
     let [base_x, base_z] = world_cluster_base(slice.presence.region_coords);
     let (x_shift, z_shift) = match kind {
         TrafficPillarKind::Broader => (-1.05, 0.95),
@@ -1298,7 +1951,9 @@ fn world_ingestion_decoded_coarse_location_color(item: WorldObjectIngestionItem)
     }
 }
 
-fn world_ingestion_decoded_coarse_neighborhood_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_coarse_neighborhood_transform(
+    item: WorldObjectIngestionItem,
+) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_second_xyz.unwrap_or([128, 128, 0]);
     let x = base_x + 1.05 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.8;
@@ -1393,7 +2048,11 @@ fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem)
     let y = 0.64 + ((updates % 12) as f32 / 12.0) * 0.58;
     let scale = (0.22 + (body_len / 255.0) * 0.24).clamp(0.20, 0.48);
     Transform {
-        position: [base_x + heading.cos() * radius, y, base_z + heading.sin() * radius],
+        position: [
+            base_x + heading.cos() * radius,
+            y,
+            base_z + heading.sin() * radius,
+        ],
         scale: [scale, scale, scale],
     }
 }
@@ -1440,7 +2099,8 @@ fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
 fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [cx, cy, cz] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
-    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let health =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     [
         base_x + ((f32::from(cx) / 255.0) - 0.5) * 0.95,
         0.34 + (f32::from(cz) / 255.0) * 0.82 + health * 0.26,
@@ -1448,17 +2108,21 @@ fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
     ]
 }
 
-fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
+fn world_object_state_entity_body_transform(
+    item: WorldObjectIngestionItem,
+    variant: usize,
+) -> Transform {
     let [center_x, center_y, center_z] = object_state_cluster_center(item);
-    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let health =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     let spread = match object_state_lifecycle_phase(item) {
         ObjectStateLifecyclePhase::Dormant => 0.75,
         ObjectStateLifecyclePhase::Warming => 0.92,
         ObjectStateLifecyclePhase::Active => 1.18,
         ObjectStateLifecyclePhase::Strained => 1.05,
     };
-    let phase = ((item.decoded_coarse_updates.unwrap_or(0) % 32) as f32 / 32.0)
-        * core::f32::consts::TAU;
+    let phase =
+        ((item.decoded_coarse_updates.unwrap_or(0) % 32) as f32 / 32.0) * core::f32::consts::TAU;
     let (orbit_radius, orbit_angle, y_bias, scale_bias) = match variant {
         1 => (0.56 * spread, phase + 0.8, 0.05, -0.03),
         2 => (0.84 * spread, phase + 2.35, 0.10, -0.05),
@@ -1474,16 +2138,35 @@ fn world_object_state_entity_body_transform(item: WorldObjectIngestionItem, vari
     }
 }
 
-fn world_object_state_entity_body_color(item: WorldObjectIngestionItem, variant: usize) -> [f32; 3] {
-    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+fn world_object_state_entity_body_color(
+    item: WorldObjectIngestionItem,
+    variant: usize,
+) -> [f32; 3] {
+    let health =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     match variant {
-        1 => [0.28 + health * 0.26, 0.24 + health * 0.44, 0.58 + health * 0.20],
-        2 => [0.42 + health * 0.22, 0.30 + health * 0.34, 0.30 + health * 0.18],
-        _ => [0.24 + health * 0.32, 0.30 + health * 0.58, 0.36 + health * 0.22],
+        1 => [
+            0.28 + health * 0.26,
+            0.24 + health * 0.44,
+            0.58 + health * 0.20,
+        ],
+        2 => [
+            0.42 + health * 0.22,
+            0.30 + health * 0.34,
+            0.30 + health * 0.18,
+        ],
+        _ => [
+            0.24 + health * 0.32,
+            0.30 + health * 0.58,
+            0.36 + health * 0.22,
+        ],
     }
 }
 
-fn world_object_state_entity_aura_transform(item: WorldObjectIngestionItem, variant: usize) -> Transform {
+fn world_object_state_entity_aura_transform(
+    item: WorldObjectIngestionItem,
+    variant: usize,
+) -> Transform {
     let body = world_object_state_entity_body_transform(item, variant);
     let coarse_count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
     let lifecycle_boost = match object_state_lifecycle_phase(item) {
@@ -1497,16 +2180,20 @@ fn world_object_state_entity_aura_transform(item: WorldObjectIngestionItem, vari
         2 => 0.12,
         _ => 0.18,
     };
-    let aura_scale = (body.scale[0] + aura_scale_bias + coarse_count * 0.01 + lifecycle_boost)
-        .clamp(0.28, 0.78);
+    let aura_scale =
+        (body.scale[0] + aura_scale_bias + coarse_count * 0.01 + lifecycle_boost).clamp(0.28, 0.78);
     Transform {
         position: [body.position[0], body.position[1] + 0.42, body.position[2]],
         scale: [aura_scale, aura_scale, aura_scale],
     }
 }
 
-fn world_object_state_entity_aura_color(item: WorldObjectIngestionItem, variant: usize) -> [f32; 3] {
-    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+fn world_object_state_entity_aura_color(
+    item: WorldObjectIngestionItem,
+    variant: usize,
+) -> [f32; 3] {
+    let health =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     match variant {
         1 => [0.44 + health * 0.38, 0.36 + health * 0.48, 0.96],
         2 => [0.96, 0.54 + health * 0.28, 0.34 + health * 0.42],
@@ -1536,9 +2223,14 @@ fn world_object_state_entity_cluster_core_color(
     item: WorldObjectIngestionItem,
     entity_count: usize,
 ) -> [f32; 3] {
-    let health = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let health =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     let richness = (entity_count as f32 / 3.0).clamp(0.33, 1.0);
-    [0.24 + richness * 0.46, 0.52 + health * 0.38, 0.94 - richness * 0.34]
+    [
+        0.24 + richness * 0.46,
+        0.52 + health * 0.38,
+        0.94 - richness * 0.34,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1567,7 +2259,10 @@ fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLi
 }
 
 fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> Transform {
-    let core = world_object_state_entity_cluster_core_transform(item, world_object_state_entity_count(item));
+    let core = world_object_state_entity_cluster_core_transform(
+        item,
+        world_object_state_entity_count(item),
+    );
     let phase = object_state_lifecycle_phase(item);
     let phase_lift = match phase {
         ObjectStateLifecyclePhase::Dormant => 0.18,
@@ -1575,8 +2270,9 @@ fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> 
         ObjectStateLifecyclePhase::Active => 0.34,
         ObjectStateLifecyclePhase::Strained => 0.30,
     };
-    let cadence = ((item.decoded_coarse_updates.unwrap_or(0) + item.decoded_health_updates.unwrap_or(0)) % 10)
-        as f32
+    let cadence = ((item.decoded_coarse_updates.unwrap_or(0)
+        + item.decoded_health_updates.unwrap_or(0))
+        % 10) as f32
         / 10.0;
     let phase_scale = match phase {
         ObjectStateLifecyclePhase::Dormant => 0.06,
@@ -1586,7 +2282,11 @@ fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> 
     };
     let scale = (core.scale[0] + 0.08 + phase_scale + cadence * 0.14).clamp(0.24, 0.72);
     Transform {
-        position: [core.position[0], core.position[1] + phase_lift, core.position[2]],
+        position: [
+            core.position[0],
+            core.position[1] + phase_lift,
+            core.position[2],
+        ],
         scale: [scale, scale, scale],
     }
 }
@@ -1602,7 +2302,8 @@ fn world_object_state_entity_pulse_color(item: WorldObjectIngestionItem) -> [f32
 
 fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem) -> Transform {
     let [center_x, _, center_z] = object_state_cluster_center(item);
-    let health_norm = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let health_norm =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     let instability = 1.0 - health_norm;
     let phase = object_state_lifecycle_phase(item);
     let phase_instability = match phase {
@@ -1612,16 +2313,22 @@ fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem)
         ObjectStateLifecyclePhase::Strained => 0.14,
     };
     let height = 0.16 + instability * 0.72;
-    let width = 0.10 + (item.decoded_coarse_location_count.unwrap_or(0) as f32 / 24.0).clamp(0.0, 0.24);
+    let width =
+        0.10 + (item.decoded_coarse_location_count.unwrap_or(0) as f32 / 24.0).clamp(0.0, 0.24);
     let adjusted_height = (height + phase_instability).clamp(0.14, 0.86);
     Transform {
-        position: [center_x + 0.26, 0.12 + adjusted_height * 0.5, center_z + 0.18],
+        position: [
+            center_x + 0.26,
+            0.12 + adjusted_height * 0.5,
+            center_z + 0.18,
+        ],
         scale: [width, adjusted_height, width],
     }
 }
 
 fn world_object_state_entity_stability_color(item: WorldObjectIngestionItem) -> [f32; 3] {
-    let health_norm = (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
+    let health_norm =
+        (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     [0.96 - health_norm * 0.56, 0.26 + health_norm * 0.58, 0.38]
 }
 
@@ -1688,6 +2395,166 @@ impl Camera {
     pub fn add_look_delta(&mut self, delta_yaw: f32, delta_pitch: f32) {
         self.yaw += delta_yaw;
         self.pitch = (self.pitch + delta_pitch).clamp(-1.553343, 1.553343);
+    }
+
+    pub fn project_world_to_screen(
+        &self,
+        world: [f32; 3],
+        surface_size: [f32; 2],
+    ) -> Option<[f32; 2]> {
+        let width = surface_size[0].max(1.0);
+        let height = surface_size[1].max(1.0);
+        let aspect = width / height;
+        let projection = perspective_rh_zo(60.0_f32.to_radians(), aspect, 0.1, 100.0);
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        let forward = [cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw];
+        let view = look_to_rh(self.position, forward, [0.0, 1.0, 0.0]);
+        let view_projection = mat4_mul(projection, view);
+        let clip = mat4_mul_vec4(view_projection, [world[0], world[1], world[2], 1.0]);
+        if clip[3] <= 0.0001 {
+            return None;
+        }
+        let ndc_x = clip[0] / clip[3];
+        let ndc_y = clip[1] / clip[3];
+        let ndc_z = clip[2] / clip[3];
+        if !(-1.0..=1.0).contains(&ndc_x) || !(-1.0..=1.0).contains(&ndc_y) || ndc_z < 0.0 {
+            return None;
+        }
+        let screen_x = (ndc_x * 0.5 + 0.5) * width;
+        let screen_y = (1.0 - (ndc_y * 0.5 + 0.5)) * height;
+        Some([screen_x, screen_y])
+    }
+}
+
+fn perspective_rh_zo(fovy_radians: f32, aspect: f32, znear: f32, zfar: f32) -> [[f32; 4]; 4] {
+    let f = 1.0 / (0.5 * fovy_radians).tan();
+    [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, zfar / (znear - zfar), -1.0],
+        [0.0, 0.0, (zfar * znear) / (znear - zfar), 0.0],
+    ]
+}
+
+fn look_to_rh(eye: [f32; 3], direction: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
+    let forward = normalize(direction);
+    let side = normalize(cross(up, forward));
+    let camera_up = cross(forward, side);
+    [
+        [side[0], camera_up[0], -forward[0], 0.0],
+        [side[1], camera_up[1], -forward[1], 0.0],
+        [side[2], camera_up[2], -forward[2], 0.0],
+        [
+            -dot(side, eye),
+            -dot(camera_up, eye),
+            dot(forward, eye),
+            1.0,
+        ],
+    ]
+}
+
+fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0; 4]; 4];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c][r] =
+                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
+        }
+    }
+    out
+}
+
+fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2] + m[3][0] * v[3],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2] + m[3][1] * v[3],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2] + m[3][2] * v[3],
+        m[0][3] * v[0] + m[1][3] * v[1] + m[2][3] * v[2] + m[3][3] * v[3],
+    ]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (dot(v, v)).sqrt();
+    if len > 0.0 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 0.0, -1.0]
+    }
+}
+
+#[cfg(test)]
+mod social_tests {
+    use super::*;
+
+    #[test]
+    fn compute_p2p_session_id_xors_uuid_bytes() {
+        let a = "00000000-0000-0000-0000-000000000001";
+        let b = "00000000-0000-0000-0000-000000000003";
+        let session = compute_p2p_session_id(a, b).expect("session id should be computed");
+        assert_eq!(session, "00000000-0000-0000-0000-000000000002");
+    }
+
+    #[test]
+    fn runtime_relay_state_is_bounded() {
+        let mut relay = RuntimeRelayState {
+            events: Vec::new(),
+            max_events: 3,
+        };
+        for idx in 0..5 {
+            relay.push(RuntimeRelayEvent {
+                at_unix_ms: idx,
+                level: RuntimeRelayLevel::Info,
+                category: String::from("test"),
+                message: idx.to_string(),
+            });
+        }
+        assert_eq!(relay.events.len(), 3);
+        assert_eq!(relay.events[0].message, "2");
+        assert_eq!(relay.events[2].message, "4");
+    }
+
+    #[test]
+    fn friend_name_resolution_sets_display_label_and_preserves_id() {
+        let mut social = SocialState::default();
+        social.upsert_friend(FriendEntry {
+            id: String::from("11111111-2222-3333-4444-555555555555"),
+            display_name: None,
+            name_source: None,
+            last_name_resolved_unix_ms: None,
+            online: false,
+            rights_has: 0,
+            rights_given: 0,
+            last_changed_unix_ms: 1,
+        });
+        social.resolve_friend_name(
+            "11111111-2222-3333-4444-555555555555",
+            "Alpha Resident",
+            "im.from_name",
+            25,
+        );
+        let friend = social
+            .friends
+            .iter()
+            .find(|f| f.id == "11111111-2222-3333-4444-555555555555")
+            .expect("friend should exist");
+        assert_eq!(friend.display_name.as_deref(), Some("Alpha Resident"));
+        assert_eq!(
+            SocialState::friend_display_label(friend),
+            "Alpha Resident (11111111)"
+        );
     }
 }
 
@@ -1806,14 +2673,9 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(
-            scene
-                .instances
-                .iter()
-                .all(|instance| {
-                    instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
-                })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+        }));
         assert!(
             scene
                 .instances
@@ -1893,14 +2755,9 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(
-            scene
-                .instances
-                .iter()
-                .all(|instance| {
-                    instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
-                })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+        }));
         assert!(
             scene
                 .instances
@@ -1979,14 +2836,9 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(
-            scene
-                .instances
-                .iter()
-                .all(|instance| {
-                    instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
-                })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
+        }));
         assert!(
             scene
                 .instances
@@ -2150,14 +3002,18 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingAura)
             .expect("object-state wing aura should exist");
         assert_eq!(wing_aura.mesh, MeshKind::AxisMarker);
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
+        );
         let cluster_core = scene
             .instances
             .iter()
@@ -2187,7 +3043,8 @@ mod tests {
         assert!(!offline.has_sim_endpoint);
         assert_eq!(offline.region_coords, None);
 
-        let connected = FirstRegionPresence::from_live_snapshot(Some(&sample_snapshot(true, false)));
+        let connected =
+            FirstRegionPresence::from_live_snapshot(Some(&sample_snapshot(true, false)));
         assert_eq!(connected.stage, WorldEntryStage::Connected);
         assert!(!connected.has_sim_endpoint);
 
@@ -2292,10 +3149,14 @@ mod tests {
         let offline = WorldObjectIngestionSeam::from_live_snapshot(None);
         assert!(offline.items.is_empty());
 
-        let connected = WorldObjectIngestionSeam::from_live_snapshot(Some(&sample_snapshot(true, false)));
+        let connected =
+            WorldObjectIngestionSeam::from_live_snapshot(Some(&sample_snapshot(true, false)));
         assert_eq!(connected.items.len(), 1);
         let first = connected.items[0];
-        assert_eq!(first.lane, WorldObjectIngestionLane::FirstRegionPresenceProxy);
+        assert_eq!(
+            first.lane,
+            WorldObjectIngestionLane::FirstRegionPresenceProxy
+        );
         assert_eq!(first.stage, WorldEntryStage::Connected);
         assert!(!first.simulator_target_present);
     }
@@ -2335,10 +3196,11 @@ mod tests {
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
-        assert!(seam
-            .items
-            .iter()
-            .any(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy));
+        assert!(
+            seam.items
+                .iter()
+                .any(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy)
+        );
         let traffic = seam
             .items
             .iter()
@@ -2428,10 +3290,11 @@ mod tests {
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
-        assert!(seam
-            .items
-            .iter()
-            .all(|item| item.lane != WorldObjectIngestionLane::DecodedSimulatorEndpointPayload));
+        assert!(
+            seam.items
+                .iter()
+                .all(|item| item.lane != WorldObjectIngestionLane::DecodedSimulatorEndpointPayload)
+        );
     }
 
     #[test]
@@ -2479,7 +3342,8 @@ mod tests {
     }
 
     #[test]
-    fn world_object_ingestion_seam_includes_coarse_neighborhood_payload_when_second_sample_present() {
+    fn world_object_ingestion_seam_includes_coarse_neighborhood_payload_when_second_sample_present()
+    {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
@@ -2664,10 +3528,11 @@ mod tests {
         snapshot.decoded_viewer_time_body_len = None;
         snapshot.decoded_viewer_time_signature = Some(0x11223344);
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
-        assert!(seam
-            .items
-            .iter()
-            .all(|item| item.lane != WorldObjectIngestionLane::DecodedViewerTimePayload));
+        assert!(
+            seam.items
+                .iter()
+                .all(|item| item.lane != WorldObjectIngestionLane::DecodedViewerTimePayload)
+        );
     }
 
     #[test]
@@ -2683,20 +3548,16 @@ mod tests {
         snapshot.decoded_viewer_time_body_len = Some(22);
         snapshot.decoded_viewer_time_signature = Some(0x01020304);
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(
-            scene.instances.iter().any(|instance| {
-                instance.role == InstanceRole::WorldIngestionDecodedViewerTimePayload
-            })
-        );
+        assert!(scene.instances.iter().any(|instance| {
+            instance.role == InstanceRole::WorldIngestionDecodedViewerTimePayload
+        }));
 
         snapshot.decoded_viewer_time_body_len = None;
         snapshot.decoded_viewer_time_signature = None;
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
-            })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
+        }));
     }
 
     #[test]
@@ -2714,23 +3575,15 @@ mod tests {
         snapshot.decoded_coarse_third_y = Some(60);
         snapshot.decoded_coarse_third_z = Some(22);
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(
-            scene.instances.iter().any(|instance| {
-                instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
-            })
-        );
-        assert!(
-            scene.instances.iter().any(|instance| {
-                instance.role
-                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
-            })
-        );
-        assert!(
-            scene.instances.iter().any(|instance| {
-                instance.role
-                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
-            })
-        );
+        assert!(scene.instances.iter().any(|instance| {
+            instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+        }));
+        assert!(scene.instances.iter().any(|instance| {
+            instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+        }));
+        assert!(scene.instances.iter().any(|instance| {
+            instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+        }));
 
         snapshot.decoded_coarse_second_x = None;
         snapshot.decoded_coarse_second_y = None;
@@ -2739,35 +3592,21 @@ mod tests {
         snapshot.decoded_coarse_third_y = None;
         snapshot.decoded_coarse_third_z = None;
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
-            })
-        );
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role
-                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
-            })
-        );
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role
-                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
-            })
-        );
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role
-                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
-            })
-        );
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role
-                    != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
-            })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+        }));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+        }));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+        }));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+        }));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+        }));
     }
 
     #[test]
@@ -2799,16 +3638,14 @@ mod tests {
             .instances
             .iter()
             .find(|instance| {
-                instance.role
-                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
+                instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
             })
             .expect("coarse neighborhood satellite A should exist");
         let sat_b = scene
             .instances
             .iter()
             .find(|instance| {
-                instance.role
-                    == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
+                instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
             })
             .expect("coarse neighborhood satellite B should exist");
 
@@ -2856,42 +3693,60 @@ mod tests {
         assert!(scene.instances.iter().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
+        );
 
         let mut health_only = coarse_only.clone();
         health_only.decoded_coarse_location_count = None;
@@ -2904,42 +3759,60 @@ mod tests {
         assert!(scene.instances.iter().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse));
-        assert!(scene
-            .instances
-            .iter()
-            .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability));
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse)
+        );
+        assert!(
+            scene
+                .instances
+                .iter()
+                .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
+        );
     }
 
     #[test]
@@ -3046,7 +3919,10 @@ mod tests {
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
         };
-        assert_eq!(object_state_lifecycle_phase(base), ObjectStateLifecyclePhase::Dormant);
+        assert_eq!(
+            object_state_lifecycle_phase(base),
+            ObjectStateLifecyclePhase::Dormant
+        );
         assert_eq!(
             object_state_lifecycle_phase(WorldObjectIngestionItem {
                 decoded_coarse_updates: Some(1),
@@ -3162,9 +4038,9 @@ mod tests {
             .iter()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
             .expect("dormant wing should exist");
-        let dormant_spacing = (dormant_wing.transform.position[0] - dormant_body.transform.position[0])
-            .abs()
-            + (dormant_wing.transform.position[2] - dormant_body.transform.position[2]).abs();
+        let dormant_spacing =
+            (dormant_wing.transform.position[0] - dormant_body.transform.position[0]).abs()
+                + (dormant_wing.transform.position[2] - dormant_body.transform.position[2]).abs();
         let dormant_pulse_scale = dormant_pulse.transform.scale[0];
 
         snapshot.decoded_coarse_updates = 6;
@@ -3185,9 +4061,9 @@ mod tests {
             .iter()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
             .expect("active wing should exist");
-        let active_spacing = (active_wing.transform.position[0] - active_body.transform.position[0])
-            .abs()
-            + (active_wing.transform.position[2] - active_body.transform.position[2]).abs();
+        let active_spacing =
+            (active_wing.transform.position[0] - active_body.transform.position[0]).abs()
+                + (active_wing.transform.position[2] - active_body.transform.position[2]).abs();
 
         assert!(active_pulse.transform.scale[0] > dormant_pulse_scale);
         assert!(active_spacing > dormant_spacing);
@@ -3321,30 +4197,21 @@ mod tests {
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
-        assert!(
-            scene
-                .instances
-                .iter()
-                .all(|instance| {
-                    instance.role != InstanceRole::WorldIngestionDecodedCoarseLocationPayload
-                })
-        );
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
-            })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseLocationPayload
+        }));
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
+        }));
         assert!(
             scene
                 .instances
                 .iter()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(
-            scene.instances.iter().all(|instance| {
-                instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
-            })
-        );
+        assert!(scene.instances.iter().all(|instance| {
+            instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
+        }));
         assert!(
             scene
                 .instances
@@ -3400,14 +4267,42 @@ mod tests {
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
         );
     }
+
+    #[test]
+    fn chat_state_dedupes_messages_by_id() {
+        let mut chat = ChatState::default();
+        chat.push_message(ChatMessage {
+            id: 42,
+            observed_at_unix_ms: 1,
+            sender: String::from("A"),
+            text: String::from("hello"),
+            source: String::from("event_queue"),
+        });
+        chat.push_message(ChatMessage {
+            id: 42,
+            observed_at_unix_ms: 2,
+            sender: String::from("B"),
+            text: String::from("duplicate"),
+            source: String::from("event_queue"),
+        });
+        assert_eq!(chat.messages.len(), 1);
+        assert_eq!(chat.messages[0].text, "hello");
+    }
+
+    #[test]
+    fn chat_state_send_status_progresses() {
+        let mut chat = ChatState::default();
+        assert_eq!(chat.send_status, ChatSendStatus::Idle);
+        chat.mark_sending();
+        assert_eq!(chat.send_status, ChatSendStatus::Sending);
+        chat.mark_send_failed("network");
+        assert_eq!(
+            chat.send_status,
+            ChatSendStatus::Failed(String::from("network"))
+        );
+        chat.mark_sent();
+        assert_eq!(chat.send_status, ChatSendStatus::Sent);
+        chat.reset_send_status();
+        assert_eq!(chat.send_status, ChatSendStatus::Idle);
+    }
 }
-
-
-
-
-
-
-
-
-
-

@@ -1,5 +1,24 @@
 # CURRENT_STATE.md
 
+## Latest Update (Avatar Placeholders V1)
+- world avatar placeholders now render from live simulator coarse presence plus explicit self-avatar inclusion
+- placeholder labels now render as projected 2D overlays above each in-world placeholder
+- label precedence in app runtime:
+  - live resolved name
+  - cached/known friend name
+  - UUID-short fallback
+- runtime relay now includes avatar lifecycle events:
+  - `avatar_seen`
+  - `avatar_updated`
+  - `avatar_stale`
+  - `avatar_removed`
+  - `avatar_name_resolved`
+- profile/chat windows remain user-resizable with stable default size behavior
+
+Known V1 limits:
+- avatar placeholders are simple box markers (not rigged avatars)
+- coarse decode currently supports both reduced payloads and Firestorm-like extended payload shape; if IDs are missing in payload, placeholders use deterministic fallback IDs
+
 ## Current Phase
 Phase E - App-owned live startup orchestration path
 

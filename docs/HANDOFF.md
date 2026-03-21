@@ -2,6 +2,40 @@
 
 ## Last Completed Work
 
+- Implemented avatar placeholder world slice V1 (coarse presence + self) across `viewer_net` -> `viewer_app` -> `viewer_core` -> `viewer_ui`.
+- Added world avatar placeholder core model and scene application path:
+  - scene now renders dedicated placeholder instances for self vs others
+  - placeholder state carries agent id, world position, display label, stale flag, update timestamp
+- Extended coarse decode/summary in `viewer_net`:
+  - summary now carries last coarse avatar samples and optional self index
+  - decoder now supports both:
+    - reduced interleaved xyz payloads
+    - Firestorm-compatible extended payloads with ID blocks + index fields
+- Added app-side avatar merge/supervision:
+  - promotes names from existing friend resolution/cache paths
+  - includes stale/remove lifecycle handling
+  - emits runtime relay lifecycle events (`avatar_seen`, `avatar_updated`, `avatar_stale`, `avatar_removed`, `avatar_name_resolved`)
+- Added projected in-world label overlay:
+  - labels anchored above placeholders using camera projection
+  - label fallback path remains UUID-short when no name is known
+- Validation:
+  - `cargo check` passed
+  - `cargo test -p viewer_core -p viewer_net -p viewer_ui` passed
+
+## Immediate Next Task
+- Replace placeholder geometry with first asset-backed avatar proxies while preserving the same coarse/self tracking and label pipeline.
+- Keep the current runtime relay and projection path intact as the debugging baseline.
+
+## Files Likely Involved (next step)
+- `crates/viewer_app/src/main.rs`
+- `crates/viewer_core/src/lib.rs`
+- `crates/viewer_ui/src/lib.rs`
+
+## Constraints
+- preserve crate boundaries (`viewer_net` transport decode only, `viewer_app` orchestration only, `viewer_core` shared state, `viewer_ui` presentation)
+- do not regress chat/IM/profile behavior while iterating world-avatar visuals
+- keep deterministic fallback behavior when coarse payload omits avatar IDs
+
 - Completed a substantial bounded broader-ingestion bundle with a coherent seam-owned local neighborhood composition:
   - extended bounded coarse decode from first+second to first+second+third sample support
   - decode summary now carries:

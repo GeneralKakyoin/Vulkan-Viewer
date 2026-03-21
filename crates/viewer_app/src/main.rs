@@ -1,16 +1,33 @@
 use anyhow::{Context, Result};
+use dotenvy::dotenv;
+mod social_cache;
+use social_cache::{SocialCache, SocialCacheConfig};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
 use viewer_core::{
-    Camera, LiveVisualSnapshot, Scene, WorldObjectIngestionAdapter, WorldObjectIngestionSeam,
+    AvatarProfileState, AvatarProfileTab, Camera, ChatConnectionState, ChatMessage, ChatSendStatus,
+    ChatState, DirectImMessage, FirstLifeProfile, FriendEntry, LiveVisualSnapshot,
+    ProfileClassifiedDetails, ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes,
+    ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene,
+    SecondLifeProfile, SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter,
+    WorldObjectIngestionSeam, compute_p2p_session_id,
 };
-use viewer_grid::{GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent};
-use viewer_net::{Connection, ConnectionConfig, FirstSimulatorInboundTrafficScope, LoginWireFormat};
+use viewer_grid::{
+    GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
+};
+use viewer_net::{
+    AgentProfileData, Connection, ConnectionConfig, ConnectionError,
+    FirstSimulatorInboundTrafficScope, LoginWireFormat, NearbyChatMessage, SocialCircuit,
+    SocialEvent, poll_event_queue_url_once,
+};
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
 use winit::{
@@ -48,7 +65,18 @@ struct AppState {
     last_applied_world_ingestion_seam: Option<WorldObjectIngestionSeam>,
     input: InputState,
     live_visual_state: LiveVisualState,
+    chat_state: ChatState,
+    social_state: SocialState,
+    world_avatars: Vec<WorldAvatarPlaceholder>,
+    avatar_name_cache: BTreeMap<String, String>,
+    world_sim_name: Option<String>,
+    world_self_location: Option<[f32; 3]>,
+    profile_state: Option<AvatarProfileState>,
+    profile_image_bytes: BTreeMap<String, Vec<u8>>,
+    social_cache: Option<SocialCache>,
     last_frame_time: Instant,
+    smoothed_fps: f32,
+    smoothed_frame_ms: f32,
 }
 
 #[derive(Default)]
@@ -69,8 +97,11 @@ struct LiveVisualState {
     last_modified: Option<std::time::SystemTime>,
     snapshot: Option<LiveVisualSnapshot>,
     in_process_rx: Option<Receiver<LiveFeedUpdate>>,
+    in_process_tx: Option<Sender<LiveFeedCommand>>,
     in_process_enabled: bool,
     startup_status: LiveStartupStatus,
+    chat_connection: ChatConnectionState,
+    profile_cache_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +119,17 @@ struct InProcessLiveFeedConfig {
     post_movement_timeout_secs: Option<u64>,
     stop_on_region_control: bool,
     run_probe: bool,
+    worker_tick_ms: u64,
+    event_queue_poll_timeout_ms: u64,
+    event_queue_poll_every_ticks: u32,
+    event_queue_failures_before_reconnect: u32,
+    social_poll_timeout_ms: u64,
+    social_poll_max_packets: usize,
+    nearby_poll_timeout_ms: u64,
+    nearby_poll_max_packets: usize,
+    nearby_send_receive_timeout_ms: u64,
+    nearby_send_receive_packets: usize,
+    profile_cache_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +152,90 @@ enum LiveStartupStatus {
 enum LiveFeedUpdate {
     Snapshot(LiveVisualSnapshot),
     Status(LiveStartupStatus),
+    ChatConnection(ChatConnectionState),
+    ChatMessage(ChatMessage),
+    ChatSendStatus(ChatSendStatus),
+    FriendsBootstrap(Vec<FriendEntry>),
+    FriendPresence {
+        id: String,
+        online: bool,
+    },
+    FriendRights {
+        id: String,
+        rights_has: i32,
+        rights_given: i32,
+    },
+    FriendResolvedName {
+        id: String,
+        display_name: String,
+        source: String,
+    },
+    AvatarResolvedName {
+        id: String,
+        display_name: String,
+        source: String,
+    },
+    WorldAvatars {
+        avatars: Vec<WorkerWorldAvatarSample>,
+        sim_name: Option<String>,
+        self_location: Option<[f32; 3]>,
+        observed_at_unix_ms: u64,
+    },
+    DirectIm(DirectImMessage),
+    ProfileOpenRequested {
+        avatar_id: String,
+    },
+    ProfileTabLoadStarted {
+        avatar_id: String,
+        tab: AvatarProfileTab,
+    },
+    ProfileData {
+        avatar_id: String,
+        profile: AgentProfileData,
+        requested_tab: AvatarProfileTab,
+    },
+    ProfileTabLoadFailed {
+        avatar_id: String,
+        tab: AvatarProfileTab,
+        reason: String,
+    },
+    ProfileImageLoaded {
+        asset_id: String,
+        bytes: Vec<u8>,
+    },
+    ProfileImageFailed,
+    Relay(RuntimeRelayEvent),
+}
+
+#[derive(Debug, Clone)]
+struct WorkerWorldAvatarSample {
+    agent_id: Option<String>,
+    xyz: [u8; 3],
+    is_self: bool,
+}
+
+#[derive(Debug, Clone)]
+enum LiveFeedCommand {
+    SendChat {
+        text: String,
+        queued_at_unix_ms: u64,
+    },
+    SendDirectIm {
+        to_agent_id: String,
+        text: String,
+        queued_at_unix_ms: u64,
+    },
+    OpenAvatarProfile {
+        avatar_id: String,
+    },
+    SelectProfileTab {
+        avatar_id: String,
+        tab: AvatarProfileTab,
+    },
+    RefreshAvatarProfile {
+        avatar_id: String,
+        tab: Option<AvatarProfileTab>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -121,44 +247,41 @@ struct LiveStartupPlan {
 
 impl LiveVisualState {
     fn from_env() -> Self {
+        load_dotenv_file();
         let path = std::env::var("VIEWER_LIVE_VISUAL_SNAPSHOT_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("live_visual_snapshot.json"));
         let startup_plan = live_startup_plan_from_lookup(|key| std::env::var(key).ok());
         let in_process_enabled = startup_plan.enabled;
         let startup_status = startup_plan.startup_status.clone();
-        let in_process_rx = startup_plan.config.map(spawn_in_process_live_feed);
+        let profile_cache_ttl_secs = startup_plan
+            .config
+            .as_ref()
+            .map(|cfg| cfg.profile_cache_ttl_secs)
+            .unwrap_or(120);
+        let (in_process_rx, in_process_tx) = if let Some(config) = startup_plan.config {
+            let (tx, rx) = spawn_in_process_live_feed(config);
+            (Some(rx), Some(tx))
+        } else {
+            (None, None)
+        };
 
         Self {
             path,
             last_modified: None,
             snapshot: None,
             in_process_rx,
+            in_process_tx,
             in_process_enabled,
             startup_status,
+            chat_connection: ChatConnectionState::Disabled,
+            profile_cache_ttl_secs,
         }
     }
 
     fn refresh(&mut self) {
-        let mut got_in_process_update = false;
-        if let Some(rx) = &self.in_process_rx {
-            while let Ok(update) = rx.try_recv() {
-                match update {
-                    LiveFeedUpdate::Snapshot(snapshot) => {
-                        self.snapshot = Some(snapshot);
-                        got_in_process_update = true;
-                    }
-                    LiveFeedUpdate::Status(status) => {
-                        self.startup_status = status;
-                    }
-                }
-            }
-        }
-
-        if got_in_process_update || self.in_process_enabled {
-            if self.snapshot.is_some() {
-                return;
-            }
+        if self.in_process_enabled && self.snapshot.is_some() {
+            return;
         }
 
         let Ok(metadata) = fs::metadata(&self.path) else {
@@ -185,9 +308,58 @@ impl LiveVisualState {
         self.last_modified = modified;
     }
 
+    fn drain_worker_updates(&mut self) -> Vec<LiveFeedUpdate> {
+        let mut updates = Vec::new();
+        if let Some(rx) = &self.in_process_rx {
+            while let Ok(update) = rx.try_recv() {
+                updates.push(update);
+            }
+        }
+        updates
+    }
+
+    fn send_chat(&self, text: String) {
+        if let Some(tx) = &self.in_process_tx {
+            let _ = tx.send(LiveFeedCommand::SendChat {
+                text,
+                queued_at_unix_ms: now_unix_ms(),
+            });
+        }
+    }
+
+    fn send_direct_im(&self, to_agent_id: String, text: String) {
+        if let Some(tx) = &self.in_process_tx {
+            let _ = tx.send(LiveFeedCommand::SendDirectIm {
+                to_agent_id,
+                text,
+                queued_at_unix_ms: now_unix_ms(),
+            });
+        }
+    }
+
+    fn open_avatar_profile(&self, avatar_id: String) {
+        if let Some(tx) = &self.in_process_tx {
+            let _ = tx.send(LiveFeedCommand::OpenAvatarProfile { avatar_id });
+        }
+    }
+
+    fn select_avatar_profile_tab(&self, avatar_id: String, tab: AvatarProfileTab) {
+        if let Some(tx) = &self.in_process_tx {
+            let _ = tx.send(LiveFeedCommand::SelectProfileTab { avatar_id, tab });
+        }
+    }
+
+    fn refresh_avatar_profile(&self, avatar_id: String, tab: Option<AvatarProfileTab>) {
+        if let Some(tx) = &self.in_process_tx {
+            let _ = tx.send(LiveFeedCommand::RefreshAvatarProfile { avatar_id, tab });
+        }
+    }
+
     fn startup_status_line(&self) -> String {
         match &self.startup_status {
-            LiveStartupStatus::DisabledByConfig => String::from("disabled (VIEWER_APP_LIVE_STARTUP=off)"),
+            LiveStartupStatus::DisabledByConfig => {
+                String::from("disabled (VIEWER_APP_LIVE_STARTUP=off)")
+            }
             LiveStartupStatus::DisabledMissingConfig => {
                 String::from("disabled (missing login env); using fallback snapshot path")
             }
@@ -196,6 +368,13 @@ impl LiveVisualState {
             LiveStartupStatus::Failed(reason) => format!("failed ({reason})"),
         }
     }
+}
+
+fn load_dotenv_file() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = dotenv();
+    });
 }
 
 fn in_process_live_feed_config_from_lookup<F>(lookup: F) -> Option<InProcessLiveFeedConfig>
@@ -229,14 +408,54 @@ where
     let post_movement_tail_packets = lookup("VIEWER_FIRST_SIM_POST_MOVEMENT_TAIL_PACKETS")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4);
-    let post_movement_timeout_secs = lookup("VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS")
-        .and_then(|v| v.parse::<u64>().ok());
+    let post_movement_timeout_secs =
+        lookup("VIEWER_FIRST_SIM_POST_MOVEMENT_TIMEOUT_SECS").and_then(|v| v.parse::<u64>().ok());
     let stop_on_region_control = lookup("VIEWER_FIRST_SIM_STOP_ON_REGION_CONTROL")
         .map(|v| parse_bool_like(&v))
         .unwrap_or(false);
     let run_probe = lookup("VIEWER_APP_IN_PROCESS_PROBE")
         .map(|v| parse_bool_like(&v))
         .unwrap_or(true);
+    let worker_tick_ms = lookup("VIEWER_APP_WORKER_TICK_MS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60)
+        .max(10);
+    let event_queue_poll_timeout_ms = lookup("VIEWER_APP_EVENT_QUEUE_POLL_TIMEOUT_MS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(45_000)
+        .max(100);
+    let event_queue_poll_every_ticks = lookup("VIEWER_APP_EVENT_QUEUE_POLL_EVERY_TICKS")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(10)
+        .max(1);
+    let event_queue_failures_before_reconnect =
+        lookup("VIEWER_APP_EVENT_QUEUE_FAILURES_BEFORE_RECONNECT")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+    let social_poll_timeout_ms = lookup("VIEWER_APP_SOCIAL_POLL_TIMEOUT_MS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(35)
+        .max(5);
+    let social_poll_max_packets = lookup("VIEWER_APP_SOCIAL_POLL_MAX_PACKETS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4);
+    let nearby_poll_timeout_ms = lookup("VIEWER_APP_NEARBY_POLL_TIMEOUT_MS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(40)
+        .max(5);
+    let nearby_poll_max_packets = lookup("VIEWER_APP_NEARBY_POLL_MAX_PACKETS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2);
+    let nearby_send_receive_timeout_ms = lookup("VIEWER_APP_NEARBY_SEND_RECEIVE_TIMEOUT_MS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(40)
+        .max(5);
+    let nearby_send_receive_packets = lookup("VIEWER_APP_NEARBY_SEND_RECEIVE_PACKETS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let profile_cache_ttl_secs = lookup("VIEWER_APP_PROFILE_CACHE_TTL_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(120);
 
     Some(InProcessLiveFeedConfig {
         endpoint,
@@ -252,16 +471,22 @@ where
         post_movement_timeout_secs,
         stop_on_region_control,
         run_probe,
+        worker_tick_ms,
+        event_queue_poll_timeout_ms,
+        event_queue_poll_every_ticks,
+        event_queue_failures_before_reconnect,
+        social_poll_timeout_ms,
+        social_poll_max_packets,
+        nearby_poll_timeout_ms,
+        nearby_poll_max_packets,
+        nearby_send_receive_timeout_ms,
+        nearby_send_receive_packets,
+        profile_cache_ttl_secs,
     })
 }
 
 fn parse_live_startup_mode(value: Option<&str>) -> LiveStartupMode {
-    match value
-        .unwrap_or("auto")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
         "on" | "enabled" | "true" | "1" => LiveStartupMode::On,
         "off" | "disabled" | "false" | "0" => LiveStartupMode::Off,
         _ => LiveStartupMode::Auto,
@@ -315,8 +540,11 @@ where
     }
 }
 
-fn spawn_in_process_live_feed(config: InProcessLiveFeedConfig) -> Receiver<LiveFeedUpdate> {
-    let (tx, rx) = mpsc::channel::<LiveFeedUpdate>();
+fn spawn_in_process_live_feed(
+    config: InProcessLiveFeedConfig,
+) -> (Sender<LiveFeedCommand>, Receiver<LiveFeedUpdate>) {
+    let (update_tx, update_rx) = mpsc::channel::<LiveFeedUpdate>();
+    let (command_tx, command_rx) = mpsc::channel::<LiveFeedCommand>();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -325,18 +553,994 @@ fn spawn_in_process_live_feed(config: InProcessLiveFeedConfig) -> Receiver<LiveF
             return;
         };
         runtime.block_on(async move {
-            run_in_process_live_feed(config, tx).await;
+            run_in_process_live_feed(config, update_tx, command_rx).await;
         });
     });
-    rx
+    (command_tx, update_rx)
 }
 
 async fn run_in_process_live_feed(
     config: InProcessLiveFeedConfig,
     tx: mpsc::Sender<LiveFeedUpdate>,
+    command_rx: Receiver<LiveFeedCommand>,
 ) {
+    let adapter = SecondLifeAdapter;
+    let mut reconnect_attempt: u32 = 0;
+
     let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Starting));
-    let _ = tx.send(LiveFeedUpdate::Snapshot(LiveVisualSnapshot {
+    let _ = tx.send(LiveFeedUpdate::ChatConnection(
+        ChatConnectionState::Connecting,
+    ));
+    let _ = tx.send(LiveFeedUpdate::Snapshot(offline_snapshot()));
+    emit_relay(
+        &tx,
+        RuntimeRelayLevel::Info,
+        "startup",
+        "live worker starting",
+    );
+
+    loop {
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: config.endpoint.clone(),
+            connect_timeout: std::time::Duration::from_secs(config.connect_timeout_secs),
+            wire_format: config.wire_format,
+        });
+
+        let connect_state = if reconnect_attempt == 0 {
+            ChatConnectionState::Connecting
+        } else {
+            ChatConnectionState::Reconnecting
+        };
+        let _ = tx.send(LiveFeedUpdate::ChatConnection(connect_state));
+        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Starting));
+
+        if connection.connect().await.is_err() {
+            let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
+                String::from("connect failed"),
+            )));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
+                String::from("connect failed"),
+            )));
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            emit_relay(&tx, RuntimeRelayLevel::Warn, "connect", "connect failed");
+            tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
+            continue;
+        }
+
+        let intent = LoginIntent {
+            username: config.username.clone(),
+            password: config.password.clone(),
+            start_location: config.start_location.clone(),
+            agree_to_tos: false,
+            read_critical: true,
+            mfa_token: None,
+        };
+
+        let Ok((result, _trace)) = connection.login_with_trace(&adapter, intent).await else {
+            let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
+                String::from("login request failed"),
+            )));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
+                String::from("login request failed"),
+            )));
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            emit_relay(
+                &tx,
+                RuntimeRelayLevel::Warn,
+                "login",
+                "login request failed",
+            );
+            tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
+            continue;
+        };
+
+        let mut snapshot = build_live_visual_snapshot_from_result(&result);
+        let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
+        if !snapshot.logged_in {
+            let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
+                String::from("login not successful"),
+            )));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
+                String::from("login not successful"),
+            )));
+            reconnect_attempt = reconnect_attempt.saturating_add(1);
+            emit_relay(
+                &tx,
+                RuntimeRelayLevel::Warn,
+                "login",
+                "login not successful",
+            );
+            tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
+            continue;
+        }
+        emit_relay(&tx, RuntimeRelayLevel::Info, "login", "login successful");
+
+        let mut local_agent_id = String::new();
+        let mut bootstrap_friends = Vec::new();
+        let mut startup_sim_name: Option<String> = None;
+        if let GridLoginResult::Success(bootstrap) = &result {
+            local_agent_id = bootstrap.agent_id.clone();
+            startup_sim_name = bootstrap
+                .start_location
+                .as_deref()
+                .and_then(parse_region_name_from_start_location);
+            bootstrap_friends = bootstrap
+                .buddy_list
+                .iter()
+                .filter(|friend| !friend.buddy_id.is_empty())
+                .map(|friend| FriendEntry {
+                    id: friend.buddy_id.clone(),
+                    display_name: None,
+                    name_source: None,
+                    last_name_resolved_unix_ms: None,
+                    online: false,
+                    rights_has: friend.rights_has,
+                    rights_given: friend.rights_given,
+                    last_changed_unix_ms: now_unix_ms(),
+                })
+                .collect();
+        }
+        let bootstrap_friend_ids: Vec<String> =
+            bootstrap_friends.iter().map(|f| f.id.clone()).collect();
+        let bootstrap_friend_id_set: BTreeSet<String> =
+            bootstrap_friend_ids.iter().cloned().collect();
+        if !bootstrap_friends.is_empty() {
+            let _ = tx.send(LiveFeedUpdate::FriendsBootstrap(bootstrap_friends));
+        }
+
+        if config.run_probe && matches!(result, GridLoginResult::Success(_)) {
+            let _ = connection
+                .probe_first_simulator_handshake_window_with_policy(
+                    &config.receive_bind,
+                    std::time::Duration::from_secs(config.receive_timeout_secs),
+                    config.receive_max_packets,
+                    config.post_movement_tail_packets,
+                    config
+                        .post_movement_timeout_secs
+                        .map(std::time::Duration::from_secs),
+                    config.stop_on_region_control,
+                )
+                .await;
+        }
+
+        let capabilities = connection.fetch_seed_capabilities().await.ok();
+        let event_queue_url = capabilities
+            .as_ref()
+            .and_then(|caps| caps.entries.get("EventQueueGet"))
+            .cloned();
+        let display_names_url = capabilities
+            .as_ref()
+            .and_then(|caps| caps.entries.get("GetDisplayNames"))
+            .cloned();
+        let agent_profile_url = capabilities
+            .as_ref()
+            .and_then(|caps| caps.entries.get("AgentProfile"))
+            .cloned();
+        let image_cap_url = capabilities
+            .as_ref()
+            .and_then(|caps| {
+                caps.entries
+                    .get("GetTexture")
+                    .or_else(|| caps.entries.get("ViewerAsset"))
+            })
+            .cloned();
+        if !bootstrap_friend_ids.is_empty() {
+            let mut resolved_count = 0usize;
+            if let Some(url) = display_names_url.as_deref() {
+                match connection
+                    .resolve_avatar_display_names(url, &bootstrap_friend_ids)
+                    .await
+                {
+                    Ok(names) => {
+                        resolved_count = names.len();
+                        for entry in names {
+                            let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                id: entry.id,
+                                display_name: entry.display_name,
+                                source: String::from("caps.GetDisplayNames"),
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Warn,
+                            "friend_name",
+                            &format!("display name lookup failed: {err}"),
+                        );
+                    }
+                }
+            }
+            if resolved_count == 0 {
+                if let Some(profile_url) = agent_profile_url.as_deref() {
+                    let mut profile_count = 0usize;
+                    for id in &bootstrap_friend_ids {
+                        if let Ok(profile) = connection.fetch_agent_profile(profile_url, id).await {
+                            if let Some(display_name) = pick_best_avatar_name(&profile) {
+                                profile_count = profile_count.saturating_add(1);
+                                let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                    id: id.clone(),
+                                    display_name,
+                                    source: String::from("caps.AgentProfile"),
+                                });
+                            }
+                        }
+                    }
+                    emit_relay(
+                        &tx,
+                        RuntimeRelayLevel::Info,
+                        "friend_name",
+                        &format!(
+                            "resolved {} friend names (fallback AgentProfile)",
+                            profile_count
+                        ),
+                    );
+                } else if display_names_url.is_none() {
+                    emit_relay(
+                        &tx,
+                        RuntimeRelayLevel::Warn,
+                        "friend_name",
+                        "name capabilities unavailable (GetDisplayNames + AgentProfile)",
+                    );
+                }
+            } else {
+                emit_relay(
+                    &tx,
+                    RuntimeRelayLevel::Info,
+                    "friend_name",
+                    &format!("resolved {} friend names", resolved_count),
+                );
+            }
+        }
+        let mut event_ack = 0u64;
+        let mut attempted_profile_image_assets = BTreeSet::new();
+        let mut known_avatar_name_ids = BTreeSet::new();
+        known_avatar_name_ids.extend(bootstrap_friend_ids.iter().cloned());
+        if !local_agent_id.is_empty() {
+            known_avatar_name_ids.insert(local_agent_id.clone());
+        }
+        let mut social_circuit: Option<SocialCircuit> = connection
+            .open_social_circuit(&config.receive_bind)
+            .await
+            .ok();
+        if let Some(circuit) = &social_circuit {
+            let _ = connection.send_retrieve_instant_messages(circuit).await;
+        } else {
+            emit_relay(
+                &tx,
+                RuntimeRelayLevel::Warn,
+                "social",
+                "social circuit unavailable",
+            );
+        }
+
+        update_live_visual_from_connection(&mut snapshot, &connection);
+        snapshot.source = String::from("viewer_app_in_process:ready");
+        let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
+        let _ = tx.send(LiveFeedUpdate::WorldAvatars {
+            avatars: extract_worker_world_avatar_samples(&connection, &local_agent_id),
+            sim_name: extract_worker_world_sim_name(&connection)
+                .or_else(|| startup_sim_name.clone()),
+            self_location: extract_worker_self_location(&connection),
+            observed_at_unix_ms: now_unix_ms(),
+        });
+        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Connected));
+        let _ = tx.send(LiveFeedUpdate::ChatConnection(
+            ChatConnectionState::Connected,
+        ));
+        reconnect_attempt = 0;
+
+        let mut should_reconnect = false;
+        let mut event_queue_consecutive_failures = 0u32;
+        let mut worker_tick: u64 = 0;
+        let mut event_queue_poll_task = None;
+        loop {
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    LiveFeedCommand::SendChat {
+                        text,
+                        queued_at_unix_ms,
+                    } => {
+                        let send_started_at = now_unix_ms();
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "send_latency",
+                            &format!(
+                                "nearby queued_ms={}",
+                                send_started_at.saturating_sub(queued_at_unix_ms)
+                            ),
+                        );
+                        let _ = tx.send(LiveFeedUpdate::ChatSendStatus(ChatSendStatus::Sending));
+                        match send_nearby_chat_with_caps(
+                            &mut connection,
+                            &text,
+                            &config.receive_bind,
+                            std::time::Duration::from_millis(config.nearby_send_receive_timeout_ms),
+                            config.nearby_send_receive_packets,
+                        )
+                        .await
+                        {
+                            Ok(received) => {
+                                let sent_at = now_unix_ms();
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "send_latency",
+                                    &format!(
+                                        "nearby send_ms={}",
+                                        sent_at.saturating_sub(send_started_at)
+                                    ),
+                                );
+                                let _ =
+                                    tx.send(LiveFeedUpdate::ChatSendStatus(ChatSendStatus::Sent));
+                                for chat in received {
+                                    let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
+                                        id: now_unix_ms(),
+                                        observed_at_unix_ms: now_unix_ms(),
+                                        sender: chat.sender,
+                                        text: chat.text,
+                                        source: chat.source,
+                                    }));
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(LiveFeedUpdate::ChatSendStatus(
+                                    ChatSendStatus::Failed(err.to_string()),
+                                ));
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "send_latency",
+                                    &format!(
+                                        "nearby send failed after {} ms: {err}",
+                                        now_unix_ms().saturating_sub(send_started_at)
+                                    ),
+                                );
+                                if matches!(
+                                    err,
+                                    ConnectionError::InvalidState(_)
+                                        | ConnectionError::FirstSimulatorHandshakeSendFailed { .. }
+                                ) {
+                                    should_reconnect = true;
+                                }
+                            }
+                        }
+                    }
+                    LiveFeedCommand::SendDirectIm {
+                        to_agent_id,
+                        text,
+                        queued_at_unix_ms,
+                    } => {
+                        let send_started_at = now_unix_ms();
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "send_latency",
+                            &format!(
+                                "direct_im queued_ms={}",
+                                send_started_at.saturating_sub(queued_at_unix_ms)
+                            ),
+                        );
+                        let Some(circuit) = &social_circuit else {
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "im_send",
+                                "social circuit unavailable",
+                            );
+                            continue;
+                        };
+                        let Some(session_id) =
+                            compute_p2p_session_id(&local_agent_id, &to_agent_id)
+                        else {
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "im_send",
+                                "invalid agent ids for p2p session id",
+                            );
+                            continue;
+                        };
+                        let from_name = config.username.clone();
+                        match connection
+                            .send_direct_im(circuit, &to_agent_id, &session_id, &from_name, &text)
+                            .await
+                        {
+                            Ok(()) => {
+                                let sent_at = now_unix_ms();
+                                let _ = tx.send(LiveFeedUpdate::DirectIm(DirectImMessage {
+                                    id: now_unix_ms(),
+                                    session_id: session_id.clone(),
+                                    peer_id: to_agent_id.clone(),
+                                    from_id: local_agent_id.clone(),
+                                    from_name: String::from("You"),
+                                    text: text.clone(),
+                                    observed_at_unix_ms: now_unix_ms(),
+                                    outgoing: true,
+                                }));
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "im_send",
+                                    &format!("im sent to {}", to_agent_id),
+                                );
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "send_latency",
+                                    &format!(
+                                        "direct_im send_ms={}",
+                                        sent_at.saturating_sub(send_started_at)
+                                    ),
+                                );
+                            }
+                            Err(err) => {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "im_send",
+                                    &format!("im send failed: {err}"),
+                                );
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "send_latency",
+                                    &format!(
+                                        "direct_im send failed after {} ms: {err}",
+                                        now_unix_ms().saturating_sub(send_started_at)
+                                    ),
+                                );
+                                if matches!(
+                                    err,
+                                    ConnectionError::InvalidState(_)
+                                        | ConnectionError::FirstSimulatorHandshakeSendFailed { .. }
+                                ) {
+                                    should_reconnect = true;
+                                }
+                            }
+                        }
+                    }
+                    LiveFeedCommand::OpenAvatarProfile { avatar_id } => {
+                        let avatar_id = avatar_id.trim().to_ascii_lowercase();
+                        if avatar_id.is_empty() {
+                            continue;
+                        }
+                        let _ = tx.send(LiveFeedUpdate::ProfileOpenRequested {
+                            avatar_id: avatar_id.clone(),
+                        });
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "profile_open",
+                            &format!("open {}", avatar_id),
+                        );
+                        let tab = AvatarProfileTab::SecondLife;
+                        let _ = tx.send(LiveFeedUpdate::ProfileTabLoadStarted {
+                            avatar_id: avatar_id.clone(),
+                            tab,
+                        });
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "profile_tab_load_start",
+                            &format!("{avatar_id} {tab:?}"),
+                        );
+                        match fetch_profile_tab_data(
+                            &mut connection,
+                            agent_profile_url.as_deref(),
+                            &avatar_id,
+                            &config.receive_bind,
+                            tab,
+                        )
+                        .await
+                        {
+                            Ok(profile) => {
+                                let profile_for_images = profile.clone();
+                                let _ = tx.send(LiveFeedUpdate::ProfileData {
+                                    avatar_id: avatar_id.clone(),
+                                    profile,
+                                    requested_tab: tab,
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "profile_tab_load_success",
+                                    &format!("{avatar_id} {tab:?}"),
+                                );
+                                load_profile_images_for_payload(
+                                    &mut connection,
+                                    &tx,
+                                    image_cap_url.as_deref(),
+                                    &mut attempted_profile_image_assets,
+                                    profile_for_images,
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                let _ = tx.send(LiveFeedUpdate::ProfileTabLoadFailed {
+                                    avatar_id: avatar_id.clone(),
+                                    tab,
+                                    reason: err.to_string(),
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "profile_fallback_path",
+                                    &format!("{avatar_id} {tab:?}: {err}"),
+                                );
+                            }
+                        }
+                    }
+                    LiveFeedCommand::SelectProfileTab { avatar_id, tab } => {
+                        let avatar_id = avatar_id.trim().to_ascii_lowercase();
+                        if avatar_id.is_empty() {
+                            continue;
+                        }
+                        let _ = tx.send(LiveFeedUpdate::ProfileTabLoadStarted {
+                            avatar_id: avatar_id.clone(),
+                            tab,
+                        });
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "profile_tab_load_start",
+                            &format!("{avatar_id} {tab:?}"),
+                        );
+                        match fetch_profile_tab_data(
+                            &mut connection,
+                            agent_profile_url.as_deref(),
+                            &avatar_id,
+                            &config.receive_bind,
+                            tab,
+                        )
+                        .await
+                        {
+                            Ok(profile) => {
+                                let profile_for_images = profile.clone();
+                                let _ = tx.send(LiveFeedUpdate::ProfileData {
+                                    avatar_id: avatar_id.clone(),
+                                    profile,
+                                    requested_tab: tab,
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "profile_tab_load_success",
+                                    &format!("{avatar_id} {tab:?}"),
+                                );
+                                load_profile_images_for_payload(
+                                    &mut connection,
+                                    &tx,
+                                    image_cap_url.as_deref(),
+                                    &mut attempted_profile_image_assets,
+                                    profile_for_images,
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                let _ = tx.send(LiveFeedUpdate::ProfileTabLoadFailed {
+                                    avatar_id: avatar_id.clone(),
+                                    tab,
+                                    reason: err.to_string(),
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "profile_fallback_path",
+                                    &format!("{avatar_id} {tab:?}: {err}"),
+                                );
+                            }
+                        }
+                    }
+                    LiveFeedCommand::RefreshAvatarProfile { avatar_id, tab } => {
+                        let avatar_id = avatar_id.trim().to_ascii_lowercase();
+                        if avatar_id.is_empty() {
+                            continue;
+                        }
+                        let requested_tab = tab.unwrap_or(AvatarProfileTab::SecondLife);
+                        let _ = tx.send(LiveFeedUpdate::ProfileTabLoadStarted {
+                            avatar_id: avatar_id.clone(),
+                            tab: requested_tab,
+                        });
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "profile_tab_load_start",
+                            &format!("{avatar_id} {requested_tab:?}"),
+                        );
+                        match fetch_profile_tab_data(
+                            &mut connection,
+                            agent_profile_url.as_deref(),
+                            &avatar_id,
+                            &config.receive_bind,
+                            requested_tab,
+                        )
+                        .await
+                        {
+                            Ok(profile) => {
+                                let profile_for_images = profile.clone();
+                                let _ = tx.send(LiveFeedUpdate::ProfileData {
+                                    avatar_id: avatar_id.clone(),
+                                    profile,
+                                    requested_tab,
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "profile_tab_load_success",
+                                    &format!("{avatar_id} {requested_tab:?}"),
+                                );
+                                load_profile_images_for_payload(
+                                    &mut connection,
+                                    &tx,
+                                    image_cap_url.as_deref(),
+                                    &mut attempted_profile_image_assets,
+                                    profile_for_images,
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                let _ = tx.send(LiveFeedUpdate::ProfileTabLoadFailed {
+                                    avatar_id: avatar_id.clone(),
+                                    tab: requested_tab,
+                                    reason: err.to_string(),
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "profile_fallback_path",
+                                    &format!("{avatar_id} {requested_tab:?}: {err}"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(circuit) = &social_circuit {
+                match connection
+                    .poll_social_events(
+                        circuit,
+                        std::time::Duration::from_millis(config.social_poll_timeout_ms),
+                        config.social_poll_max_packets,
+                    )
+                    .await
+                {
+                    Ok(events) => {
+                        for event in events {
+                            match event {
+                                SocialEvent::FriendOnline { agent_id } => {
+                                    let _ = tx.send(LiveFeedUpdate::FriendPresence {
+                                        id: agent_id.clone(),
+                                        online: true,
+                                    });
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Info,
+                                        "friend",
+                                        &format!("{agent_id} online"),
+                                    );
+                                }
+                                SocialEvent::FriendOffline { agent_id } => {
+                                    let _ = tx.send(LiveFeedUpdate::FriendPresence {
+                                        id: agent_id.clone(),
+                                        online: false,
+                                    });
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Info,
+                                        "friend",
+                                        &format!("{agent_id} offline"),
+                                    );
+                                }
+                                SocialEvent::FriendRights {
+                                    agent_id,
+                                    related_id,
+                                    rights,
+                                } => {
+                                    if related_id == local_agent_id {
+                                        let _ = tx.send(LiveFeedUpdate::FriendRights {
+                                            id: agent_id.clone(),
+                                            rights_has: rights,
+                                            rights_given: 0,
+                                        });
+                                    } else if agent_id == local_agent_id {
+                                        let _ = tx.send(LiveFeedUpdate::FriendRights {
+                                            id: related_id.clone(),
+                                            rights_has: 0,
+                                            rights_given: rights,
+                                        });
+                                    }
+                                }
+                                SocialEvent::DirectIm(im) => {
+                                    let participant_id = if im.from_id == local_agent_id {
+                                        im.to_id.clone()
+                                    } else {
+                                        im.from_id.clone()
+                                    };
+                                    if !im.from_name.trim().is_empty() && !participant_id.is_empty()
+                                    {
+                                        let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                            id: participant_id.clone(),
+                                            display_name: im.from_name.clone(),
+                                            source: String::from("im.from_name"),
+                                        });
+                                    }
+                                    let session_id = if !im.session_id.is_empty() {
+                                        im.session_id.clone()
+                                    } else {
+                                        compute_p2p_session_id(&local_agent_id, &participant_id)
+                                            .unwrap_or_default()
+                                    };
+                                    let _ = tx.send(LiveFeedUpdate::DirectIm(DirectImMessage {
+                                        id: now_unix_ms(),
+                                        session_id,
+                                        peer_id: participant_id.clone(),
+                                        from_id: im.from_id.clone(),
+                                        from_name: if im.from_name.is_empty() {
+                                            im.from_id.clone()
+                                        } else {
+                                            im.from_name.clone()
+                                        },
+                                        text: im.message.clone(),
+                                        observed_at_unix_ms: now_unix_ms(),
+                                        outgoing: im.from_id == local_agent_id,
+                                    }));
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Info,
+                                        "im_recv",
+                                        &format!("im from {}", im.from_id),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Warn,
+                            "social",
+                            &format!("social poll failed: {err}"),
+                        );
+                        social_circuit = connection
+                            .open_social_circuit(&config.receive_bind)
+                            .await
+                            .ok();
+                        if social_circuit.is_none() {
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "social",
+                                "social circuit reopen failed; reconnecting",
+                            );
+                            should_reconnect = true;
+                        }
+                    }
+                }
+            }
+
+            if let Ok(received) = connection
+                .poll_nearby_chat_udp(
+                    &config.receive_bind,
+                    std::time::Duration::from_millis(config.nearby_poll_timeout_ms),
+                    config.nearby_poll_max_packets,
+                )
+                .await
+            {
+                for chat in received {
+                    let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
+                        id: now_unix_ms(),
+                        observed_at_unix_ms: now_unix_ms(),
+                        sender: chat.sender,
+                        text: chat.text,
+                        source: chat.source,
+                    }));
+                }
+            }
+
+            if let Some(url) = event_queue_url.as_deref() {
+                if event_queue_poll_task.is_none()
+                    && worker_tick % u64::from(config.event_queue_poll_every_ticks) == 0
+                {
+                    let url = url.to_string();
+                    let ack = event_ack;
+                    let timeout =
+                        std::time::Duration::from_millis(config.event_queue_poll_timeout_ms);
+                    event_queue_poll_task = Some(tokio::spawn(async move {
+                        poll_event_queue_url_once(&url, ack, timeout).await
+                    }));
+                }
+                let task_finished = event_queue_poll_task
+                    .as_ref()
+                    .map(|task| task.is_finished())
+                    .unwrap_or(false);
+                if task_finished {
+                    if let Some(task) = event_queue_poll_task.take() {
+                        match task.await {
+                            Ok(Ok(poll)) => {
+                                event_queue_consecutive_failures = 0;
+                                if let Some(next_ack) = poll.id {
+                                    event_ack = next_ack;
+                                }
+                                for message in connection.extract_nearby_chat_messages(&poll) {
+                                    let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
+                                        id: now_unix_ms(),
+                                        observed_at_unix_ms: now_unix_ms(),
+                                        sender: message.sender,
+                                        text: message.text,
+                                        source: message.source,
+                                    }));
+                                }
+                            }
+                            Ok(Err(err)) => {
+                                event_queue_consecutive_failures =
+                                    event_queue_consecutive_failures.saturating_add(1);
+                                let should_log = event_queue_consecutive_failures == 1
+                                    || event_queue_consecutive_failures % 10 == 0;
+                                if should_log {
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Warn,
+                                        "event_queue",
+                                        &format!(
+                                            "event queue polling failed (count={}): {err}",
+                                            event_queue_consecutive_failures
+                                        ),
+                                    );
+                                }
+                                if config.event_queue_failures_before_reconnect > 0
+                                    && event_queue_consecutive_failures
+                                        >= config.event_queue_failures_before_reconnect
+                                {
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Warn,
+                                        "event_queue",
+                                        &format!(
+                                            "event queue failure threshold reached ({}); reconnecting",
+                                            config.event_queue_failures_before_reconnect
+                                        ),
+                                    );
+                                    should_reconnect = true;
+                                }
+                            }
+                            Err(join_err) => {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "event_queue",
+                                    &format!("event queue task failed: {join_err}"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            if should_reconnect {
+                let _ = tx.send(LiveFeedUpdate::ChatConnection(
+                    ChatConnectionState::Reconnecting,
+                ));
+                let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
+                    String::from("connection lost; reconnecting"),
+                )));
+                emit_relay(
+                    &tx,
+                    RuntimeRelayLevel::Warn,
+                    "reconnect",
+                    "connection lost; reconnecting",
+                );
+                break;
+            }
+            update_live_visual_from_connection(&mut snapshot, &connection);
+            snapshot.source = String::from("viewer_app_in_process:ready");
+            let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
+            let avatar_samples = extract_worker_world_avatar_samples(&connection, &local_agent_id);
+            let _ = tx.send(LiveFeedUpdate::WorldAvatars {
+                avatars: avatar_samples.clone(),
+                sim_name: extract_worker_world_sim_name(&connection)
+                    .or_else(|| startup_sim_name.clone()),
+                self_location: extract_worker_self_location(&connection),
+                observed_at_unix_ms: now_unix_ms(),
+            });
+            if worker_tick % 40 == 0 {
+                let unresolved_ids: Vec<String> = avatar_samples
+                    .iter()
+                    .filter_map(|sample| sample.agent_id.clone())
+                    .filter(|id| id != &local_agent_id && !known_avatar_name_ids.contains(id))
+                    .collect();
+                if !unresolved_ids.is_empty() {
+                    let mut resolved_any = false;
+                    if let Some(url) = display_names_url.as_deref() {
+                        match connection
+                            .resolve_avatar_display_names(url, &unresolved_ids)
+                            .await
+                        {
+                            Ok(names) => {
+                                if !names.is_empty() {
+                                    resolved_any = true;
+                                }
+                                for entry in names {
+                                    known_avatar_name_ids.insert(entry.id.clone());
+                                    if bootstrap_friend_id_set.contains(&entry.id) {
+                                        let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                            id: entry.id,
+                                            display_name: entry.display_name,
+                                            source: String::from("caps.GetDisplayNames"),
+                                        });
+                                    } else {
+                                        let _ = tx.send(LiveFeedUpdate::AvatarResolvedName {
+                                            id: entry.id,
+                                            display_name: entry.display_name,
+                                            source: String::from("caps.GetDisplayNames"),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "avatar_name",
+                                    &format!("display name lookup failed: {err}"),
+                                );
+                            }
+                        }
+                    }
+                    if !resolved_any {
+                        if let Some(profile_url) = agent_profile_url.as_deref() {
+                            let mut profile_resolved = 0usize;
+                            for id in &unresolved_ids {
+                                if let Ok(profile) =
+                                    connection.fetch_agent_profile(profile_url, id).await
+                                {
+                                    if let Some(display_name) = pick_best_avatar_name(&profile) {
+                                        profile_resolved = profile_resolved.saturating_add(1);
+                                        known_avatar_name_ids.insert(id.clone());
+                                        if bootstrap_friend_id_set.contains(id) {
+                                            let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                                id: id.clone(),
+                                                display_name,
+                                                source: String::from("caps.AgentProfile"),
+                                            });
+                                        } else {
+                                            let _ = tx.send(LiveFeedUpdate::AvatarResolvedName {
+                                                id: id.clone(),
+                                                display_name,
+                                                source: String::from("caps.AgentProfile"),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            if profile_resolved > 0 {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "avatar_name",
+                                    &format!(
+                                        "resolved {} avatar names (fallback AgentProfile)",
+                                        profile_resolved
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            worker_tick = worker_tick.saturating_add(1);
+            tokio::time::sleep(std::time::Duration::from_millis(config.worker_tick_ms)).await;
+        }
+
+        reconnect_attempt = reconnect_attempt.saturating_add(1);
+        tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
+    }
+}
+
+fn offline_snapshot() -> LiveVisualSnapshot {
+    LiveVisualSnapshot {
         source: String::from("viewer_app_in_process:start"),
         logged_in: false,
         first_sim_endpoint: None,
@@ -367,64 +1571,190 @@ async fn run_in_process_live_feed(
         decoded_viewer_time_body_len: None,
         decoded_viewer_time_signature: None,
         observed_at_unix_ms: now_unix_ms(),
-    }));
+    }
+}
 
-    let mut connection = Connection::new(ConnectionConfig {
-        endpoint: config.endpoint.clone(),
-        connect_timeout: std::time::Duration::from_secs(config.connect_timeout_secs),
-        wire_format: config.wire_format,
-    });
-    let adapter = SecondLifeAdapter;
+fn reconnect_backoff_duration(attempt: u32) -> std::time::Duration {
+    let capped = attempt.min(6);
+    let base_ms = 500u64.saturating_mul(1u64 << capped);
+    let jitter_ms = u64::from(now_unix_ms() as u32 % 350);
+    std::time::Duration::from_millis((base_ms + jitter_ms).min(15_000))
+}
 
-    if connection.connect().await.is_err() {
-        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(String::from(
-            "connect failed",
-        ))));
-        return;
+async fn send_nearby_chat_with_caps(
+    connection: &mut Connection,
+    text: &str,
+    bind: &str,
+    receive_timeout: std::time::Duration,
+    receive_max_packets: usize,
+) -> std::result::Result<Vec<NearbyChatMessage>, ConnectionError> {
+    connection
+        .send_nearby_chat(text, bind, receive_timeout, receive_max_packets)
+        .await
+}
+
+async fn fetch_profile_tab_data(
+    connection: &mut Connection,
+    agent_profile_url: Option<&str>,
+    avatar_id: &str,
+    receive_bind: &str,
+    tab: AvatarProfileTab,
+) -> std::result::Result<AgentProfileData, ConnectionError> {
+    let mut profile = AgentProfileData {
+        id: avatar_id.to_string(),
+        ..AgentProfileData::default()
+    };
+    let mut any_success = false;
+    let mut first_error: Option<ConnectionError> = None;
+
+    if let Some(cap_url) = agent_profile_url {
+        match connection.fetch_agent_profile(cap_url, avatar_id).await {
+            Ok(mut cap_profile) => {
+                if cap_profile
+                    .profile_url
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    cap_profile.profile_url =
+                        connection.derive_profile_feed_url(&cap_profile, Some(cap_url));
+                }
+                merge_profile_payload(&mut profile, cap_profile);
+                any_success = true;
+            }
+            Err(err) => {
+                first_error = Some(err);
+            }
+        }
     }
 
-    let intent = LoginIntent {
-        username: config.username.clone(),
-        password: config.password.clone(),
-        start_location: config.start_location.clone(),
-        agree_to_tos: false,
-        read_critical: true,
-        mfa_token: None,
-    };
-
-    let Ok((result, _trace)) = connection.login_with_trace(&adapter, intent).await else {
-        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(String::from(
-            "login request failed",
-        ))));
-        return;
-    };
-    let mut snapshot = build_live_visual_snapshot_from_result(&result);
-    let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
-    if !snapshot.logged_in {
-        let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(String::from(
-            "login not successful",
-        ))));
-        return;
-    }
-
-    if config.run_probe && matches!(result, GridLoginResult::Success(_)) {
-        let _ = connection
-            .probe_first_simulator_handshake_window_with_policy(
-                &config.receive_bind,
-                std::time::Duration::from_secs(config.receive_timeout_secs),
-                config.receive_max_packets,
-                config.post_movement_tail_packets,
-                config.post_movement_timeout_secs
-                    .map(std::time::Duration::from_secs),
-                config.stop_on_region_control,
+    if let Ok(legacy_circuit) = connection.open_social_circuit(receive_bind).await {
+        match connection
+            .fetch_agent_profile_legacy(
+                &legacy_circuit,
+                avatar_id,
+                std::time::Duration::from_millis(150),
+                256,
             )
-            .await;
+            .await
+        {
+            Ok(legacy_profile) => {
+                merge_profile_payload(&mut profile, legacy_profile);
+                any_success = true;
+            }
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+    } else if !any_success && first_error.is_none() {
+        first_error = Some(ConnectionError::FirstSimulatorHandshakeNotInitialized);
+    }
+    if profile
+        .profile_url
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        profile.profile_url = Some(format!("legacy://profile/{avatar_id}"));
+    }
+    if any_success {
+        Ok(profile)
+    } else if let Some(err) = first_error {
+        Err(err)
+    } else {
+        let _ = tab;
+        Err(ConnectionError::CapabilityDecode(String::from(
+            "profile fetch failed",
+        )))
+    }
+}
+
+fn merge_profile_payload(target: &mut AgentProfileData, incoming: AgentProfileData) {
+    if target.id.is_empty() {
+        target.id = incoming.id;
+    }
+    if target.profile_url.is_none() {
+        target.profile_url = incoming.profile_url;
+    }
+    if target.sl_about_text.is_empty() {
+        target.sl_about_text = incoming.sl_about_text;
+    }
+    if target.fl_about_text.is_empty() {
+        target.fl_about_text = incoming.fl_about_text;
+    }
+    if target.notes.is_empty() {
+        target.notes = incoming.notes;
+    }
+    if target.sl_image_id.is_none() {
+        target.sl_image_id = incoming.sl_image_id;
+    }
+    if target.fl_image_id.is_none() {
+        target.fl_image_id = incoming.fl_image_id;
+    }
+    if target.partner_id.is_none() {
+        target.partner_id = incoming.partner_id;
+    }
+    if target.member_since.is_none() {
+        target.member_since = incoming.member_since;
+    }
+    if target.online.is_none() {
+        target.online = incoming.online;
+    }
+    if target.allow_publish.is_none() {
+        target.allow_publish = incoming.allow_publish;
+    }
+    if target.identified.is_none() {
+        target.identified = incoming.identified;
+    }
+    if target.transacted.is_none() {
+        target.transacted = incoming.transacted;
+    }
+    if target.display_name.is_none() {
+        target.display_name = incoming.display_name;
+    }
+    if target.username.is_none() {
+        target.username = incoming.username;
     }
 
-    update_live_visual_from_connection(&mut snapshot, &connection);
-    snapshot.source = String::from("viewer_app_in_process:ready");
-    let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot));
-    let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Connected));
+    for group in incoming.groups {
+        if target.groups.iter().all(|current| current.id != group.id) {
+            target.groups.push(group);
+        }
+    }
+    for pick in incoming.picks {
+        if target.picks.iter().all(|current| current.id != pick.id) {
+            target.picks.push(pick);
+        }
+    }
+    for details in incoming.pick_details {
+        if let Some(existing) = target.pick_details.iter_mut().find(|d| d.id == details.id) {
+            *existing = details;
+        } else {
+            target.pick_details.push(details);
+        }
+    }
+    for classified in incoming.classifieds {
+        if target
+            .classifieds
+            .iter()
+            .all(|current| current.id != classified.id)
+        {
+            target.classifieds.push(classified);
+        }
+    }
+    for details in incoming.classified_details {
+        if let Some(existing) = target
+            .classified_details
+            .iter_mut()
+            .find(|d| d.id == details.id)
+        {
+            *existing = details;
+        } else {
+            target.classified_details.push(details);
+        }
+    }
 }
 
 fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisualSnapshot {
@@ -542,11 +1872,553 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
+fn parse_region_name_from_start_location(value: &str) -> Option<String> {
+    let raw = value.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("last") || raw.eq_ignore_ascii_case("home") {
+        return None;
+    }
+    if let Some(pos) = raw.find("secondlife://") {
+        let tail = &raw[pos + "secondlife://".len()..];
+        let name = tail.split('/').next().unwrap_or("").trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    if let Some(pos) = raw.find("uri:") {
+        let tail = &raw[pos + 4..];
+        let name = tail.split('&').next().unwrap_or("").trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn pick_best_avatar_name(profile: &AgentProfileData) -> Option<String> {
+    if let Some(name) = profile.display_name.as_ref().map(|v| v.trim()) {
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    if let Some(name) = profile.username.as_ref().map(|v| v.trim()) {
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn coarse_xyz_to_world_position(
+    region_coords: Option<[u32; 2]>,
+    xyz: [u8; 3],
+    lane_offset: f32,
+) -> [f32; 3] {
+    let (rx, rz) = match region_coords {
+        Some([x, y]) => {
+            let ox = ((x % 256) as f32 / 255.0 - 0.5) * 4.0;
+            let oz = ((y % 256) as f32 / 255.0 - 0.5) * 4.0;
+            (3.0 + ox, oz - 1.95)
+        }
+        None => (3.0, -1.95),
+    };
+    let x = rx - 1.4 + (f32::from(xyz[0]) / 255.0) * 2.8 + lane_offset;
+    let z = rz - 1.2 + (f32::from(xyz[1]) / 255.0) * 2.4;
+    let y = 0.55 + (f32::from(xyz[2]) / 255.0) * 1.6;
+    [x, y, z]
+}
+
+fn uuid_short(value: &str) -> String {
+    value.chars().take(8).collect()
+}
+
+fn format_avatar_label(agent_id: &str, social_state: &SocialState) -> String {
+    if let Some(friend) = social_state.friends.iter().find(|f| f.id == agent_id) {
+        if let Some(name) = friend.display_name.as_deref() {
+            return format!("{name} ({})", uuid_short(agent_id));
+        }
+    }
+    uuid_short(agent_id)
+}
+
+fn format_avatar_label_with_cache(
+    agent_id: &str,
+    social_state: &SocialState,
+    avatar_name_cache: &BTreeMap<String, String>,
+) -> String {
+    if let Some(friend) = social_state.friends.iter().find(|f| f.id == agent_id) {
+        if let Some(name) = friend.display_name.as_deref() {
+            return format!("{name} ({})", uuid_short(agent_id));
+        }
+    }
+    if let Some(name) = avatar_name_cache.get(agent_id) {
+        return format!("{name} ({})", uuid_short(agent_id));
+    }
+    format_avatar_label(agent_id, social_state)
+}
+
+fn merge_world_avatar_samples(
+    current: &mut Vec<WorldAvatarPlaceholder>,
+    social_state: &SocialState,
+    avatar_name_cache: &BTreeMap<String, String>,
+    sim_name: Option<&str>,
+    samples: &[WorkerWorldAvatarSample],
+    region_coords: Option<[u32; 2]>,
+    observed_at_unix_ms: u64,
+    stale_after_ms: u64,
+) -> Vec<(String, String)> {
+    let mut relay_events = Vec::new();
+    for (idx, sample) in samples.iter().enumerate() {
+        let fallback_id = if sample.is_self {
+            String::from("self")
+        } else {
+            format!("coarse-{}", idx + 1)
+        };
+        let agent_id = sample.agent_id.clone().unwrap_or(fallback_id);
+        let world_position =
+            coarse_xyz_to_world_position(region_coords, sample.xyz, idx as f32 * 0.06);
+        let display_name = if sample.is_self {
+            String::from("You")
+        } else {
+            format_avatar_label_with_cache(&agent_id, social_state, avatar_name_cache)
+        };
+        if let Some(existing) = current
+            .iter_mut()
+            .find(|avatar| avatar.agent_id == agent_id)
+        {
+            let moved = existing.world_position != world_position || existing.stale;
+            let old_display = existing.display_name.clone();
+            existing.world_position = world_position;
+            existing.local_position = Some(sample.xyz);
+            existing.sim_name = sim_name.map(ToString::to_string);
+            existing.display_name = display_name.clone();
+            existing.is_self = sample.is_self;
+            existing.last_update_unix_ms = observed_at_unix_ms;
+            existing.stale = false;
+            if moved {
+                relay_events.push((String::from("avatar_updated"), format!("{agent_id} moved")));
+            }
+            if old_display != display_name {
+                relay_events.push((
+                    String::from("avatar_name_resolved"),
+                    format!("{agent_id} -> {display_name}"),
+                ));
+            }
+        } else {
+            current.push(WorldAvatarPlaceholder {
+                agent_id: agent_id.clone(),
+                world_position,
+                local_position: Some(sample.xyz),
+                sim_name: sim_name.map(ToString::to_string),
+                display_name: display_name.clone(),
+                is_self: sample.is_self,
+                last_update_unix_ms: observed_at_unix_ms,
+                stale: false,
+            });
+            relay_events.push((
+                String::from("avatar_seen"),
+                format!("{agent_id} {display_name}"),
+            ));
+        }
+    }
+    let mut removed = Vec::new();
+    for avatar in current.iter_mut() {
+        let age = observed_at_unix_ms.saturating_sub(avatar.last_update_unix_ms);
+        if age > stale_after_ms {
+            if !avatar.stale {
+                avatar.stale = true;
+                relay_events.push((String::from("avatar_stale"), avatar.agent_id.clone()));
+            }
+            if age > stale_after_ms.saturating_mul(3) {
+                removed.push(avatar.agent_id.clone());
+            }
+        }
+    }
+    if !removed.is_empty() {
+        current.retain(|avatar| !removed.iter().any(|id| id == &avatar.agent_id));
+        for id in removed {
+            relay_events.push((String::from("avatar_removed"), id));
+        }
+    }
+    relay_events
+}
+
+fn extract_worker_world_avatar_samples(
+    connection: &Connection,
+    local_agent_id: &str,
+) -> Vec<WorkerWorldAvatarSample> {
+    let summary = connection.simulator_payload_decode_summary();
+    let mut samples = Vec::new();
+    for (idx, avatar) in summary.coarse_location_last_avatars.iter().enumerate() {
+        let is_self = summary
+            .coarse_location_last_self_index
+            .map(|self_idx| usize::from(self_idx) == idx)
+            .unwrap_or(false)
+            || avatar.agent_id.as_deref() == Some(local_agent_id);
+        samples.push(WorkerWorldAvatarSample {
+            agent_id: avatar.agent_id.clone(),
+            xyz: avatar.xyz,
+            is_self,
+        });
+    }
+    if samples.is_empty() {
+        if let Some(xyz) = summary.coarse_location_last_first {
+            samples.push(WorkerWorldAvatarSample {
+                agent_id: None,
+                xyz,
+                is_self: false,
+            });
+        }
+        if let Some(xyz) = summary.coarse_location_last_second {
+            samples.push(WorkerWorldAvatarSample {
+                agent_id: None,
+                xyz,
+                is_self: false,
+            });
+        }
+        if let Some(xyz) = summary.coarse_location_last_third {
+            samples.push(WorkerWorldAvatarSample {
+                agent_id: None,
+                xyz,
+                is_self: false,
+            });
+        }
+    }
+    if !local_agent_id.is_empty() && !samples.iter().any(|sample| sample.is_self) {
+        let fallback_xyz = summary
+            .coarse_location_last_first
+            .or(summary.coarse_location_last_second)
+            .or(summary.coarse_location_last_third)
+            .unwrap_or([128, 128, 32]);
+        samples.push(WorkerWorldAvatarSample {
+            agent_id: Some(local_agent_id.to_string()),
+            xyz: fallback_xyz,
+            is_self: true,
+        });
+    }
+    samples
+}
+
+fn extract_worker_world_sim_name(connection: &Connection) -> Option<String> {
+    connection
+        .simulator_payload_decode_summary()
+        .region_handshake_last_sim_name
+        .clone()
+}
+
+fn extract_worker_self_location(connection: &Connection) -> Option<[f32; 3]> {
+    connection
+        .simulator_payload_decode_summary()
+        .agent_movement_complete_last_position
+        .map(|[x, y, z]| [x as f32, y as f32, z as f32])
+}
+
+async fn load_profile_images_for_payload(
+    connection: &mut Connection,
+    tx: &Sender<LiveFeedUpdate>,
+    image_cap_url: Option<&str>,
+    attempted_assets: &mut BTreeSet<String>,
+    payload: AgentProfileData,
+) {
+    let Some(image_cap_url) = image_cap_url else {
+        emit_relay(
+            tx,
+            RuntimeRelayLevel::Warn,
+            "profile_image",
+            "GetTexture/ViewerAsset capability missing",
+        );
+        return;
+    };
+    let mut asset_ids = Vec::new();
+    if let Some(asset_id) = payload.sl_image_id.as_ref() {
+        asset_ids.push(asset_id.clone());
+    }
+    if let Some(asset_id) = payload.fl_image_id.as_ref() {
+        asset_ids.push(asset_id.clone());
+    }
+    for details in &payload.pick_details {
+        if let Some(asset_id) = details.snapshot_id.as_ref() {
+            asset_ids.push(asset_id.clone());
+        }
+    }
+    for details in &payload.classified_details {
+        if let Some(asset_id) = details.snapshot_id.as_ref() {
+            asset_ids.push(asset_id.clone());
+        }
+    }
+    asset_ids.sort();
+    asset_ids.dedup();
+    for asset_id in asset_ids {
+        if !attempted_assets.insert(asset_id.clone()) {
+            continue;
+        }
+        match connection
+            .fetch_profile_image_bytes(image_cap_url, &asset_id)
+            .await
+        {
+            Ok(bytes) => {
+                let _ = tx.send(LiveFeedUpdate::ProfileImageLoaded {
+                    asset_id: asset_id.clone(),
+                    bytes,
+                });
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Info,
+                    "profile_image",
+                    &format!("{asset_id}: bytes loaded"),
+                );
+            }
+            Err(err) => {
+                let concise = summarize_profile_image_error(&err);
+                let _ = tx.send(LiveFeedUpdate::ProfileImageFailed);
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Warn,
+                    "profile_image",
+                    &format!("{asset_id}: {concise}"),
+                );
+            }
+        }
+    }
+}
+
+fn summarize_profile_image_error(err: &ConnectionError) -> String {
+    match err {
+        ConnectionError::HttpStatus { status, .. } => {
+            format!("http status {status}")
+        }
+        other => other.to_string(),
+    }
+}
+
+fn apply_profile_payload(
+    state: &mut AvatarProfileState,
+    payload: AgentProfileData,
+    at_unix_ms: u64,
+) {
+    let second_life = SecondLifeProfile {
+        avatar_id: payload.id.clone(),
+        display_name: payload.display_name.clone(),
+        username: payload.username.clone(),
+        profile_url: payload.profile_url.clone(),
+        about_text: payload.sl_about_text.clone(),
+        image_id: payload.sl_image_id.clone(),
+        partner_id: payload.partner_id.clone(),
+        member_since: payload.member_since.clone(),
+        allow_publish: payload.allow_publish,
+        online: payload.online,
+        identified: payload.identified,
+        transacted: payload.transacted,
+        groups: payload
+            .groups
+            .iter()
+            .map(|group| viewer_core::ProfileGroup {
+                id: group.id.clone(),
+                name: group.name.clone(),
+                insignia_id: group.image_id.clone(),
+            })
+            .collect(),
+    };
+    state.second_life = Some(second_life);
+    state.first_life = Some(FirstLifeProfile {
+        about_text: payload.fl_about_text.clone(),
+        image_id: payload.fl_image_id.clone(),
+    });
+    state.notes = Some(ProfileNotes {
+        text: payload.notes.clone(),
+    });
+    state.feed.url = payload.profile_url.clone();
+    state.feed.source = Some(String::from("AgentProfile"));
+
+    state.picks.items = payload
+        .picks
+        .iter()
+        .map(|entry| ProfilePickSummary {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+        })
+        .collect();
+    for entry in &payload.picks {
+        state
+            .picks
+            .details
+            .entry(entry.id.clone())
+            .or_insert(ProfilePickDetails {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                description: None,
+                snapshot_id: None,
+                parcel_id: None,
+                sim_name: None,
+                parcel_name: None,
+                global_position: None,
+            });
+    }
+    for details in &payload.pick_details {
+        state.picks.details.insert(
+            details.id.clone(),
+            ProfilePickDetails {
+                id: details.id.clone(),
+                name: details.name.clone().unwrap_or_default(),
+                description: details.description.clone(),
+                snapshot_id: details.snapshot_id.clone(),
+                parcel_id: details.parcel_id.clone(),
+                sim_name: details.sim_name.clone(),
+                parcel_name: details.parcel_name.clone(),
+                global_position: details.global_position,
+            },
+        );
+    }
+    if state.picks.selected_pick_id.is_none() {
+        state.picks.selected_pick_id = state.picks.items.first().map(|entry| entry.id.clone());
+    }
+
+    state.classifieds.items = payload
+        .classifieds
+        .iter()
+        .map(|entry| ProfileClassifiedSummary {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+        })
+        .collect();
+    for entry in &payload.classifieds {
+        state
+            .classifieds
+            .details
+            .entry(entry.id.clone())
+            .or_insert(ProfileClassifiedDetails {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                description: None,
+                snapshot_id: None,
+                parcel_id: None,
+                sim_name: None,
+                parcel_name: None,
+                global_position: None,
+                category: None,
+                flags: None,
+                price_for_listing: None,
+            });
+    }
+    for details in &payload.classified_details {
+        state.classifieds.details.insert(
+            details.id.clone(),
+            ProfileClassifiedDetails {
+                id: details.id.clone(),
+                name: details.name.clone().unwrap_or_default(),
+                description: details.description.clone(),
+                snapshot_id: details.snapshot_id.clone(),
+                parcel_id: details.parcel_id.clone(),
+                sim_name: details.sim_name.clone(),
+                parcel_name: details.parcel_name.clone(),
+                global_position: details.global_position,
+                category: details.category,
+                flags: details.flags,
+                price_for_listing: details.price_for_listing,
+            },
+        );
+    }
+    if state.classifieds.selected_classified_id.is_none() {
+        state.classifieds.selected_classified_id = state
+            .classifieds
+            .items
+            .first()
+            .map(|entry| entry.id.clone());
+    }
+    let _ = at_unix_ms;
+}
+
+fn profile_tab_has_loaded_data(state: &AvatarProfileState, tab: AvatarProfileTab) -> bool {
+    match tab {
+        AvatarProfileTab::SecondLife => state.second_life.is_some(),
+        AvatarProfileTab::Feed => state.feed.url.is_some() || state.second_life.is_some(),
+        AvatarProfileTab::Picks => state.second_life.is_some(),
+        AvatarProfileTab::Classifieds => state.second_life.is_some(),
+        AvatarProfileTab::FirstLife => state.first_life.is_some(),
+        AvatarProfileTab::Notes => state.notes.is_some(),
+    }
+}
+
+fn should_fetch_profile_tab(
+    profile: Option<&AvatarProfileState>,
+    avatar_id: &str,
+    tab: AvatarProfileTab,
+    ttl_secs: u64,
+) -> bool {
+    let ttl_ms = ttl_secs.saturating_mul(1000).max(1000);
+    let Some(profile) = profile else {
+        return true;
+    };
+    if profile.avatar_id != avatar_id {
+        return true;
+    }
+    let load = profile.tab_load(tab);
+    if load.status == ProfileLoadStatus::Loading {
+        return false;
+    }
+    if load.status == ProfileLoadStatus::Failed {
+        return true;
+    }
+    let Some(last) = load.last_updated_unix_ms else {
+        return true;
+    };
+    now_unix_ms().saturating_sub(last) > ttl_ms
+}
+
+fn open_external_url(url: &str) {
+    if url.trim().is_empty() {
+        return;
+    }
+    let try_cmd = |program: &str, arg: &str| -> bool {
+        std::process::Command::new(program)
+            .arg(arg)
+            .spawn()
+            .map(|_| true)
+            .unwrap_or(false)
+    };
+    if try_cmd("xdg-open", url) {
+        return;
+    }
+    if try_cmd("open", url) {
+        return;
+    }
+    let _ = try_cmd("cmd", &format!("/C start {}", url));
+}
+
+fn emit_relay(
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    level: RuntimeRelayLevel,
+    category: &str,
+    message: &str,
+) {
+    let line = format!("[{}] {category}: {message}", now_unix_ms());
+    println!("{line}");
+    let _ = fs::create_dir_all("logs");
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("logs/viewer_app_runtime.jsonl")
+    {
+        let json_line = format!(
+            "{{\"ts\":{},\"category\":\"{}\",\"message\":\"{}\"}}\n",
+            now_unix_ms(),
+            category.replace('"', "'"),
+            message.replace('"', "'")
+        );
+        let _ = file.write_all(json_line.as_bytes());
+    }
+    let _ = tx.send(LiveFeedUpdate::Relay(RuntimeRelayEvent {
+        at_unix_ms: now_unix_ms(),
+        level,
+        category: category.to_string(),
+        message: message.to_string(),
+    }));
 }
 
 fn should_apply_world_ingestion_seam(
@@ -583,6 +2455,24 @@ impl ViewerApp {
         let window = Self::init_window(event_loop)?;
         let renderer = RenderBackend::new(window.clone())?;
         let ui = UiSystem::new(&window, renderer.device(), renderer.surface_format());
+        let mut social_state = SocialState::default();
+        let cache_config = SocialCacheConfig::from_env();
+        let mut social_cache = SocialCache::open(&cache_config).ok();
+        if let Some(cache) = social_cache.as_ref() {
+            if let Ok(cached) = cache.load_cached_social_state() {
+                social_state = cached;
+            }
+        }
+        let avatar_name_cache = social_state
+            .friends
+            .iter()
+            .filter_map(|friend| {
+                friend
+                    .display_name
+                    .as_ref()
+                    .map(|name| (friend.id.clone(), name.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
 
         Ok(AppState {
             window,
@@ -595,7 +2485,18 @@ impl ViewerApp {
             last_applied_world_ingestion_seam: None,
             input: InputState::default(),
             live_visual_state: LiveVisualState::from_env(),
+            chat_state: ChatState::default(),
+            social_state,
+            world_avatars: Vec::new(),
+            avatar_name_cache,
+            world_sim_name: None,
+            world_self_location: None,
+            profile_state: None,
+            profile_image_bytes: BTreeMap::new(),
+            social_cache: social_cache.take(),
             last_frame_time: Instant::now(),
+            smoothed_fps: 0.0,
+            smoothed_frame_ms: 0.0,
         })
     }
 }
@@ -609,10 +2510,232 @@ impl AppState {
         let now = Instant::now();
         let dt_seconds = (now - self.last_frame_time).as_secs_f32().min(0.1);
         self.last_frame_time = now;
+        let frame_ms = (dt_seconds * 1000.0).max(0.0);
+        let fps = if dt_seconds > 0.000_001 {
+            1.0 / dt_seconds
+        } else {
+            0.0
+        };
+        let alpha = 0.15;
+        if self.smoothed_fps <= f32::EPSILON {
+            self.smoothed_fps = fps;
+            self.smoothed_frame_ms = frame_ms;
+        } else {
+            self.smoothed_fps += (fps - self.smoothed_fps) * alpha;
+            self.smoothed_frame_ms += (frame_ms - self.smoothed_frame_ms) * alpha;
+        }
 
         let [look_x, look_y] = self.input.take_look_delta();
         self.camera.add_look_delta(look_x, look_y);
         self.input.update_camera(&mut self.camera, dt_seconds);
+
+        for update in self.live_visual_state.drain_worker_updates() {
+            match update {
+                LiveFeedUpdate::Snapshot(snapshot) => {
+                    self.live_visual_state.snapshot = Some(snapshot);
+                }
+                LiveFeedUpdate::Status(status) => {
+                    self.live_visual_state.startup_status = status;
+                }
+                LiveFeedUpdate::ChatConnection(status) => {
+                    self.live_visual_state.chat_connection = status.clone();
+                    self.chat_state.set_connection(status);
+                }
+                LiveFeedUpdate::ChatMessage(message) => {
+                    self.chat_state.push_message(message);
+                }
+                LiveFeedUpdate::ChatSendStatus(status) => {
+                    self.chat_state.send_status = status;
+                }
+                LiveFeedUpdate::FriendsBootstrap(friends) => {
+                    for friend in friends {
+                        self.social_state.upsert_friend(friend);
+                    }
+                }
+                LiveFeedUpdate::FriendPresence { id, online } => {
+                    self.social_state
+                        .set_friend_online(&id, online, now_unix_ms());
+                }
+                LiveFeedUpdate::FriendRights {
+                    id,
+                    rights_has,
+                    rights_given,
+                } => {
+                    if let Some(existing) =
+                        self.social_state.friends.iter_mut().find(|f| f.id == id)
+                    {
+                        existing.rights_has = rights_has;
+                        existing.rights_given = rights_given;
+                        existing.last_changed_unix_ms = now_unix_ms();
+                    } else {
+                        self.social_state.upsert_friend(FriendEntry {
+                            id,
+                            display_name: None,
+                            name_source: None,
+                            last_name_resolved_unix_ms: None,
+                            online: false,
+                            rights_has,
+                            rights_given,
+                            last_changed_unix_ms: now_unix_ms(),
+                        });
+                    }
+                }
+                LiveFeedUpdate::FriendResolvedName {
+                    id,
+                    display_name,
+                    source,
+                } => {
+                    let resolved_at = now_unix_ms();
+                    self.social_state
+                        .resolve_friend_name(&id, &display_name, &source, resolved_at);
+                    self.avatar_name_cache
+                        .insert(id.clone(), display_name.clone());
+                    if let Some(cache) = self.social_cache.as_mut() {
+                        let _ = cache.upsert_name_cache(&id, &display_name, &source, resolved_at);
+                    }
+                    if let Some(avatar) = self.world_avatars.iter_mut().find(|a| a.agent_id == id) {
+                        avatar.display_name = format!("{display_name} ({})", uuid_short(&id));
+                        self.social_state.relay.push(RuntimeRelayEvent {
+                            at_unix_ms: resolved_at,
+                            level: RuntimeRelayLevel::Info,
+                            category: String::from("avatar_name_resolved"),
+                            message: format!("{id} -> {}", avatar.display_name),
+                        });
+                    }
+                }
+                LiveFeedUpdate::AvatarResolvedName {
+                    id,
+                    display_name,
+                    source,
+                } => {
+                    let resolved_at = now_unix_ms();
+                    self.avatar_name_cache
+                        .insert(id.clone(), display_name.clone());
+                    if let Some(cache) = self.social_cache.as_mut() {
+                        let _ = cache.upsert_name_cache(&id, &display_name, &source, resolved_at);
+                    }
+                    if let Some(avatar) = self.world_avatars.iter_mut().find(|a| a.agent_id == id) {
+                        avatar.display_name = format!("{display_name} ({})", uuid_short(&id));
+                    }
+                    self.social_state.relay.push(RuntimeRelayEvent {
+                        at_unix_ms: resolved_at,
+                        level: RuntimeRelayLevel::Info,
+                        category: String::from("avatar_name_resolved"),
+                        message: format!("{id} -> {display_name}"),
+                    });
+                }
+                LiveFeedUpdate::WorldAvatars {
+                    avatars,
+                    sim_name,
+                    self_location,
+                    observed_at_unix_ms,
+                } => {
+                    self.world_sim_name = sim_name.clone();
+                    self.world_self_location = self_location;
+                    let region_coords =
+                        self.live_visual_state
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| {
+                                Some([snapshot.first_sim_region_x?, snapshot.first_sim_region_y?])
+                            });
+                    let relay = merge_world_avatar_samples(
+                        &mut self.world_avatars,
+                        &self.social_state,
+                        &self.avatar_name_cache,
+                        self.world_sim_name.as_deref(),
+                        &avatars,
+                        region_coords,
+                        observed_at_unix_ms,
+                        12_000,
+                    );
+                    for (category, message) in relay {
+                        self.social_state.relay.push(RuntimeRelayEvent {
+                            at_unix_ms: now_unix_ms(),
+                            level: RuntimeRelayLevel::Info,
+                            category,
+                            message,
+                        });
+                    }
+                }
+                LiveFeedUpdate::DirectIm(message) => {
+                    let participant = message.peer_id.clone();
+                    if !message.outgoing
+                        && !message.from_name.trim().is_empty()
+                        && message.from_name != message.from_id
+                    {
+                        self.social_state.resolve_friend_name(
+                            &participant,
+                            &message.from_name,
+                            "im.from_name",
+                            message.observed_at_unix_ms,
+                        );
+                        if let Some(cache) = self.social_cache.as_mut() {
+                            let _ = cache.upsert_name_cache(
+                                &participant,
+                                &message.from_name,
+                                "im.from_name",
+                                message.observed_at_unix_ms,
+                            );
+                        }
+                    }
+                    if let Some(cache) = self.social_cache.as_mut() {
+                        let _ = cache.store_im_message(&message);
+                    }
+                    self.social_state
+                        .upsert_thread_message(message, &participant);
+                }
+                LiveFeedUpdate::ProfileOpenRequested { avatar_id } => {
+                    let mut profile = self.profile_state.take().unwrap_or_default();
+                    if profile.avatar_id != avatar_id {
+                        profile = AvatarProfileState {
+                            avatar_id,
+                            ..AvatarProfileState::default()
+                        };
+                    }
+                    profile.selected_tab = AvatarProfileTab::SecondLife;
+                    self.profile_state = Some(profile);
+                }
+                LiveFeedUpdate::ProfileTabLoadStarted { avatar_id, tab } => {
+                    let profile = self.ensure_profile_state(&avatar_id);
+                    profile.selected_tab = tab;
+                    profile.tab_load_mut(tab).mark_loading(now_unix_ms());
+                }
+                LiveFeedUpdate::ProfileData {
+                    avatar_id,
+                    profile,
+                    requested_tab,
+                } => {
+                    let at = now_unix_ms();
+                    let state = self.ensure_profile_state(&avatar_id);
+                    state.selected_tab = requested_tab;
+                    apply_profile_payload(state, profile, at);
+                    if profile_tab_has_loaded_data(state, requested_tab) {
+                        state.tab_load_mut(requested_tab).mark_loaded(at);
+                    } else {
+                        state
+                            .tab_load_mut(requested_tab)
+                            .mark_failed(at, "profile payload missing expected tab fields");
+                    }
+                }
+                LiveFeedUpdate::ProfileTabLoadFailed {
+                    avatar_id,
+                    tab,
+                    reason,
+                } => {
+                    let state = self.ensure_profile_state(&avatar_id);
+                    state.selected_tab = tab;
+                    state.tab_load_mut(tab).mark_failed(now_unix_ms(), reason);
+                }
+                LiveFeedUpdate::ProfileImageLoaded { asset_id, bytes } => {
+                    self.profile_image_bytes.insert(asset_id, bytes);
+                }
+                LiveFeedUpdate::ProfileImageFailed => {}
+                LiveFeedUpdate::Relay(event) => {
+                    self.social_state.relay.push(event);
+                }
+            }
+        }
         self.live_visual_state.refresh();
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
         let next_world_ingestion_seam =
@@ -633,6 +2756,8 @@ impl AppState {
                 .apply_world_object_ingestion_seam(&next_world_ingestion_seam);
             self.last_applied_world_ingestion_seam = Some(next_world_ingestion_seam.clone());
         }
+        self.scene
+            .apply_world_avatar_placeholders(&self.world_avatars);
         self.world_ingestion_seam = next_world_ingestion_seam;
 
         let window = self.window.clone();
@@ -640,12 +2765,25 @@ impl AppState {
         let camera = self.camera;
         let live_visual = next_live_visual_snapshot;
         let live_startup_status = self.live_visual_state.startup_status_line();
+        let chat_state = &mut self.chat_state;
+        let social_state = &mut self.social_state;
+        let world_avatars = &self.world_avatars;
+        let world_sim_name = self.world_sim_name.clone();
+        let world_self_location = self.world_self_location;
+        let profile_state = &mut self.profile_state;
+        let profile_image_bytes = &self.profile_image_bytes;
+        let mut pending_chat_send: Option<String> = None;
+        let mut pending_direct_im_send: Option<(String, String)> = None;
+        let mut pending_profile_open: Option<String> = None;
+        let mut pending_profile_tab_select: Option<(String, AvatarProfileTab)> = None;
+        let mut pending_profile_refresh: Option<(String, Option<AvatarProfileTab>)> = None;
+        let mut pending_open_external_url: Option<String> = None;
 
-        self.renderer.render_frame(
+        let render_result = self.renderer.render_frame(
             &camera,
             &self.scene,
             |device, queue, encoder, target_view, surface_size| {
-                ui.render(
+                let actions = ui.render(
                     &window,
                     device,
                     queue,
@@ -655,9 +2793,67 @@ impl AppState {
                     &camera,
                     live_visual.as_ref(),
                     &live_startup_status,
+                    chat_state,
+                    social_state,
+                    world_avatars,
+                    world_sim_name.as_deref(),
+                    world_self_location,
+                    profile_state,
+                    profile_image_bytes,
+                    self.smoothed_fps,
+                    self.smoothed_frame_ms,
                 );
+                pending_chat_send = actions.nearby_chat_send;
+                pending_direct_im_send = actions.direct_im_send;
+                pending_profile_open = actions.open_avatar_profile;
+                pending_profile_tab_select = actions.select_avatar_profile_tab;
+                pending_profile_refresh = actions.refresh_avatar_profile;
+                pending_open_external_url = actions.open_external_url;
             },
-        )
+        );
+
+        if let Some(text) = pending_chat_send {
+            self.chat_state.mark_sending();
+            self.chat_state.draft.text.clear();
+            let local_id = self.chat_state.allocate_local_message_id();
+            self.chat_state.push_message(ChatMessage {
+                id: local_id,
+                observed_at_unix_ms: now_unix_ms(),
+                sender: String::from("You"),
+                text: text.clone(),
+                source: String::from("local"),
+            });
+            self.live_visual_state.send_chat(text);
+        }
+        if let Some((to_agent_id, text)) = pending_direct_im_send {
+            if !text.is_empty() {
+                self.social_state.im_draft.clear();
+                self.live_visual_state.send_direct_im(to_agent_id, text);
+            }
+        }
+        if let Some(avatar_id) = pending_profile_open {
+            self.live_visual_state.open_avatar_profile(avatar_id);
+        }
+        if let Some((avatar_id, tab)) = pending_profile_tab_select {
+            if should_fetch_profile_tab(
+                self.profile_state.as_ref(),
+                &avatar_id,
+                tab,
+                self.live_visual_state.profile_cache_ttl_secs,
+            ) {
+                self.live_visual_state
+                    .select_avatar_profile_tab(avatar_id, tab);
+            }
+        }
+        if let Some((avatar_id, tab)) = pending_profile_refresh {
+            self.live_visual_state
+                .refresh_avatar_profile(avatar_id, tab);
+        }
+        if let Some(url) = pending_open_external_url {
+            open_external_url(&url);
+        }
+
+        render_result
     }
 
     fn handle_input_event(&mut self, event: &WindowEvent) {
@@ -673,6 +2869,23 @@ impl AppState {
             }
             _ => {}
         }
+    }
+
+    fn ensure_profile_state(&mut self, avatar_id: &str) -> &mut AvatarProfileState {
+        let needs_reset = self
+            .profile_state
+            .as_ref()
+            .map(|state| state.avatar_id != avatar_id)
+            .unwrap_or(true);
+        if needs_reset {
+            self.profile_state = Some(AvatarProfileState {
+                avatar_id: avatar_id.to_string(),
+                ..AvatarProfileState::default()
+            });
+        }
+        self.profile_state
+            .as_mut()
+            .expect("profile state should be initialized")
     }
 }
 
@@ -837,11 +3050,21 @@ mod tests {
             String::from("VIEWER_APP_IN_PROCESS_PROBE"),
             String::from("false"),
         );
+        vars.insert(
+            String::from("VIEWER_APP_EVENT_QUEUE_FAILURES_BEFORE_RECONNECT"),
+            String::from("9"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_WORKER_TICK_MS"),
+            String::from("25"),
+        );
         let cfg = in_process_live_feed_config_from_lookup(|k| vars.get(k).cloned())
             .expect("config should parse");
         assert_eq!(cfg.wire_format, LoginWireFormat::XmlRpc);
         assert_eq!(cfg.receive_max_packets, 16);
         assert!(!cfg.run_probe);
+        assert_eq!(cfg.event_queue_failures_before_reconnect, 9);
+        assert_eq!(cfg.worker_tick_ms, 25);
     }
 
     #[test]
@@ -976,7 +3199,8 @@ mod tests {
             decoded_viewer_time_signature: Some(0xDDCCBBAA),
             observed_at_unix_ms: 1,
         };
-        let viewer_time_first = WorldObjectIngestionAdapter::adapt(Some(&viewer_time_changed_snapshot));
+        let viewer_time_first =
+            WorldObjectIngestionAdapter::adapt(Some(&viewer_time_changed_snapshot));
         viewer_time_changed_snapshot.decoded_viewer_time_updates = 2;
         let viewer_time_second =
             WorldObjectIngestionAdapter::adapt(Some(&viewer_time_changed_snapshot));
@@ -1032,10 +3256,16 @@ mod tests {
             observed_at_unix_ms: 1,
         };
         assert!(should_apply_live_visual_snapshot(None, Some(&first)));
-        assert!(!should_apply_live_visual_snapshot(Some(&first), Some(&first)));
+        assert!(!should_apply_live_visual_snapshot(
+            Some(&first),
+            Some(&first)
+        ));
         let mut second = first.clone();
         second.observed_at_unix_ms = 2;
-        assert!(should_apply_live_visual_snapshot(Some(&first), Some(&second)));
+        assert!(should_apply_live_visual_snapshot(
+            Some(&first),
+            Some(&second)
+        ));
         let mut viewer_time_second = first.clone();
         viewer_time_second.decoded_viewer_time_updates = 2;
         assert!(should_apply_live_visual_snapshot(
@@ -1045,12 +3275,3 @@ mod tests {
         assert!(should_apply_live_visual_snapshot(Some(&first), None));
     }
 }
-
-
-
-
-
-
-
-
-

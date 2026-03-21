@@ -51,8 +51,7 @@ async fn run() -> Result<(), String> {
         parse_bool_env("VIEWER_INSPECT_FIRST_SIM_HANDSHAKE_ONCE", false);
     let first_sim_receive_bind = std::env::var("VIEWER_FIRST_SIM_RECEIVE_BIND")
         .unwrap_or_else(|_| String::from("0.0.0.0:0"));
-    let first_sim_receive_timeout_secs =
-        parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS", 5);
+    let first_sim_receive_timeout_secs = parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_TIMEOUT_SECS", 5);
     let first_sim_receive_max_packets =
         parse_u64_env("VIEWER_FIRST_SIM_RECEIVE_MAX_PACKETS", 3) as usize;
     let first_sim_post_movement_tail_packets =
@@ -171,7 +170,10 @@ or set any VIEWER_FIRST_SIM_* control variable to auto-enable it."
                                 }
                             }
                             Err(ConnectionError::EventQueueOneShotFailed { attempts, .. }) => {
-                                println!("EventQueueGet one-shot failed after {} attempts", attempts.len());
+                                println!(
+                                    "EventQueueGet one-shot failed after {} attempts",
+                                    attempts.len()
+                                );
                                 for attempt in &attempts {
                                     println!(
                                         "Attempt {}: status={:?}, elapsed_ms={}, retryable={}, error_kind={}",
@@ -209,8 +211,7 @@ or set any VIEWER_FIRST_SIM_* control variable to auto-enable it."
                 .await?;
             }
             update_live_visual_from_connection(&mut live_visual, &connection);
-            if let Err(err) = write_live_visual_snapshot(&live_visual_snapshot_path, &live_visual)
-            {
+            if let Err(err) = write_live_visual_snapshot(&live_visual_snapshot_path, &live_visual) {
                 eprintln!(
                     "failed to write live visual snapshot to {}: {err}",
                     live_visual_snapshot_path.display()
@@ -282,9 +283,7 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
     snapshot.observed_at_unix_ms = now_unix_ms();
     snapshot.handshake_agent_movement_complete = connection
         .first_simulator_handshake_state()
-        .map(|state| {
-            state.stage == viewer_net::FirstSimulatorHandshakeStage::AgentMovementComplete
-        })
+        .map(|state| state.stage == viewer_net::FirstSimulatorHandshakeStage::AgentMovementComplete)
         .unwrap_or(false);
 
     let region_control = connection.summarize_region_transition_control();
@@ -325,8 +324,7 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
 
 fn write_live_visual_snapshot(path: &PathBuf, snapshot: &LiveVisualSnapshot) -> Result<(), String> {
     let bytes = to_vec_pretty(snapshot).map_err(|err| err.to_string())?;
-    std::fs::write(path, bytes)
-        .map_err(|err| format!("write {} failed: {err}", path.display()))
+    std::fs::write(path, bytes).map_err(|err| format!("write {} failed: {err}", path.display()))
 }
 
 fn now_unix_ms() -> u64 {
@@ -346,7 +344,10 @@ fn required_env(name: &str) -> Result<String, String> {
 
 fn parse_bool_env(name: &str, default: bool) -> bool {
     match std::env::var(name) {
-        Ok(value) => matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(value) => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => default,
     }
 }
@@ -566,12 +567,3 @@ async fn inspect_first_simulator_handshake_once(
 
     Ok(())
 }
-
-
-
-
-
-
-
-
-

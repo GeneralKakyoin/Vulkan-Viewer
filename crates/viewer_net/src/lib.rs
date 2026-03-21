@@ -7,15 +7,15 @@ use reqwest::{
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use viewer_grid::{
-    GridAdapterError, GridLoginAdapter, GridLoginRequest, GridLoginResponse, GridLoginResult,
-    LoginIntent, SessionBootstrap,
+    FriendBootstrapEntry, GridAdapterError, GridLoginAdapter, GridLoginRequest, GridLoginResponse,
+    GridLoginResult, LoginIntent, SessionBootstrap,
 };
 
 const MAX_LOGIN_REDIRECTS: usize = 4;
@@ -28,16 +28,32 @@ const LLUDP_MESSAGE_PREFIX: u8 = 0xFF;
 const LLUDP_RELIABLE_FLAG: u8 = 0x40;
 const LLUDP_LOW_FREQUENCY_PREFIX: u32 = 0xFFFF0000;
 const LLUDP_USE_CIRCUIT_CODE_LOW_ID: u16 = 3;
+const LLUDP_CHAT_FROM_VIEWER_LOW_ID: u16 = 80;
 const LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID: u16 = 249;
 const LLUDP_TEST_MESSAGE_LOW_ID: u16 = 1;
 const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
 const LLUDP_HEALTH_MESSAGE_LOW_ID: u16 = 138;
+const LLUDP_CHAT_FROM_SIMULATOR_LOW_ID: u16 = 139;
 const LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID: u16 = 150;
 const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
 const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
 const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
 const LLUDP_PACKET_ACK_LOW_ID: u16 = 0xFFFB;
 const LLUDP_ONLINE_NOTIFICATION_LOW_ID: u16 = 322;
+const LLUDP_CHANGE_USER_RIGHTS_LOW_ID: u16 = 321;
+const LLUDP_OFFLINE_NOTIFICATION_LOW_ID: u16 = 323;
+const LLUDP_IMPROVED_INSTANT_MESSAGE_LOW_ID: u16 = 254;
+const LLUDP_RETRIEVE_INSTANT_MESSAGES_LOW_ID: u16 = 255;
+const LLUDP_AVATAR_PROPERTIES_REQUEST_LOW_ID: u16 = 169;
+const LLUDP_AVATAR_PROPERTIES_REPLY_LOW_ID: u16 = 171;
+const LLUDP_AVATAR_GROUPS_REPLY_LOW_ID: u16 = 173;
+const LLUDP_AVATAR_CLASSIFIED_REPLY_LOW_ID: u16 = 42;
+const LLUDP_CLASSIFIED_INFO_REQUEST_LOW_ID: u16 = 43;
+const LLUDP_CLASSIFIED_INFO_REPLY_LOW_ID: u16 = 44;
+const LLUDP_AVATAR_NOTES_REPLY_LOW_ID: u16 = 176;
+const LLUDP_AVATAR_PICKS_REPLY_LOW_ID: u16 = 178;
+const LLUDP_PICK_INFO_REPLY_LOW_ID: u16 = 184;
+const LLUDP_GENERIC_MESSAGE_LOW_ID: u16 = 261;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
@@ -45,6 +61,9 @@ const LLUDP_CROSSED_REGION_MEDIUM_ID: u8 = 7;
 const LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID: u8 = 8;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
+    "AgentProfile",
+    "GetTexture",
+    "GetDisplayNames",
     "SimulatorFeatures",
     "MapLayer",
     "ViewerAsset",
@@ -194,6 +213,7 @@ impl LoginCodec for LlsdLoginCodec {
             look_at: map.get("look_at").and_then(llsd_to_string),
             home: map.get("home").and_then(llsd_to_string),
             motd: map.get("motd").and_then(llsd_to_string),
+            buddy_list: parse_llsd_buddy_list(body).unwrap_or_default(),
         })
     }
 }
@@ -228,7 +248,11 @@ impl LoginCodec for XmlRpcLoginCodec {
         xmlrpc_member_string(&mut xml, "channel", &request.params.channel);
         xmlrpc_member_string(&mut xml, "version", &request.params.version);
         xmlrpc_member_string(&mut xml, "platform", &request.params.platform);
-        xmlrpc_member_string(&mut xml, "platform_version", &request.params.platform_version);
+        xmlrpc_member_string(
+            &mut xml,
+            "platform_version",
+            &request.params.platform_version,
+        );
         xmlrpc_member_string(&mut xml, "host_id", &request.params.host_id);
         xmlrpc_member_string(&mut xml, "machine_hash", &request.params.machine_hash);
         xmlrpc_member_array_of_strings(&mut xml, "options", &request.options);
@@ -238,7 +262,8 @@ impl LoginCodec for XmlRpcLoginCodec {
     }
 
     fn decode_response(&self, body: &[u8]) -> Result<GridLoginResponse, CodecError> {
-        let text = std::str::from_utf8(body).map_err(|err| CodecError::Deserialize(err.to_string()))?;
+        let text =
+            std::str::from_utf8(body).map_err(|err| CodecError::Deserialize(err.to_string()))?;
         let doc = Document::parse(text).map_err(|err| CodecError::Deserialize(err.to_string()))?;
 
         if let Some(fault_value) = doc
@@ -276,7 +301,7 @@ impl LoginCodec for XmlRpcLoginCodec {
             _ => {
                 return Err(CodecError::Deserialize(String::from(
                     "xml-rpc response value is not a struct",
-                )))
+                )));
             }
         };
 
@@ -300,6 +325,10 @@ impl LoginCodec for XmlRpcLoginCodec {
             look_at: map.get("look_at").and_then(xmlrpc_as_string),
             home: map.get("home").and_then(xmlrpc_as_string),
             motd: map.get("motd").and_then(xmlrpc_as_string),
+            buddy_list: map
+                .get("buddy-list")
+                .and_then(xmlrpc_as_buddy_list)
+                .unwrap_or_default(),
         })
     }
 }
@@ -468,7 +497,10 @@ fn parse_xmlrpc_value(value_node: Node<'_, '_>) -> Result<XmlRpcValue, CodecErro
         )),
         "struct" => {
             let mut map = HashMap::new();
-            for member in typed_child.children().filter(|child| child.has_tag_name("member")) {
+            for member in typed_child
+                .children()
+                .filter(|child| child.has_tag_name("member"))
+            {
                 let name = first_child_with_tag(member, "name")
                     .and_then(|name_node| name_node.text())
                     .ok_or_else(|| {
@@ -490,7 +522,10 @@ fn parse_xmlrpc_value(value_node: Node<'_, '_>) -> Result<XmlRpcValue, CodecErro
                 CodecError::Deserialize(String::from("xml-rpc array missing data node"))
             })?;
             let mut values = Vec::new();
-            for child_value in data_node.children().filter(|child| child.has_tag_name("value")) {
+            for child_value in data_node
+                .children()
+                .filter(|child| child.has_tag_name("value"))
+            {
                 values.push(parse_xmlrpc_value(child_value)?);
             }
             Ok(XmlRpcValue::Array(values))
@@ -541,6 +576,41 @@ fn xmlrpc_as_u32(value: &XmlRpcValue) -> Option<u32> {
 
 fn xmlrpc_as_u16(value: &XmlRpcValue) -> Option<u16> {
     xmlrpc_as_u32(value).and_then(|value| u16::try_from(value).ok())
+}
+
+fn xmlrpc_as_buddy_list(value: &XmlRpcValue) -> Option<Vec<FriendBootstrapEntry>> {
+    let XmlRpcValue::Array(items) = value else {
+        return None;
+    };
+    let mut buddies = Vec::new();
+    for item in items {
+        let XmlRpcValue::Struct(map) = item else {
+            continue;
+        };
+        let buddy_id = map
+            .get("buddy_id")
+            .and_then(xmlrpc_as_string)
+            .unwrap_or_default();
+        if buddy_id.is_empty() {
+            continue;
+        }
+        let rights_has = map
+            .get("buddy_rights_has")
+            .and_then(xmlrpc_as_u32)
+            .map(|v| v as i32)
+            .unwrap_or_default();
+        let rights_given = map
+            .get("buddy_rights_given")
+            .and_then(xmlrpc_as_u32)
+            .map(|v| v as i32)
+            .unwrap_or_default();
+        buddies.push(FriendBootstrapEntry {
+            buddy_id,
+            rights_has,
+            rights_given,
+        });
+    }
+    Some(buddies)
 }
 
 fn escape_xml(text: &str) -> String {
@@ -644,6 +714,56 @@ fn parse_llsd_map(body: &[u8]) -> Result<HashMap<String, LlsdValue>, CodecError>
     }
 
     Ok(map)
+}
+
+fn parse_llsd_buddy_list(body: &[u8]) -> Result<Vec<FriendBootstrapEntry>, CodecError> {
+    let text = std::str::from_utf8(body).map_err(|err| CodecError::Deserialize(err.to_string()))?;
+    let doc = Document::parse(text).map_err(|err| CodecError::Deserialize(err.to_string()))?;
+    let top_map = doc
+        .descendants()
+        .find(|node| node.has_tag_name("map"))
+        .ok_or_else(|| CodecError::Deserialize(String::from("missing llsd map")))?;
+    let children: Vec<Node<'_, '_>> = top_map
+        .children()
+        .filter(|node| node.is_element())
+        .collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let value_node = children[idx + 1];
+        if key_node.has_tag_name("key") && key_node.text().unwrap_or_default() == "buddy-list" {
+            if !value_node.has_tag_name("array") {
+                return Ok(Vec::new());
+            }
+            let mut buddies = Vec::new();
+            for item in value_node
+                .children()
+                .filter(|node| node.has_tag_name("map"))
+            {
+                let map = parse_llsd_scalar_map(item);
+                let buddy_id = map.get("buddy_id").cloned().unwrap_or_default();
+                if buddy_id.is_empty() {
+                    continue;
+                }
+                let rights_has = map
+                    .get("buddy_rights_has")
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or_default();
+                let rights_given = map
+                    .get("buddy_rights_given")
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or_default();
+                buddies.push(FriendBootstrapEntry {
+                    buddy_id,
+                    rights_has,
+                    rights_given,
+                });
+            }
+            return Ok(buddies);
+        }
+        idx += 2;
+    }
+    Ok(Vec::new())
 }
 
 enum TagType {
@@ -808,6 +928,7 @@ pub enum FirstSimulatorInboundMessageKind {
     AgentMovementComplete,
     RegionHandshake,
     HealthMessage,
+    ChatFromSimulator,
     SimulatorViewerTimeMessage,
     EnableSimulator,
     AgentDataUpdate,
@@ -909,6 +1030,7 @@ pub struct RegionTransitionControlSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EarlySimulatorTrafficKind {
     HealthMessage,
+    ChatFromSimulator,
     SimulatorViewerTimeMessage,
     OnlineNotification,
     ViewerEffect,
@@ -929,6 +1051,7 @@ pub struct EarlySimulatorTrafficObservation {
 pub struct EarlySimulatorTrafficSummary {
     pub observations: usize,
     pub health_message: usize,
+    pub chat_from_simulator: usize,
     pub simulator_viewer_time_message: usize,
     pub online_notification: usize,
     pub viewer_effect: usize,
@@ -936,17 +1059,31 @@ pub struct EarlySimulatorTrafficSummary {
     pub attached_sound: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedCoarseLocationUpdate {
     pub location_count: u8,
     pub first_location: Option<[u8; 3]>,
     pub second_location: Option<[u8; 3]>,
     pub third_location: Option<[u8; 3]>,
+    pub avatars: Vec<DecodedCoarseAvatar>,
+    pub self_index: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedCoarseAvatar {
+    pub agent_id: Option<String>,
+    pub xyz: [u8; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct DecodedHealthMessage {
     pub health: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DecodedAgentMovementComplete {
+    pub position: [i32; 3],
+    pub region_handle: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -962,6 +1099,13 @@ pub struct SimulatorPayloadDecodeSummary {
     pub coarse_location_last_first: Option<[u8; 3]>,
     pub coarse_location_last_second: Option<[u8; 3]>,
     pub coarse_location_last_third: Option<[u8; 3]>,
+    pub coarse_location_last_avatars: Vec<DecodedCoarseAvatar>,
+    pub coarse_location_last_self_index: Option<u16>,
+    pub region_handshake_updates: usize,
+    pub region_handshake_last_sim_name: Option<String>,
+    pub agent_movement_complete_updates: usize,
+    pub agent_movement_complete_last_position: Option<[i32; 3]>,
+    pub agent_movement_complete_last_region_handle: Option<u64>,
     pub health_updates: usize,
     pub health_last_basis_points: Option<u16>,
     pub simulator_viewer_time_updates: usize,
@@ -990,6 +1134,135 @@ pub struct EventQueueInspection {
     pub has_id: bool,
     pub event_count: usize,
     pub event_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQueueMessage {
+    pub message: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQueuePollResult {
+    pub id: Option<u64>,
+    pub events: Vec<EventQueueMessage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NearbyChatMessage {
+    pub sender: String,
+    pub text: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedAvatarName {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfileGroup {
+    pub id: String,
+    pub name: String,
+    pub image_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfilePick {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfilePickDetails {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub parcel_id: Option<String>,
+    pub sim_name: Option<String>,
+    pub parcel_name: Option<String>,
+    pub global_position: Option<[i32; 3]>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfileClassified {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfileClassifiedDetails {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub parcel_id: Option<String>,
+    pub sim_name: Option<String>,
+    pub parcel_name: Option<String>,
+    pub global_position: Option<[i32; 3]>,
+    pub category: Option<u32>,
+    pub flags: Option<u8>,
+    pub price_for_listing: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfileData {
+    pub id: String,
+    pub profile_url: Option<String>,
+    pub sl_about_text: String,
+    pub fl_about_text: String,
+    pub notes: String,
+    pub sl_image_id: Option<String>,
+    pub fl_image_id: Option<String>,
+    pub partner_id: Option<String>,
+    pub member_since: Option<String>,
+    pub online: Option<bool>,
+    pub allow_publish: Option<bool>,
+    pub identified: Option<bool>,
+    pub transacted: Option<bool>,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub groups: Vec<AgentProfileGroup>,
+    pub picks: Vec<AgentProfilePick>,
+    pub pick_details: Vec<AgentProfilePickDetails>,
+    pub classifieds: Vec<AgentProfileClassified>,
+    pub classified_details: Vec<AgentProfileClassifiedDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectImPayload {
+    pub from_id: String,
+    pub to_id: String,
+    pub session_id: String,
+    pub from_name: String,
+    pub message: String,
+    pub dialog: u8,
+    pub timestamp: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SocialEvent {
+    FriendOnline {
+        agent_id: String,
+    },
+    FriendOffline {
+        agent_id: String,
+    },
+    FriendRights {
+        agent_id: String,
+        related_id: String,
+        rights: i32,
+    },
+    DirectIm(DirectImPayload),
+}
+
+#[derive(Debug)]
+pub struct SocialCircuit {
+    bind: String,
+    target: FirstSimulatorTarget,
+    socket: UdpSocket,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1039,6 +1312,8 @@ pub enum ConnectionError {
     Codec(#[from] CodecError),
     #[error("seed capability URL is unavailable in current session")]
     MissingSeedCapability,
+    #[error("required capability is unavailable: {0}")]
+    MissingCapability(String),
     #[error("first-simulator handshake prerequisites are unavailable in current session")]
     MissingFirstSimulatorHandshakePrerequisites,
     #[error("first-simulator handshake is not initialized")]
@@ -1141,9 +1416,7 @@ impl Connection {
         &self.early_simulator_traffic_observations
     }
 
-    pub fn region_transition_control_observations(
-        &self,
-    ) -> &[RegionTransitionControlObservation] {
+    pub fn region_transition_control_observations(&self) -> &[RegionTransitionControlObservation] {
         &self.region_transition_control_observations
     }
 
@@ -1157,6 +1430,7 @@ impl Connection {
             summary.observations += 1;
             match observation.kind {
                 EarlySimulatorTrafficKind::HealthMessage => summary.health_message += 1,
+                EarlySimulatorTrafficKind::ChatFromSimulator => summary.chat_from_simulator += 1,
                 EarlySimulatorTrafficKind::SimulatorViewerTimeMessage => {
                     summary.simulator_viewer_time_message += 1
                 }
@@ -1450,7 +1724,9 @@ impl Connection {
         )
         .await?;
 
-        self.advance_first_simulator_handshake_scaffold(FirstSimulatorHandshakeStage::UseCircuitCode)
+        self.advance_first_simulator_handshake_scaffold(
+            FirstSimulatorHandshakeStage::UseCircuitCode,
+        )
     }
 
     pub async fn send_first_simulator_complete_agent_movement(
@@ -1515,21 +1791,28 @@ impl Connection {
         }
 
         let classification = classify_first_simulator_inbound_message(payload);
-        let stage_before = self.first_simulator_handshake_state.as_ref().map(|s| s.stage);
+        let stage_before = self
+            .first_simulator_handshake_state
+            .as_ref()
+            .map(|s| s.stage);
         let mut advanced_stage = false;
 
         if classification.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete
-            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && classification.decode_source
+                == FirstSimulatorInboundDecodeSource::PacketMessageNumber
             && stage_before == Some(FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete)
         {
             self.mark_first_simulator_agent_movement_complete_received()?;
             advanced_stage = true;
         }
 
-        let stage_after = self.first_simulator_handshake_state.as_ref().map(|s| s.stage);
+        let stage_after = self
+            .first_simulator_handshake_state
+            .as_ref()
+            .map(|s| s.stage);
         let observation_index = self.first_simulator_handshake_receive_diagnostics.len() + 1;
-        self.first_simulator_handshake_receive_diagnostics
-            .push(FirstSimulatorHandshakeReceiveDiagnostic {
+        self.first_simulator_handshake_receive_diagnostics.push(
+            FirstSimulatorHandshakeReceiveDiagnostic {
                 observation_index,
                 kind: classification.kind,
                 scope: classification.scope,
@@ -1540,7 +1823,8 @@ impl Connection {
                 signal: classification.signal.clone(),
                 decode_source: classification.decode_source,
                 packet_message_number: classification.packet_message_number,
-            });
+            },
+        );
 
         if let Some(kind) = to_early_simulator_traffic_kind(classification.kind) {
             self.early_simulator_traffic_observations
@@ -1553,38 +1837,71 @@ impl Connection {
                 });
         }
         if classification.kind == FirstSimulatorInboundMessageKind::CoarseLocationUpdate
-            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && classification.decode_source
+                == FirstSimulatorInboundDecodeSource::PacketMessageNumber
         {
             if let Some(decoded) = decode_coarse_location_update(payload) {
-                self.simulator_payload_decode_summary.coarse_location_updates += 1;
-                self.simulator_payload_decode_summary.coarse_location_last_count =
-                    Some(decoded.location_count);
-                self.simulator_payload_decode_summary.coarse_location_last_first =
-                    decoded.first_location;
-                self.simulator_payload_decode_summary.coarse_location_last_second =
-                    decoded.second_location;
-                self.simulator_payload_decode_summary.coarse_location_last_third =
-                    decoded.third_location;
+                self.simulator_payload_decode_summary
+                    .coarse_location_updates += 1;
+                self.simulator_payload_decode_summary
+                    .coarse_location_last_count = Some(decoded.location_count);
+                self.simulator_payload_decode_summary
+                    .coarse_location_last_first = decoded.first_location;
+                self.simulator_payload_decode_summary
+                    .coarse_location_last_second = decoded.second_location;
+                self.simulator_payload_decode_summary
+                    .coarse_location_last_third = decoded.third_location;
+                self.simulator_payload_decode_summary
+                    .coarse_location_last_avatars = decoded.avatars;
+                self.simulator_payload_decode_summary
+                    .coarse_location_last_self_index = decoded.self_index;
+            }
+        }
+        if classification.kind == FirstSimulatorInboundMessageKind::RegionHandshake
+            && classification.decode_source
+                == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        {
+            if let Some(sim_name) = decode_region_handshake_sim_name(payload) {
+                self.simulator_payload_decode_summary
+                    .region_handshake_updates += 1;
+                self.simulator_payload_decode_summary
+                    .region_handshake_last_sim_name = Some(sim_name);
+            }
+        }
+        if classification.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete
+            && classification.decode_source
+                == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+        {
+            if let Some(decoded) = decode_agent_movement_complete(payload) {
+                self.simulator_payload_decode_summary
+                    .agent_movement_complete_updates += 1;
+                self.simulator_payload_decode_summary
+                    .agent_movement_complete_last_position = Some(decoded.position);
+                self.simulator_payload_decode_summary
+                    .agent_movement_complete_last_region_handle = Some(decoded.region_handle);
             }
         }
         if classification.kind == FirstSimulatorInboundMessageKind::HealthMessage
-            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && classification.decode_source
+                == FirstSimulatorInboundDecodeSource::PacketMessageNumber
         {
             if let Some(decoded) = decode_health_message(payload) {
                 self.simulator_payload_decode_summary.health_updates += 1;
-                self.simulator_payload_decode_summary.health_last_basis_points =
-                    Some(health_to_basis_points(decoded.health));
+                self.simulator_payload_decode_summary
+                    .health_last_basis_points = Some(health_to_basis_points(decoded.health));
             }
         }
         if classification.kind == FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage
-            && classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && classification.decode_source
+                == FirstSimulatorInboundDecodeSource::PacketMessageNumber
         {
             if let Some(decoded) = decode_simulator_viewer_time_message(payload) {
-                self.simulator_payload_decode_summary.simulator_viewer_time_updates += 1;
-                self.simulator_payload_decode_summary.simulator_viewer_time_last_body_len =
-                    Some(decoded.body_len);
-                self.simulator_payload_decode_summary.simulator_viewer_time_last_signature =
-                    decoded.signature;
+                self.simulator_payload_decode_summary
+                    .simulator_viewer_time_updates += 1;
+                self.simulator_payload_decode_summary
+                    .simulator_viewer_time_last_body_len = Some(decoded.body_len);
+                self.simulator_payload_decode_summary
+                    .simulator_viewer_time_last_signature = decoded.signature;
             }
         }
         if let Some(kind) = to_region_transition_control_kind(classification.kind) {
@@ -1625,13 +1942,13 @@ impl Connection {
                 return Err(ConnectionError::FirstSimulatorReceiveFailed {
                     bind: bind.to_string(),
                     reason: err.to_string(),
-                })
+                });
             }
             Err(_) => {
                 return Err(ConnectionError::FirstSimulatorReceiveTimedOut {
                     bind: bind.to_string(),
                     timeout_ms: wait_timeout.as_millis(),
-                })
+                });
             }
         };
 
@@ -1840,7 +2157,7 @@ impl Connection {
                     return Err(ConnectionError::FirstSimulatorReceiveFailed {
                         bind: bind.to_string(),
                         reason: err.to_string(),
-                    })
+                    });
                 }
                 Err(_) => {
                     timed_out = true;
@@ -1848,7 +2165,8 @@ impl Connection {
                 }
             };
 
-            let classification = self.observe_first_simulator_inbound_payload(&buf[..received_len])?;
+            let classification =
+                self.observe_first_simulator_inbound_payload(&buf[..received_len])?;
             let observation_index = self.first_simulator_handshake_receive_diagnostics.len();
             observations.push(FirstSimulatorHandshakeProbeObservation {
                 observation_index,
@@ -2046,9 +2364,7 @@ impl Connection {
             .config
             .connect_timeout
             .max(EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT);
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()?;
+        let client = reqwest::Client::builder().timeout(timeout).build()?;
 
         let mut attempts = Vec::new();
         for attempt in 1..=MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
@@ -2130,6 +2446,684 @@ impl Connection {
             attempts_len: attempts.len(),
             attempts,
         })
+    }
+
+    pub async fn poll_event_queue_once(
+        &self,
+        event_queue_url: &str,
+        ack: u64,
+    ) -> Result<EventQueuePollResult, ConnectionError> {
+        let timeout = self
+            .config
+            .connect_timeout
+            .max(EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT);
+        self.poll_event_queue_once_with_timeout(event_queue_url, ack, timeout)
+            .await
+    }
+
+    pub async fn poll_event_queue_once_with_timeout(
+        &self,
+        event_queue_url: &str,
+        ack: u64,
+        timeout: Duration,
+    ) -> Result<EventQueuePollResult, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(timeout.max(Duration::from_millis(100)))
+            .build()?;
+
+        let request_body = llsd_event_queue_request(ack, false);
+        let response = client
+            .post(event_queue_url)
+            .header(CONTENT_TYPE, LLSD_XML_CONTENT_TYPE)
+            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+            .body(request_body)
+            .send()
+            .await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+
+        parse_event_queue_poll_response(&bytes, content_type.as_deref())
+    }
+
+    pub async fn resolve_avatar_display_names(
+        &self,
+        capability_url: &str,
+        agent_ids: &[String],
+    ) -> Result<Vec<ResolvedAvatarName>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        resolve_avatar_display_names_with_timeout(
+            capability_url,
+            agent_ids,
+            self.config.connect_timeout.max(Duration::from_secs(15)),
+        )
+        .await
+    }
+
+    pub async fn fetch_agent_profile(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+    ) -> Result<AgentProfileData, ConnectionError> {
+        self.fetch_agent_profile_with_timeout(
+            capability_url,
+            avatar_id,
+            self.config.connect_timeout.max(Duration::from_secs(15)),
+        )
+        .await
+    }
+
+    pub async fn fetch_profile_picks(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+    ) -> Result<Vec<AgentProfilePick>, ConnectionError> {
+        Ok(self
+            .fetch_agent_profile(capability_url, avatar_id)
+            .await?
+            .picks)
+    }
+
+    pub async fn fetch_pick_info(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+        pick_id: &str,
+    ) -> Result<Option<AgentProfilePickDetails>, ConnectionError> {
+        let profile = self.fetch_agent_profile(capability_url, avatar_id).await?;
+        Ok(profile
+            .picks
+            .iter()
+            .find(|entry| entry.id == pick_id)
+            .map(|entry| AgentProfilePickDetails {
+                id: entry.id.clone(),
+                name: Some(entry.name.clone()),
+                ..AgentProfilePickDetails::default()
+            }))
+    }
+
+    pub async fn fetch_profile_classifieds(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+    ) -> Result<Vec<AgentProfileClassified>, ConnectionError> {
+        Ok(self
+            .fetch_agent_profile(capability_url, avatar_id)
+            .await?
+            .classifieds)
+    }
+
+    pub async fn fetch_classified_info(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+        classified_id: &str,
+    ) -> Result<Option<AgentProfileClassifiedDetails>, ConnectionError> {
+        let profile = self.fetch_agent_profile(capability_url, avatar_id).await?;
+        Ok(profile
+            .classifieds
+            .iter()
+            .find(|entry| entry.id == classified_id)
+            .map(|entry| AgentProfileClassifiedDetails {
+                id: entry.id.clone(),
+                name: Some(entry.name.clone()),
+                ..AgentProfileClassifiedDetails::default()
+            }))
+    }
+
+    pub async fn fetch_profile_notes(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+    ) -> Result<String, ConnectionError> {
+        Ok(self
+            .fetch_agent_profile(capability_url, avatar_id)
+            .await?
+            .notes)
+    }
+
+    pub async fn fetch_profile_groups(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+    ) -> Result<Vec<AgentProfileGroup>, ConnectionError> {
+        Ok(self
+            .fetch_agent_profile(capability_url, avatar_id)
+            .await?
+            .groups)
+    }
+
+    pub async fn fetch_profile_image_bytes(
+        &self,
+        image_cap_url: &str,
+        asset_id: &str,
+    ) -> Result<Vec<u8>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if image_cap_url.trim().is_empty() {
+            return Err(ConnectionError::MissingCapability(String::from(
+                "GetTexture/ViewerAsset",
+            )));
+        }
+        let asset_id = asset_id.trim();
+        if asset_id.is_empty() {
+            return Err(ConnectionError::InvalidResponse(String::from(
+                "empty asset id for profile image fetch",
+            )));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout.max(Duration::from_secs(15)))
+            .build()?;
+        let base = image_cap_url.trim_end_matches('/');
+        let candidates = [
+            format!("{base}?texture_id={asset_id}"),
+            format!("{base}/?texture_id={asset_id}"),
+            format!("{base}/{asset_id}"),
+            format!("{base}?id={asset_id}"),
+            format!("{base}?asset_id={asset_id}"),
+        ];
+        let mut last_error: Option<ConnectionError> = None;
+        for url in &candidates {
+            let response = match client
+                .get(url)
+                .header(ACCEPT, "image/x-j2c,image/jp2,image/*,*/*")
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error = Some(ConnectionError::Http(err));
+                    continue;
+                }
+            };
+            let status = response.status();
+            let bytes = response.bytes().await?;
+            if status.is_success() {
+                return Ok(bytes.to_vec());
+            }
+            last_error = Some(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+        Err(last_error.unwrap_or_else(|| {
+            ConnectionError::CapabilityDecode(String::from("profile image fetch failed"))
+        }))
+    }
+
+    pub fn derive_profile_feed_url(
+        &self,
+        profile: &AgentProfileData,
+        capability_url: Option<&str>,
+    ) -> Option<String> {
+        if let Some(url) = profile.profile_url.as_ref() {
+            if !url.trim().is_empty() {
+                return Some(url.clone());
+            }
+        }
+        let cap_url = capability_url?.trim();
+        if cap_url.is_empty() {
+            return None;
+        }
+        let parsed = reqwest::Url::parse(cap_url).ok()?;
+        let host = parsed.host_str()?;
+        Some(format!("{}://{host}/my/{}", parsed.scheme(), profile.id))
+    }
+
+    async fn fetch_agent_profile_with_timeout(
+        &self,
+        capability_url: &str,
+        avatar_id: &str,
+        timeout: Duration,
+    ) -> Result<AgentProfileData, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if capability_url.trim().is_empty() {
+            return Err(ConnectionError::MissingCapability(String::from(
+                "AgentProfile",
+            )));
+        }
+        let avatar_id = avatar_id.trim();
+        if avatar_id.is_empty() {
+            return Err(ConnectionError::InvalidResponse(String::from(
+                "empty avatar id for AgentProfile fetch",
+            )));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(timeout.max(Duration::from_millis(100)))
+            .build()?;
+        let final_url = format!("{}/{}", capability_url.trim_end_matches('/'), avatar_id);
+        let response = client
+            .get(&final_url)
+            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+            .send()
+            .await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+        parse_agent_profile_response(&bytes, content_type.as_deref(), avatar_id)
+    }
+
+    pub fn extract_nearby_chat_messages(
+        &self,
+        poll: &EventQueuePollResult,
+    ) -> Vec<NearbyChatMessage> {
+        poll.events
+            .iter()
+            .filter_map(|event| {
+                if !event.message.to_ascii_lowercase().contains("chat") {
+                    return None;
+                }
+                let sender = event
+                    .fields
+                    .get("from")
+                    .or_else(|| event.fields.get("from_name"))
+                    .or_else(|| event.fields.get("owner_name"))
+                    .cloned()
+                    .unwrap_or_else(|| String::from("unknown"));
+                let text = event
+                    .fields
+                    .get("message")
+                    .or_else(|| event.fields.get("text"))
+                    .or_else(|| event.fields.get("chat"))
+                    .cloned()?;
+                Some(NearbyChatMessage {
+                    sender,
+                    text,
+                    source: event.message.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn send_nearby_chat(
+        &mut self,
+        text: &str,
+        bind: &str,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<Vec<NearbyChatMessage>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if receive_max_packets == 0 {
+            return Ok(Vec::new());
+        }
+        let (prerequisites, socket) = self.prepare_chat_socket(bind).await?;
+
+        let chat_payload = encode_chat_from_viewer_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            text,
+            1,
+            0,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &prerequisites.target,
+            &chat_payload,
+            &socket,
+        )
+        .await?;
+        self.receive_nearby_chat_on_socket(&socket, bind, receive_timeout, receive_max_packets)
+            .await
+    }
+
+    pub async fn poll_nearby_chat_udp(
+        &mut self,
+        bind: &str,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<Vec<NearbyChatMessage>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if receive_max_packets == 0 {
+            return Ok(Vec::new());
+        }
+        let (_prerequisites, socket) = self.prepare_chat_socket(bind).await?;
+        self.receive_nearby_chat_on_socket(&socket, bind, receive_timeout, receive_max_packets)
+            .await
+    }
+
+    pub async fn open_social_circuit(
+        &mut self,
+        bind: &str,
+    ) -> Result<SocialCircuit, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let (prerequisites, socket) = self.prepare_chat_socket(bind).await?;
+        Ok(SocialCircuit {
+            bind: bind.to_string(),
+            target: prerequisites.target,
+            socket,
+        })
+    }
+
+    pub async fn send_retrieve_instant_messages(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_retrieve_instant_messages_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    pub async fn send_direct_im(
+        &mut self,
+        circuit: &SocialCircuit,
+        to_agent_id: &str,
+        session_id: &str,
+        from_name: &str,
+        message: &str,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_improved_instant_message_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            to_agent_id,
+            session_id,
+            from_name,
+            message,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    pub async fn fetch_agent_profile_legacy(
+        &mut self,
+        circuit: &SocialCircuit,
+        avatar_id: &str,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<AgentProfileData, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_avatar_properties_request_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            avatar_id,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await?;
+        let notes_request = encode_generic_message_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            "avatarnotesrequest",
+            &[avatar_id],
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &notes_request,
+            &circuit.socket,
+        )
+        .await?;
+        let picks_request = encode_generic_message_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            "avatarpicksrequest",
+            &[avatar_id],
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &picks_request,
+            &circuit.socket,
+        )
+        .await?;
+        let classifieds_request = encode_generic_message_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            "avatarclassifiedsrequest",
+            &[avatar_id],
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &classifieds_request,
+            &circuit.socket,
+        )
+        .await?;
+        let groups_request = encode_generic_message_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            "avatargroupsrequest",
+            &[avatar_id],
+        )?;
+        let _ = self
+            .send_first_simulator_handshake_datagram_with_socket(
+                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                &circuit.target,
+                &groups_request,
+                &circuit.socket,
+            )
+            .await;
+
+        let mut out = AgentProfileData {
+            id: avatar_id.to_string(),
+            ..AgentProfileData::default()
+        };
+        let mut got_properties = false;
+        let mut requested_pick_details = BTreeSet::new();
+        let mut requested_classified_details = BTreeSet::new();
+        let mut buf = vec![0u8; 4096];
+        let started = Instant::now();
+        for _ in 0..receive_max_packets {
+            if started.elapsed() > Duration::from_secs(8) {
+                break;
+            }
+            let recv = timeout(receive_timeout, circuit.socket.recv_from(&mut buf)).await;
+            let (received_len, _) = match recv {
+                Ok(Ok(parts)) => parts,
+                Ok(Err(err)) => {
+                    return Err(ConnectionError::FirstSimulatorReceiveFailed {
+                        bind: circuit.bind.clone(),
+                        reason: err.to_string(),
+                    });
+                }
+                Err(_) => break,
+            };
+            let packet = &buf[..received_len];
+            let _ = self.observe_first_simulator_inbound_payload(packet);
+            if let Some(profile) = decode_legacy_avatar_properties_reply(packet, avatar_id) {
+                out.id = profile.id;
+                out.sl_about_text = profile.sl_about_text;
+                out.fl_about_text = profile.fl_about_text;
+                out.profile_url = profile.profile_url;
+                out.sl_image_id = profile.sl_image_id;
+                out.fl_image_id = profile.fl_image_id;
+                out.partner_id = profile.partner_id;
+                out.member_since = profile.member_since;
+                out.allow_publish = profile.allow_publish;
+                out.identified = profile.identified;
+                out.transacted = profile.transacted;
+                out.online = profile.online;
+                got_properties = true;
+            }
+            if let Some(groups) = decode_legacy_avatar_groups_reply(packet, avatar_id) {
+                out.groups = groups;
+            }
+            if let Some(notes) = decode_legacy_avatar_notes_reply(packet, avatar_id) {
+                out.notes = notes;
+            }
+            if let Some(picks) = decode_legacy_avatar_picks_reply(packet, avatar_id) {
+                out.picks = picks;
+                for pick in &out.picks {
+                    if requested_pick_details.insert(pick.id.clone()) {
+                        let pick_request = encode_generic_message_payload(
+                            &prerequisites,
+                            self.next_first_simulator_packet_id(),
+                            "pickinforequest",
+                            &[pick.id.as_str()],
+                        )?;
+                        let _ = self
+                            .send_first_simulator_handshake_datagram_with_socket(
+                                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                                &circuit.target,
+                                &pick_request,
+                                &circuit.socket,
+                            )
+                            .await;
+                    }
+                }
+            }
+            if let Some(pick_details) = decode_legacy_pick_info_reply(packet, avatar_id) {
+                if let Some(existing) = out
+                    .pick_details
+                    .iter_mut()
+                    .find(|d| d.id == pick_details.id)
+                {
+                    *existing = pick_details;
+                } else {
+                    out.pick_details.push(pick_details);
+                }
+            }
+            if let Some(classifieds) = decode_legacy_avatar_classifieds_reply(packet, avatar_id) {
+                out.classifieds = classifieds;
+                for classified in &out.classifieds {
+                    if requested_classified_details.insert(classified.id.clone()) {
+                        let details_request = encode_classified_info_request_payload(
+                            &prerequisites,
+                            self.next_first_simulator_packet_id(),
+                            &classified.id,
+                        )?;
+                        let _ = self
+                            .send_first_simulator_handshake_datagram_with_socket(
+                                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                                &circuit.target,
+                                &details_request,
+                                &circuit.socket,
+                            )
+                            .await;
+                    }
+                }
+            }
+            if let Some(classified_details) = decode_legacy_classified_info_reply(packet, avatar_id)
+            {
+                if let Some(existing) = out
+                    .classified_details
+                    .iter_mut()
+                    .find(|d| d.id == classified_details.id)
+                {
+                    *existing = classified_details;
+                } else {
+                    out.classified_details.push(classified_details);
+                }
+            }
+            if got_properties
+                && started.elapsed() > Duration::from_millis(1500)
+                && out.pick_details.len() >= out.picks.len()
+                && out.classified_details.len() >= out.classifieds.len()
+            {
+                break;
+            }
+        }
+
+        if got_properties {
+            Ok(out)
+        } else {
+            Err(ConnectionError::CapabilityDecode(String::from(
+                "legacy AvatarPropertiesReply not received (timeout)",
+            )))
+        }
+    }
+
+    pub async fn poll_social_events(
+        &mut self,
+        circuit: &SocialCircuit,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<Vec<SocialEvent>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let mut events = Vec::new();
+        let mut buf = vec![0u8; 4096];
+        for _ in 0..receive_max_packets {
+            let recv = timeout(receive_timeout, circuit.socket.recv_from(&mut buf)).await;
+            let (received_len, _) = match recv {
+                Ok(Ok(parts)) => parts,
+                Ok(Err(err)) => {
+                    return Err(ConnectionError::FirstSimulatorReceiveFailed {
+                        bind: circuit.bind.clone(),
+                        reason: err.to_string(),
+                    });
+                }
+                Err(_) => break,
+            };
+            let payload = &buf[..received_len];
+            let _ = self.observe_first_simulator_inbound_payload(payload);
+            events.extend(decode_social_events(payload));
+        }
+        Ok(events)
     }
 
     pub async fn fetch_simulator_features_once(
@@ -2385,6 +3379,180 @@ impl Connection {
             }
         }
     }
+
+    async fn prepare_chat_socket(
+        &mut self,
+        bind: &str,
+    ) -> Result<(FirstSimulatorHandshakePrerequisites, UdpSocket), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+
+        let socket = UdpSocket::bind(bind).await.map_err(|err| {
+            ConnectionError::InvalidFirstSimulatorReceiveBind {
+                bind: bind.to_string(),
+                reason: err.to_string(),
+            }
+        })?;
+
+        let use_circuit = encode_first_simulator_use_circuit_code_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::UseCircuitCode,
+            &prerequisites.target,
+            &use_circuit,
+            &socket,
+        )
+        .await?;
+
+        let complete_movement = encode_first_simulator_complete_agent_movement_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &prerequisites.target,
+            &complete_movement,
+            &socket,
+        )
+        .await?;
+
+        Ok((prerequisites, socket))
+    }
+
+    async fn receive_nearby_chat_on_socket(
+        &mut self,
+        socket: &UdpSocket,
+        bind: &str,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<Vec<NearbyChatMessage>, ConnectionError> {
+        let mut nearby = Vec::new();
+        let mut buf = vec![0u8; 2048];
+        for _ in 0..receive_max_packets {
+            let recv = timeout(receive_timeout, socket.recv_from(&mut buf)).await;
+            let (received_len, _) = match recv {
+                Ok(Ok(parts)) => parts,
+                Ok(Err(err)) => {
+                    return Err(ConnectionError::FirstSimulatorReceiveFailed {
+                        bind: bind.to_string(),
+                        reason: err.to_string(),
+                    });
+                }
+                Err(_) => break,
+            };
+            let payload = &buf[..received_len];
+            let _ = self.observe_first_simulator_inbound_payload(payload);
+            if let Some(chat) = decode_chat_from_simulator(payload) {
+                nearby.push(chat);
+            }
+        }
+        Ok(nearby)
+    }
+}
+
+pub async fn poll_event_queue_url_once(
+    event_queue_url: &str,
+    ack: u64,
+    timeout: Duration,
+) -> Result<EventQueuePollResult, ConnectionError> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout.max(Duration::from_secs(5)))
+        .build()?;
+    let request_body = llsd_event_queue_request(ack, false);
+    let response = client
+        .post(event_queue_url)
+        .header(CONTENT_TYPE, LLSD_XML_CONTENT_TYPE)
+        .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+        .body(request_body)
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(err) => {
+            if err.is_timeout() {
+                return Ok(EventQueuePollResult {
+                    id: Some(ack),
+                    events: Vec::new(),
+                });
+            }
+            return Err(ConnectionError::Http(err));
+        }
+    };
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
+    let bytes = response.bytes().await?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        if matches!(status.as_u16(), 499 | 502 | 503 | 504)
+            || is_retryable_event_queue_http_failure(status, &body)
+        {
+            return Ok(EventQueuePollResult {
+                id: Some(ack),
+                events: Vec::new(),
+            });
+        }
+        return Err(ConnectionError::HttpStatus { status, body });
+    }
+    parse_event_queue_poll_response(&bytes, content_type.as_deref())
+}
+
+pub async fn resolve_avatar_display_names_with_timeout(
+    capability_url: &str,
+    agent_ids: &[String],
+    timeout: Duration,
+) -> Result<Vec<ResolvedAvatarName>, ConnectionError> {
+    let ids: Vec<&str> = agent_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut url = capability_url.to_string();
+    if !url.contains('?') {
+        url.push('?');
+    } else if !url.ends_with('?') && !url.ends_with('&') {
+        url.push('&');
+    }
+    for (idx, id) in ids.iter().enumerate() {
+        if idx > 0 {
+            url.push('&');
+        }
+        url.push_str("ids=");
+        url.push_str(id);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(timeout.max(Duration::from_secs(5)))
+        .build()?;
+    let response = client
+        .get(url)
+        .header(ACCEPT, "application/llsd+xml, application/json")
+        .send()
+        .await?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase());
+    let bytes = response.bytes().await?;
+    if !status.is_success() {
+        return Err(ConnectionError::HttpStatus {
+            status,
+            body: String::from_utf8_lossy(&bytes).to_string(),
+        });
+    }
+    parse_resolved_avatar_names(&bytes, content_type.as_deref())
 }
 
 fn llsd_string_array(items: &[&str]) -> String {
@@ -2401,6 +3569,179 @@ fn llsd_event_queue_request(ack: u64, done: bool) -> String {
     format!(
         "<llsd><map><key>ack</key><integer>{ack}</integer><key>done</key><boolean>{done_str}</boolean></map></llsd>"
     )
+}
+
+fn encode_chat_from_viewer_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    text: &str,
+    chat_type: u8,
+    channel: i32,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut message = text.as_bytes().to_vec();
+    // Firestorm packs ChatData.Message as a variable string including a trailing NUL.
+    message.push(0);
+    let msg_len = u16::try_from(message.len())
+        .map_err(|_| ConnectionError::CapabilityDecode(String::from("chat message too long")))?;
+    let mut body = Vec::with_capacity(16 + 16 + 2 + message.len() + 1 + 4);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&msg_len.to_le_bytes());
+    body.extend_from_slice(&message);
+    body.push(chat_type);
+    body.extend_from_slice(&channel.to_le_bytes());
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_CHAT_FROM_VIEWER_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_retrieve_instant_messages_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(32);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_RETRIEVE_INSTANT_MESSAGES_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_avatar_properties_request_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    avatar_id: &str,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let avatar_id = parse_uuid_bytes(avatar_id)?;
+    let mut body = Vec::with_capacity(48);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&avatar_id);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_AVATAR_PROPERTIES_REQUEST_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_classified_info_request_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    classified_id: &str,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let classified_id = parse_uuid_bytes(classified_id)?;
+    let mut body = Vec::with_capacity(48);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&classified_id);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_CLASSIFIED_INFO_REQUEST_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_generic_message_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    method: &str,
+    params: &[&str],
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::new();
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&[0u8; 16]); // TransactionID
+    let method = method.as_bytes();
+    let method_len = u8::try_from(method.len())
+        .map_err(|_| ConnectionError::CapabilityDecode(String::from("generic method too long")))?;
+    body.push(method_len);
+    body.extend_from_slice(method);
+    body.extend_from_slice(&[0u8; 16]); // Invoice
+    let block_count = u8::try_from(params.len()).map_err(|_| {
+        ConnectionError::CapabilityDecode(String::from("generic parameter count overflow"))
+    })?;
+    body.push(block_count);
+    for param in params {
+        let bytes = param.as_bytes();
+        let len = u8::try_from(bytes.len()).map_err(|_| {
+            ConnectionError::CapabilityDecode(String::from("generic parameter too long"))
+        })?;
+        body.push(len);
+        body.extend_from_slice(bytes);
+    }
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_GENERIC_MESSAGE_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_improved_instant_message_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    to_agent_id: &str,
+    im_session_id: &str,
+    from_name: &str,
+    message: &str,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let to_id = parse_uuid_bytes(to_agent_id)?;
+    let im_id = parse_uuid_bytes(im_session_id)?;
+
+    let mut from_name_buf = from_name.as_bytes().to_vec();
+    from_name_buf.push(0);
+    let from_name_len = u8::try_from(from_name_buf.len())
+        .map_err(|_| ConnectionError::CapabilityDecode(String::from("from_name too long")))?;
+
+    let mut message_buf = message.as_bytes().to_vec();
+    message_buf.push(0);
+    let message_len = u16::try_from(message_buf.len())
+        .map_err(|_| ConnectionError::CapabilityDecode(String::from("im message too long")))?;
+
+    let binary_bucket = [0u8; 1];
+    let binary_bucket_len = u16::try_from(binary_bucket.len())
+        .map_err(|_| ConnectionError::CapabilityDecode(String::from("invalid binary bucket")))?;
+
+    let mut body = Vec::with_capacity(128 + from_name_buf.len() + message_buf.len());
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.push(0); // FromGroup
+    body.extend_from_slice(&to_id);
+    body.extend_from_slice(&0u32.to_le_bytes()); // ParentEstateID
+    body.extend_from_slice(&[0u8; 16]); // RegionID
+    body.extend_from_slice(&0f32.to_le_bytes());
+    body.extend_from_slice(&0f32.to_le_bytes());
+    body.extend_from_slice(&0f32.to_le_bytes());
+    body.push(0); // Offline
+    body.push(0); // Dialog: IM_NOTHING_SPECIAL
+    body.extend_from_slice(&im_id);
+    body.extend_from_slice(&0u32.to_le_bytes()); // Timestamp
+    body.push(from_name_len);
+    body.extend_from_slice(&from_name_buf);
+    body.extend_from_slice(&message_len.to_le_bytes());
+    body.extend_from_slice(&message_buf);
+    body.extend_from_slice(&binary_bucket_len.to_le_bytes());
+    body.extend_from_slice(&binary_bucket);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_IMPROVED_INSTANT_MESSAGE_LOW_ID,
+        &body,
+    ))
 }
 
 fn encode_first_simulator_use_circuit_code_payload(
@@ -2454,6 +3795,28 @@ fn parse_uuid_bytes(raw: &str) -> Result<[u8; 16], ConnectionError> {
         })?;
     }
     Ok(bytes)
+}
+
+fn format_uuid_bytes(bytes: [u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
 }
 
 fn encode_lludp_low_frequency_packet(packet_id: u32, message_id: u16, body: &[u8]) -> Vec<u8> {
@@ -2578,6 +3941,15 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == lludp_low_frequency_message_number(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ChatFromSimulator,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal: format!("packet:0x{num:08x}"),
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage,
@@ -2652,11 +4024,8 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
-        num
-            if num
-                == lludp_medium_frequency_message_number(
-                    LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID,
-                ) =>
+        num if num
+            == lludp_medium_frequency_message_number(LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID) =>
         {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::ConfirmEnableSimulator,
@@ -2676,6 +4045,9 @@ fn to_early_simulator_traffic_kind(
     match kind {
         FirstSimulatorInboundMessageKind::HealthMessage => {
             Some(EarlySimulatorTrafficKind::HealthMessage)
+        }
+        FirstSimulatorInboundMessageKind::ChatFromSimulator => {
+            Some(EarlySimulatorTrafficKind::ChatFromSimulator)
         }
         FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage => {
             Some(EarlySimulatorTrafficKind::SimulatorViewerTimeMessage)
@@ -2723,26 +4095,68 @@ fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocation
     if body.len() < needed {
         return None;
     }
-    let first_location = if location_count > 0 {
-        Some([body[1], body[2], body[3]])
-    } else {
-        None
-    };
-    let second_location = if location_count > 1 {
-        Some([body[4], body[5], body[6]])
-    } else {
-        None
-    };
-    let third_location = if location_count > 2 {
-        Some([body[7], body[8], body[9]])
-    } else {
-        None
-    };
+    let count = usize::from(location_count);
+    // Message-template shape:
+    // [Location variable count:u8][count * (x:u8,y:u8,z:u8)][Index You:i16,Prey:i16][AgentData variable count:u8][count * AgentID:uuid]
+    // We decode location entries first (always), then index/agent blocks when present.
+    let mut avatars = Vec::with_capacity(count);
+    let mut first_location = None;
+    let mut second_location = None;
+    let mut third_location = None;
+    for idx in 0..count {
+        let base = 1 + idx * 3;
+        let xyz = [body[base], body[base + 1], body[base + 2]];
+        if idx == 0 {
+            first_location = Some(xyz);
+        } else if idx == 1 {
+            second_location = Some(xyz);
+        } else if idx == 2 {
+            third_location = Some(xyz);
+        }
+        avatars.push(DecodedCoarseAvatar {
+            agent_id: None,
+            xyz,
+        });
+    }
+    let mut self_index: Option<u16> = None;
+    let mut offset = 1usize.saturating_add(count.saturating_mul(3));
+    if body.len() >= offset + 4 {
+        let you = i16::from_le_bytes(body.get(offset..offset + 2)?.try_into().ok()?);
+        let _prey = i16::from_le_bytes(body.get(offset + 2..offset + 4)?.try_into().ok()?);
+        if you >= 0 {
+            let you_idx = you as usize;
+            if you_idx < count {
+                self_index = Some(you as u16);
+            }
+        }
+        offset += 4;
+    }
+    if body.len() > offset {
+        let agent_count = usize::from(*body.get(offset)?);
+        offset += 1;
+        let max_assign = agent_count.min(count);
+        if body.len() >= offset + max_assign * 16 {
+            for idx in 0..max_assign {
+                let raw: [u8; 16] = body
+                    .get(offset..offset + 16)
+                    .and_then(|s| s.try_into().ok())?;
+                offset += 16;
+                let id = format_uuid_bytes(raw);
+                if !is_null_uuid(&id) {
+                    if let Some(entry) = avatars.get_mut(idx) {
+                        entry.agent_id = Some(id);
+                    }
+                }
+            }
+        }
+    }
     Some(DecodedCoarseLocationUpdate {
         location_count,
         first_location,
         second_location,
         third_location,
+        avatars,
+        self_index,
     })
 }
 
@@ -2760,9 +4174,643 @@ fn decode_health_message(payload: &[u8]) -> Option<DecodedHealthMessage> {
     Some(DecodedHealthMessage { health })
 }
 
-fn decode_simulator_viewer_time_message(payload: &[u8]) -> Option<DecodedSimulatorViewerTimeMessage> {
+fn decode_region_handshake_sim_name(payload: &[u8]) -> Option<String> {
     let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID)
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let mut offset = 0usize;
+    offset += 4; // RegionFlags
+    offset += 1; // SimAccess
+    let sim_name = read_var_string_u8(body, &mut offset)?;
+    if sim_name.trim().is_empty() {
+        return None;
+    }
+    Some(sim_name)
+}
+
+fn read_vector3f_i32(body: &[u8], offset: &mut usize) -> Option<[i32; 3]> {
+    if body.len() < *offset + 12 {
+        return None;
+    }
+    let x = f32::from_le_bytes(body.get(*offset..(*offset + 4))?.try_into().ok()?);
+    *offset += 4;
+    let y = f32::from_le_bytes(body.get(*offset..(*offset + 4))?.try_into().ok()?);
+    *offset += 4;
+    let z = f32::from_le_bytes(body.get(*offset..(*offset + 4))?.try_into().ok()?);
+    *offset += 4;
+    Some([x.round() as i32, y.round() as i32, z.round() as i32])
+}
+
+fn decode_agent_movement_complete(payload: &[u8]) -> Option<DecodedAgentMovementComplete> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number
+        != lludp_low_frequency_message_number(LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    offset += 16; // SessionID
+    let position = read_vector3f_i32(body, &mut offset)?;
+    offset += 12; // LookAt
+    let region_handle = u64::from_le_bytes(body.get(offset..offset + 8)?.try_into().ok()?);
+    Some(DecodedAgentMovementComplete {
+        position,
+        region_handle,
+    })
+}
+
+fn decode_chat_from_simulator(payload: &[u8]) -> Option<NearbyChatMessage> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+
+    let mut offset = 0usize;
+    let from_name_len = usize::from(*body.get(offset)?);
+    offset += 1;
+    let from_name = std::str::from_utf8(body.get(offset..offset + from_name_len)?)
+        .ok()?
+        .trim_end_matches('\0')
+        .to_string();
+    offset += from_name_len;
+
+    offset += 16; // SourceID
+    offset += 16; // OwnerID
+    offset += 1; // SourceType
+    offset += 1; // ChatType
+    offset += 1; // Audible
+    offset += 12; // Position
+
+    let msg_len_bytes: [u8; 2] = body.get(offset..offset + 2)?.try_into().ok()?;
+    let msg_len = usize::from(u16::from_le_bytes(msg_len_bytes));
+    offset += 2;
+    let text = std::str::from_utf8(body.get(offset..offset + msg_len)?)
+        .ok()?
+        .trim_end_matches('\0')
+        .to_string();
+
+    Some(NearbyChatMessage {
+        sender: if from_name.is_empty() {
+            String::from("unknown")
+        } else {
+            from_name
+        },
+        text,
+        source: String::from("ChatFromSimulator"),
+    })
+}
+
+fn decode_social_events(payload: &[u8]) -> Vec<SocialEvent> {
+    let Some(header) = decode_first_simulator_packet_header(payload) else {
+        return Vec::new();
+    };
+    let body = match payload.get(header.body_offset..) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    if header.message_number == lludp_low_frequency_message_number(LLUDP_ONLINE_NOTIFICATION_LOW_ID)
+    {
+        return decode_online_offline_notification_events(body, true);
+    }
+    if header.message_number
+        == lludp_low_frequency_message_number(LLUDP_OFFLINE_NOTIFICATION_LOW_ID)
+    {
+        return decode_online_offline_notification_events(body, false);
+    }
+    if header.message_number == lludp_low_frequency_message_number(LLUDP_CHANGE_USER_RIGHTS_LOW_ID)
+    {
+        return decode_change_user_rights_events(body);
+    }
+    if header.message_number
+        == lludp_low_frequency_message_number(LLUDP_IMPROVED_INSTANT_MESSAGE_LOW_ID)
+    {
+        return decode_improved_instant_message_event(body)
+            .into_iter()
+            .collect();
+    }
+    Vec::new()
+}
+
+fn decode_online_offline_notification_events(body: &[u8], online: bool) -> Vec<SocialEvent> {
+    let mut out = Vec::new();
+    let count = match body.first() {
+        Some(v) => usize::from(*v),
+        None => return out,
+    };
+    let mut offset = 1usize;
+    for _ in 0..count {
+        let raw: [u8; 16] = match body
+            .get(offset..offset + 16)
+            .and_then(|s| s.try_into().ok())
+        {
+            Some(v) => v,
+            None => break,
+        };
+        offset += 16;
+        let agent_id = format_uuid_bytes(raw);
+        if online {
+            out.push(SocialEvent::FriendOnline { agent_id });
+        } else {
+            out.push(SocialEvent::FriendOffline { agent_id });
+        }
+    }
+    out
+}
+
+fn decode_change_user_rights_events(body: &[u8]) -> Vec<SocialEvent> {
+    let mut out = Vec::new();
+    if body.len() < 17 {
+        return out;
+    }
+    let agent_id = match body.get(0..16).and_then(|s| s.try_into().ok()) {
+        Some(raw) => format_uuid_bytes(raw),
+        None => return out,
+    };
+    let rights_count = usize::from(body[16]);
+    let mut offset = 17usize;
+    for _ in 0..rights_count {
+        let related_id = match body
+            .get(offset..offset + 16)
+            .and_then(|s| s.try_into().ok())
+        {
+            Some(raw) => format_uuid_bytes(raw),
+            None => break,
+        };
+        offset += 16;
+        let rights = match body
+            .get(offset..offset + 4)
+            .and_then(|s| s.try_into().ok())
+            .map(i32::from_le_bytes)
+        {
+            Some(v) => v,
+            None => break,
+        };
+        offset += 4;
+        out.push(SocialEvent::FriendRights {
+            agent_id: agent_id.clone(),
+            related_id,
+            rights,
+        });
+    }
+    out
+}
+
+fn decode_improved_instant_message_event(body: &[u8]) -> Option<SocialEvent> {
+    if body.len() < 32 + 1 + 16 + 4 + 16 + 12 + 1 + 1 + 16 + 4 + 1 + 2 + 2 {
+        return None;
+    }
+    let mut offset = 0usize;
+    let from_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    offset += 16; // agent session id
+    offset += 1; // from_group
+    let to_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    offset += 4; // parent estate
+    offset += 16; // region id
+    offset += 12; // position
+    offset += 1; // offline
+    let dialog = *body.get(offset)?;
+    offset += 1;
+    let session_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let timestamp = u32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
+    offset += 4;
+    let from_name_len = usize::from(*body.get(offset)?);
+    offset += 1;
+    let from_name = std::str::from_utf8(body.get(offset..offset + from_name_len)?)
+        .ok()?
+        .trim_end_matches('\0')
+        .to_string();
+    offset += from_name_len;
+    let message_len = usize::from(u16::from_le_bytes(
+        body.get(offset..offset + 2)?.try_into().ok()?,
+    ));
+    offset += 2;
+    let message = std::str::from_utf8(body.get(offset..offset + message_len)?)
+        .ok()?
+        .trim_end_matches('\0')
+        .to_string();
+    Some(SocialEvent::DirectIm(DirectImPayload {
+        from_id,
+        to_id,
+        session_id,
+        from_name,
+        message,
+        dialog,
+        timestamp,
+    }))
+}
+
+fn decode_legacy_avatar_properties_reply(
+    payload: &[u8],
+    expected_avatar_id: &str,
+) -> Option<AgentProfileData> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number
+        != lludp_low_frequency_message_number(LLUDP_AVATAR_PROPERTIES_REPLY_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 68 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let avatar_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && avatar_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    let sl_image_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let fl_image_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let partner_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+
+    let sl_about_text = read_var_string_u16(body, &mut offset)?;
+    let fl_about_text = read_var_string_u8(body, &mut offset)?;
+    let born_on = read_var_string_u8(body, &mut offset)?;
+    let profile_url = read_var_string_u8(body, &mut offset)?;
+    let _caption = read_var_string_u8(body, &mut offset)?;
+    let flags = i32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
+
+    Some(AgentProfileData {
+        id: avatar_id,
+        profile_url: if profile_url.is_empty() {
+            None
+        } else {
+            Some(profile_url)
+        },
+        sl_about_text,
+        fl_about_text,
+        notes: String::new(),
+        sl_image_id: if is_null_uuid(&sl_image_id) {
+            None
+        } else {
+            Some(sl_image_id)
+        },
+        fl_image_id: if is_null_uuid(&fl_image_id) {
+            None
+        } else {
+            Some(fl_image_id)
+        },
+        partner_id: if is_null_uuid(&partner_id) {
+            None
+        } else {
+            Some(partner_id)
+        },
+        member_since: if born_on.is_empty() {
+            None
+        } else {
+            Some(born_on)
+        },
+        online: Some((flags & (1 << 4)) != 0),
+        allow_publish: Some((flags & (1 << 0)) != 0),
+        identified: Some((flags & (1 << 2)) != 0),
+        transacted: Some((flags & (1 << 3)) != 0),
+        display_name: None,
+        username: None,
+        groups: Vec::new(),
+        picks: Vec::new(),
+        pick_details: Vec::new(),
+        classifieds: Vec::new(),
+        classified_details: Vec::new(),
+    })
+}
+
+fn decode_legacy_avatar_groups_reply(
+    payload: &[u8],
+    expected_avatar_id: &str,
+) -> Option<Vec<AgentProfileGroup>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_AVATAR_GROUPS_REPLY_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 33 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let avatar_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && avatar_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    let group_count = usize::from(*body.get(offset)?);
+    offset += 1;
+    let mut groups = Vec::new();
+    for _ in 0..group_count {
+        if body.len() < offset + 8 + 1 + 16 + 16 {
+            break;
+        }
+        offset += 8; // GroupPowers
+        offset += 1; // AcceptNotices
+        let _group_title = read_var_string_u8(body, &mut offset)?;
+        let group_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+        offset += 16;
+        let group_name = read_var_string_u8(body, &mut offset)?;
+        let insignia_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+        offset += 16;
+        groups.push(AgentProfileGroup {
+            id: group_id,
+            name: group_name,
+            image_id: if is_null_uuid(&insignia_id) {
+                None
+            } else {
+                Some(insignia_id)
+            },
+        });
+    }
+    Some(groups)
+}
+
+fn decode_legacy_avatar_notes_reply(payload: &[u8], expected_avatar_id: &str) -> Option<String> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_AVATAR_NOTES_REPLY_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 32 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && target_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    read_var_string_u16(body, &mut offset)
+}
+
+fn decode_legacy_avatar_picks_reply(
+    payload: &[u8],
+    expected_avatar_id: &str,
+) -> Option<Vec<AgentProfilePick>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_AVATAR_PICKS_REPLY_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 33 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && target_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    let mut picks = Vec::new();
+    while offset < body.len() {
+        if body.len() < offset + 16 {
+            break;
+        }
+        let pick_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+        offset += 16;
+        let pick_name = read_var_string_u8(body, &mut offset)?;
+        picks.push(AgentProfilePick {
+            id: pick_id,
+            name: pick_name,
+        });
+    }
+    Some(picks)
+}
+
+fn decode_legacy_pick_info_reply(
+    payload: &[u8],
+    expected_avatar_id: &str,
+) -> Option<AgentProfilePickDetails> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != lludp_low_frequency_message_number(LLUDP_PICK_INFO_REPLY_LOW_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 16 + 16 + 1 + 16 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let pick_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let creator_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && creator_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    offset += 1; // top_pick
+    let parcel_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let name = read_var_string_u8(body, &mut offset)?;
+    let desc = read_var_string_u16(body, &mut offset)?;
+    let snapshot_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let _user = read_var_string_u8(body, &mut offset)?;
+    let _original_name = read_var_string_u8(body, &mut offset)?;
+    let sim_name = read_var_string_u8(body, &mut offset)?;
+    let global_position = read_vector3d_i32(body, &mut offset)?;
+    Some(AgentProfilePickDetails {
+        id: pick_id,
+        name: if name.is_empty() { None } else { Some(name) },
+        description: if desc.is_empty() { None } else { Some(desc) },
+        snapshot_id: if is_null_uuid(&snapshot_id) {
+            None
+        } else {
+            Some(snapshot_id)
+        },
+        parcel_id: if is_null_uuid(&parcel_id) {
+            None
+        } else {
+            Some(parcel_id)
+        },
+        sim_name: if sim_name.is_empty() {
+            None
+        } else {
+            Some(sim_name)
+        },
+        parcel_name: None,
+        global_position: Some(global_position),
+    })
+}
+
+fn decode_legacy_avatar_classifieds_reply(
+    payload: &[u8],
+    expected_avatar_id: &str,
+) -> Option<Vec<AgentProfileClassified>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number
+        != lludp_low_frequency_message_number(LLUDP_AVATAR_CLASSIFIED_REPLY_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 32 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && target_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    let mut classifieds = Vec::new();
+    while offset < body.len() {
+        if body.len() < offset + 16 {
+            break;
+        }
+        let classified_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+        offset += 16;
+        let name = read_var_string_u8(body, &mut offset)?;
+        classifieds.push(AgentProfileClassified {
+            id: classified_id,
+            name,
+        });
+    }
+    Some(classifieds)
+}
+
+fn decode_legacy_classified_info_reply(
+    payload: &[u8],
+    expected_avatar_id: &str,
+) -> Option<AgentProfileClassifiedDetails> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number
+        != lludp_low_frequency_message_number(LLUDP_CLASSIFIED_INFO_REPLY_LOW_ID)
+    {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    if body.len() < 16 + 16 + 4 + 4 + 4 {
+        return None;
+    }
+    let mut offset = 0usize;
+    offset += 16; // AgentID
+    let classified_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let creator_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    if !expected_avatar_id.is_empty()
+        && creator_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
+    {
+        return None;
+    }
+    offset += 16;
+    offset += 4; // creation date
+    offset += 4; // expiration date
+    let category = u32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
+    offset += 4;
+    let name = read_var_string_u8(body, &mut offset)?;
+    let desc = read_var_string_u16(body, &mut offset)?;
+    let parcel_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    offset += 4; // parent estate
+    let snapshot_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
+    offset += 16;
+    let sim_name = read_var_string_u8(body, &mut offset)?;
+    let global_position = read_vector3d_i32(body, &mut offset)?;
+    let parcel_name = read_var_string_u8(body, &mut offset)?;
+    let flags = *body.get(offset)?;
+    offset += 1;
+    let price_for_listing = i32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
+
+    Some(AgentProfileClassifiedDetails {
+        id: classified_id,
+        name: if name.is_empty() { None } else { Some(name) },
+        description: if desc.is_empty() { None } else { Some(desc) },
+        snapshot_id: if is_null_uuid(&snapshot_id) {
+            None
+        } else {
+            Some(snapshot_id)
+        },
+        parcel_id: if is_null_uuid(&parcel_id) {
+            None
+        } else {
+            Some(parcel_id)
+        },
+        sim_name: if sim_name.is_empty() {
+            None
+        } else {
+            Some(sim_name)
+        },
+        parcel_name: if parcel_name.is_empty() {
+            None
+        } else {
+            Some(parcel_name)
+        },
+        global_position: Some(global_position),
+        category: Some(category),
+        flags: Some(flags),
+        price_for_listing: Some(price_for_listing),
+    })
+}
+
+fn read_var_string_u8(body: &[u8], offset: &mut usize) -> Option<String> {
+    let len = usize::from(*body.get(*offset)?);
+    *offset += 1;
+    let text = std::str::from_utf8(body.get(*offset..(*offset + len))?).ok()?;
+    *offset += len;
+    Some(text.trim_end_matches('\0').to_string())
+}
+
+fn read_var_string_u16(body: &[u8], offset: &mut usize) -> Option<String> {
+    let len = usize::from(u16::from_le_bytes(
+        body.get(*offset..(*offset + 2))?.try_into().ok()?,
+    ));
+    *offset += 2;
+    let text = std::str::from_utf8(body.get(*offset..(*offset + len))?).ok()?;
+    *offset += len;
+    Some(text.trim_end_matches('\0').to_string())
+}
+
+fn read_vector3d_i32(body: &[u8], offset: &mut usize) -> Option<[i32; 3]> {
+    if body.len() < *offset + 24 {
+        return None;
+    }
+    let x = f64::from_le_bytes(body.get(*offset..(*offset + 8))?.try_into().ok()?);
+    *offset += 8;
+    let y = f64::from_le_bytes(body.get(*offset..(*offset + 8))?.try_into().ok()?);
+    *offset += 8;
+    let z = f64::from_le_bytes(body.get(*offset..(*offset + 8))?.try_into().ok()?);
+    *offset += 8;
+    Some([x.round() as i32, y.round() as i32, z.round() as i32])
+}
+
+fn is_null_uuid(uuid: &str) -> bool {
+    uuid == "00000000-0000-0000-0000-000000000000"
+}
+
+fn decode_simulator_viewer_time_message(
+    payload: &[u8],
+) -> Option<DecodedSimulatorViewerTimeMessage> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number
+        != lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID)
     {
         return None;
     }
@@ -2951,6 +4999,22 @@ fn parse_event_queue_once_response(
     parse_event_queue_from_llsd_xml(body)
 }
 
+fn parse_event_queue_poll_response(
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<EventQueuePollResult, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        return parse_event_queue_poll_from_json(&value);
+    }
+
+    parse_event_queue_poll_from_llsd_xml(body)
+}
+
 fn parse_event_queue_from_json(value: &Value) -> Result<EventQueueInspection, ConnectionError> {
     let Some(map) = value.as_object() else {
         return Err(ConnectionError::CapabilityDecode(String::from(
@@ -2978,6 +5042,40 @@ fn parse_event_queue_from_json(value: &Value) -> Result<EventQueueInspection, Co
     }
 
     Ok(inspection)
+}
+
+fn parse_event_queue_poll_from_json(
+    value: &Value,
+) -> Result<EventQueuePollResult, ConnectionError> {
+    let Some(map) = value.as_object() else {
+        return Err(ConnectionError::CapabilityDecode(String::from(
+            "event queue json response is not an object",
+        )));
+    };
+    let id = map.get("id").and_then(Value::as_u64);
+    let mut events = Vec::new();
+    if let Some(raw_events) = map.get("events").and_then(Value::as_array) {
+        for raw_event in raw_events {
+            let Some(event_map) = raw_event.as_object() else {
+                continue;
+            };
+            let message = event_map
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mut fields = BTreeMap::new();
+            if let Some(body_map) = event_map.get("body").and_then(Value::as_object) {
+                for (key, value) in body_map {
+                    if let Some(text) = json_scalar_to_string(value) {
+                        fields.insert(key.clone(), text);
+                    }
+                }
+            }
+            events.push(EventQueueMessage { message, fields });
+        }
+    }
+    Ok(EventQueuePollResult { id, events })
 }
 
 fn parse_event_queue_from_llsd_xml(body: &[u8]) -> Result<EventQueueInspection, ConnectionError> {
@@ -3015,9 +5113,202 @@ fn parse_event_queue_from_llsd_xml(body: &[u8]) -> Result<EventQueueInspection, 
     Ok(inspection)
 }
 
-fn extract_llsd_event_messages(array_node: Node<'_, '_>, inspection: &mut EventQueueInspection) -> usize {
+fn parse_event_queue_poll_from_llsd_xml(
+    body: &[u8],
+) -> Result<EventQueuePollResult, ConnectionError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let doc =
+        Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let map = doc
+        .descendants()
+        .find(|node| node.has_tag_name("map"))
+        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+
+    let mut id = None;
+    let mut events = Vec::new();
+    let children: Vec<Node<'_, '_>> = map.children().filter(|node| node.is_element()).collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let value_node = children[idx + 1];
+        if key_node.has_tag_name("key") {
+            let key_name = key_node.text().unwrap_or_default();
+            if key_name == "id" {
+                id = value_node
+                    .text()
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+            } else if key_name == "events" && value_node.has_tag_name("array") {
+                events.extend(parse_llsd_event_messages(value_node));
+            }
+        }
+        idx += 2;
+    }
+    Ok(EventQueuePollResult { id, events })
+}
+
+fn parse_resolved_avatar_names(
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<Vec<ResolvedAvatarName>, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        return Ok(parse_resolved_avatar_names_from_json(&value));
+    }
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        return Ok(parse_resolved_avatar_names_from_json(&value));
+    }
+    parse_resolved_avatar_names_from_llsd_xml(body)
+}
+
+fn parse_resolved_avatar_names_from_json(value: &Value) -> Vec<ResolvedAvatarName> {
+    let mut resolved = Vec::new();
+    let mut seen = BTreeSet::new();
+    let Some(map) = value.as_object() else {
+        return resolved;
+    };
+    if let Some(agents) = map.get("agents").and_then(Value::as_array) {
+        for row in agents {
+            let Some(row_map) = row.as_object() else {
+                continue;
+            };
+            let id = row_map
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if id.is_empty() || seen.contains(&id) {
+                continue;
+            }
+            let display_name = row_map
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    row_map
+                        .get("username")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    let first = row_map.get("legacy_first_name").and_then(Value::as_str)?;
+                    let last = row_map.get("legacy_last_name").and_then(Value::as_str)?;
+                    Some(format!("{first} {last}"))
+                })
+                .unwrap_or_default();
+            if display_name.trim().is_empty() {
+                continue;
+            }
+            seen.insert(id.clone());
+            resolved.push(ResolvedAvatarName { id, display_name });
+        }
+    }
+    if let Some(agents) = map.get("agents").and_then(Value::as_object) {
+        for (id, row) in agents {
+            if id.trim().is_empty() || seen.contains(id) {
+                continue;
+            }
+            let Some(row_map) = row.as_object() else {
+                continue;
+            };
+            let display_name = row_map
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    row_map
+                        .get("username")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    let first = row_map.get("legacy_first_name").and_then(Value::as_str)?;
+                    let last = row_map.get("legacy_last_name").and_then(Value::as_str)?;
+                    Some(format!("{first} {last}"))
+                })
+                .unwrap_or_default();
+            if display_name.trim().is_empty() {
+                continue;
+            }
+            seen.insert(id.clone());
+            resolved.push(ResolvedAvatarName {
+                id: id.to_string(),
+                display_name,
+            });
+        }
+    }
+    resolved
+}
+
+fn parse_resolved_avatar_names_from_llsd_xml(
+    body: &[u8],
+) -> Result<Vec<ResolvedAvatarName>, ConnectionError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let doc =
+        Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let map = doc
+        .descendants()
+        .find(|node| node.has_tag_name("map"))
+        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+
+    let children: Vec<Node<'_, '_>> = map.children().filter(|node| node.is_element()).collect();
+    let mut idx = 0usize;
+    let mut resolved = Vec::new();
+    let mut seen = BTreeSet::new();
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let value_node = children[idx + 1];
+        if key_node.has_tag_name("key")
+            && key_node.text().unwrap_or_default() == "agents"
+            && value_node.has_tag_name("array")
+        {
+            for item in value_node
+                .children()
+                .filter(|node| node.has_tag_name("map"))
+            {
+                let fields = parse_llsd_scalar_map(item);
+                let id = fields.get("id").cloned().unwrap_or_default();
+                if id.trim().is_empty() || seen.contains(&id) {
+                    continue;
+                }
+                let display_name = fields
+                    .get("display_name")
+                    .cloned()
+                    .or_else(|| fields.get("username").cloned())
+                    .or_else(|| {
+                        let first = fields.get("legacy_first_name")?;
+                        let last = fields.get("legacy_last_name")?;
+                        Some(format!("{first} {last}"))
+                    })
+                    .unwrap_or_default();
+                if display_name.trim().is_empty() {
+                    continue;
+                }
+                seen.insert(id.clone());
+                resolved.push(ResolvedAvatarName { id, display_name });
+            }
+            break;
+        }
+        idx += 2;
+    }
+    Ok(resolved)
+}
+
+fn extract_llsd_event_messages(
+    array_node: Node<'_, '_>,
+    inspection: &mut EventQueueInspection,
+) -> usize {
     let mut count = 0usize;
-    for event_map in array_node.children().filter(|node| node.has_tag_name("map")) {
+    for event_map in array_node
+        .children()
+        .filter(|node| node.has_tag_name("map"))
+    {
         count += 1;
         let children: Vec<Node<'_, '_>> = event_map
             .children()
@@ -3040,6 +5331,512 @@ fn extract_llsd_event_messages(array_node: Node<'_, '_>, inspection: &mut EventQ
         }
     }
     count
+}
+
+fn parse_llsd_event_messages(array_node: Node<'_, '_>) -> Vec<EventQueueMessage> {
+    let mut events = Vec::new();
+    for event_map in array_node
+        .children()
+        .filter(|node| node.has_tag_name("map"))
+    {
+        let children: Vec<Node<'_, '_>> = event_map
+            .children()
+            .filter(|node| node.is_element())
+            .collect();
+        let mut idx = 0usize;
+        let mut message = String::new();
+        let mut fields = BTreeMap::new();
+        while idx + 1 < children.len() {
+            let key_node = children[idx];
+            let value_node = children[idx + 1];
+            if key_node.has_tag_name("key") {
+                let key_name = key_node.text().unwrap_or_default();
+                if key_name == "message" && value_node.has_tag_name("string") {
+                    message = value_node.text().unwrap_or_default().to_string();
+                } else if key_name == "body" && value_node.has_tag_name("map") {
+                    fields = parse_llsd_scalar_map(value_node);
+                }
+            }
+            idx += 2;
+        }
+        events.push(EventQueueMessage { message, fields });
+    }
+    events
+}
+
+fn parse_llsd_scalar_map(map_node: Node<'_, '_>) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    let children: Vec<Node<'_, '_>> = map_node
+        .children()
+        .filter(|node| node.is_element())
+        .collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let value_node = children[idx + 1];
+        if key_node.has_tag_name("key") {
+            let key = key_node.text().unwrap_or_default().to_string();
+            if let Some(value) = llsd_node_scalar_to_string(value_node) {
+                fields.insert(key, value);
+            }
+        }
+        idx += 2;
+    }
+    fields
+}
+
+fn llsd_node_scalar_to_string(node: Node<'_, '_>) -> Option<String> {
+    if node.has_tag_name("string") || node.has_tag_name("uri") || node.has_tag_name("uuid") {
+        return Some(node.text().unwrap_or_default().to_string());
+    }
+    if node.has_tag_name("integer")
+        || node.has_tag_name("real")
+        || node.has_tag_name("boolean")
+        || node.has_tag_name("date")
+    {
+        return Some(node.text().unwrap_or_default().to_string());
+    }
+    if node.has_tag_name("true") {
+        return Some(String::from("true"));
+    }
+    if node.has_tag_name("false") {
+        return Some(String::from("false"));
+    }
+    None
+}
+
+fn json_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Number(num) => Some(num.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_json_i32_triplet(value: Option<&Value>) -> Option<[i32; 3]> {
+    let value = value?;
+    let arr = value.as_array()?;
+    if arr.len() < 3 {
+        return None;
+    }
+    Some([
+        arr.first()?.as_i64()? as i32,
+        arr.get(1)?.as_i64()? as i32,
+        arr.get(2)?.as_i64()? as i32,
+    ])
+}
+
+fn parse_agent_profile_response(
+    body: &[u8],
+    content_type: Option<&str>,
+    fallback_avatar_id: &str,
+) -> Result<AgentProfileData, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        return parse_agent_profile_from_json(&value, fallback_avatar_id);
+    }
+    parse_agent_profile_from_llsd_xml(body, fallback_avatar_id)
+}
+
+fn parse_agent_profile_from_json(
+    value: &Value,
+    fallback_avatar_id: &str,
+) -> Result<AgentProfileData, ConnectionError> {
+    let Some(map) = value.as_object() else {
+        return Err(ConnectionError::CapabilityDecode(String::from(
+            "agent profile json response is not an object",
+        )));
+    };
+
+    let mut profile = AgentProfileData {
+        id: map
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback_avatar_id)
+            .to_string(),
+        profile_url: map
+            .get("profile_url")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        sl_about_text: map
+            .get("sl_about_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        fl_about_text: map
+            .get("fl_about_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        notes: map
+            .get("notes")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        sl_image_id: map
+            .get("sl_image_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        fl_image_id: map
+            .get("fl_image_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        partner_id: map
+            .get("partner_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        member_since: map
+            .get("member_since")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        online: map.get("online").and_then(Value::as_bool),
+        allow_publish: map.get("allow_publish").and_then(Value::as_bool),
+        identified: map.get("identified").and_then(Value::as_bool),
+        transacted: map.get("transacted").and_then(Value::as_bool),
+        display_name: map
+            .get("display_name")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        username: map
+            .get("username")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        groups: Vec::new(),
+        picks: Vec::new(),
+        pick_details: Vec::new(),
+        classifieds: Vec::new(),
+        classified_details: Vec::new(),
+    };
+
+    if let Some(groups) = map.get("groups").and_then(Value::as_array) {
+        for item in groups {
+            let Some(group) = item.as_object() else {
+                continue;
+            };
+            let id = group
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
+            profile.groups.push(AgentProfileGroup {
+                id,
+                name: group
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                image_id: group
+                    .get("image_id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            });
+        }
+    }
+
+    if let Some(picks) = map.get("picks").and_then(Value::as_array) {
+        for item in picks {
+            let Some(pick) = item.as_object() else {
+                continue;
+            };
+            let id = pick
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
+            profile.picks.push(AgentProfilePick {
+                id: id.clone(),
+                name: pick
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+            profile.pick_details.push(AgentProfilePickDetails {
+                id,
+                name: pick
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                description: pick
+                    .get("description")
+                    .or_else(|| pick.get("desc"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                snapshot_id: pick
+                    .get("snapshot_id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                parcel_id: pick
+                    .get("parcel_id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                sim_name: pick
+                    .get("sim_name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                parcel_name: pick
+                    .get("parcel_name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                global_position: parse_json_i32_triplet(
+                    pick.get("global_position")
+                        .or_else(|| pick.get("pos_global")),
+                ),
+            });
+        }
+    }
+
+    if let Some(classifieds) = map.get("classifieds").and_then(Value::as_array) {
+        for item in classifieds {
+            let Some(classified) = item.as_object() else {
+                continue;
+            };
+            let id = classified
+                .get("id")
+                .or_else(|| classified.get("classified_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if id.is_empty() {
+                continue;
+            }
+            profile.classifieds.push(AgentProfileClassified {
+                id: id.clone(),
+                name: classified
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            });
+            profile
+                .classified_details
+                .push(AgentProfileClassifiedDetails {
+                    id,
+                    name: classified
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    description: classified
+                        .get("description")
+                        .or_else(|| classified.get("desc"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    snapshot_id: classified
+                        .get("snapshot_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    parcel_id: classified
+                        .get("parcel_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    sim_name: classified
+                        .get("sim_name")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    parcel_name: classified
+                        .get("parcel_name")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    global_position: parse_json_i32_triplet(
+                        classified
+                            .get("global_position")
+                            .or_else(|| classified.get("pos_global")),
+                    ),
+                    category: classified
+                        .get("category")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u32),
+                    flags: classified
+                        .get("flags")
+                        .or_else(|| classified.get("classified_flags"))
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u8),
+                    price_for_listing: classified
+                        .get("price_for_listing")
+                        .and_then(Value::as_i64)
+                        .map(|v| v as i32),
+                });
+        }
+    }
+
+    Ok(profile)
+}
+
+fn parse_agent_profile_from_llsd_xml(
+    body: &[u8],
+    fallback_avatar_id: &str,
+) -> Result<AgentProfileData, ConnectionError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|err| ConnectionError::Codec(CodecError::Deserialize(err.to_string())))?;
+    let doc = Document::parse(text)
+        .map_err(|err| ConnectionError::Codec(CodecError::Deserialize(err.to_string())))?;
+    let top_map = doc
+        .descendants()
+        .find(|node| node.has_tag_name("map"))
+        .ok_or_else(|| {
+            ConnectionError::CapabilityDecode(String::from(
+                "agent profile llsd response missing map",
+            ))
+        })?;
+
+    let scalar = parse_llsd_scalar_map(top_map);
+    let mut profile = AgentProfileData {
+        id: scalar
+            .get("id")
+            .cloned()
+            .unwrap_or_else(|| fallback_avatar_id.to_string()),
+        profile_url: scalar.get("profile_url").cloned(),
+        sl_about_text: scalar.get("sl_about_text").cloned().unwrap_or_default(),
+        fl_about_text: scalar.get("fl_about_text").cloned().unwrap_or_default(),
+        notes: scalar.get("notes").cloned().unwrap_or_default(),
+        sl_image_id: scalar.get("sl_image_id").cloned(),
+        fl_image_id: scalar.get("fl_image_id").cloned(),
+        partner_id: scalar.get("partner_id").cloned(),
+        member_since: scalar.get("member_since").cloned(),
+        online: scalar
+            .get("online")
+            .and_then(|value| parse_bool_text(value)),
+        allow_publish: scalar
+            .get("allow_publish")
+            .and_then(|value| parse_bool_text(value)),
+        identified: scalar
+            .get("identified")
+            .and_then(|value| parse_bool_text(value)),
+        transacted: scalar
+            .get("transacted")
+            .and_then(|value| parse_bool_text(value)),
+        display_name: scalar.get("display_name").cloned(),
+        username: scalar.get("username").cloned(),
+        groups: Vec::new(),
+        picks: Vec::new(),
+        pick_details: Vec::new(),
+        classifieds: Vec::new(),
+        classified_details: Vec::new(),
+    };
+
+    let children: Vec<Node<'_, '_>> = top_map
+        .children()
+        .filter(|node| node.is_element())
+        .collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let value_node = children[idx + 1];
+        if key_node.has_tag_name("key") {
+            match key_node.text().unwrap_or_default() {
+                "groups" if value_node.has_tag_name("array") => {
+                    for item in value_node
+                        .children()
+                        .filter(|node| node.has_tag_name("map"))
+                    {
+                        let map = parse_llsd_scalar_map(item);
+                        let id = map.get("id").cloned().unwrap_or_default();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        profile.groups.push(AgentProfileGroup {
+                            id,
+                            name: map.get("name").cloned().unwrap_or_default(),
+                            image_id: map.get("image_id").cloned(),
+                        });
+                    }
+                }
+                "picks" if value_node.has_tag_name("array") => {
+                    for item in value_node
+                        .children()
+                        .filter(|node| node.has_tag_name("map"))
+                    {
+                        let map = parse_llsd_scalar_map(item);
+                        let id = map.get("id").cloned().unwrap_or_default();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        profile.picks.push(AgentProfilePick {
+                            id: id.clone(),
+                            name: map.get("name").cloned().unwrap_or_default(),
+                        });
+                        profile.pick_details.push(AgentProfilePickDetails {
+                            id,
+                            name: map.get("name").cloned(),
+                            description: map
+                                .get("description")
+                                .or_else(|| map.get("desc"))
+                                .cloned(),
+                            snapshot_id: map.get("snapshot_id").cloned(),
+                            parcel_id: map.get("parcel_id").cloned(),
+                            sim_name: map.get("sim_name").cloned(),
+                            parcel_name: map.get("parcel_name").cloned(),
+                            global_position: None,
+                        });
+                    }
+                }
+                "classifieds" if value_node.has_tag_name("array") => {
+                    for item in value_node
+                        .children()
+                        .filter(|node| node.has_tag_name("map"))
+                    {
+                        let map = parse_llsd_scalar_map(item);
+                        let id = map
+                            .get("id")
+                            .cloned()
+                            .or_else(|| map.get("classified_id").cloned())
+                            .unwrap_or_default();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        profile.classifieds.push(AgentProfileClassified {
+                            id: id.clone(),
+                            name: map.get("name").cloned().unwrap_or_default(),
+                        });
+                        profile
+                            .classified_details
+                            .push(AgentProfileClassifiedDetails {
+                                id,
+                                name: map.get("name").cloned(),
+                                description: map
+                                    .get("description")
+                                    .or_else(|| map.get("desc"))
+                                    .cloned(),
+                                snapshot_id: map.get("snapshot_id").cloned(),
+                                parcel_id: map.get("parcel_id").cloned(),
+                                sim_name: map.get("sim_name").cloned(),
+                                parcel_name: map.get("parcel_name").cloned(),
+                                global_position: None,
+                                category: map
+                                    .get("category")
+                                    .and_then(|value| value.parse::<u32>().ok()),
+                                flags: map.get("flags").and_then(|value| value.parse::<u8>().ok()),
+                                price_for_listing: map
+                                    .get("price_for_listing")
+                                    .and_then(|value| value.parse::<i32>().ok()),
+                            });
+                    }
+                }
+                _ => {}
+            }
+        }
+        idx += 2;
+    }
+    Ok(profile)
+}
+
+fn parse_bool_text(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_simulator_features_response(
@@ -3134,10 +5931,9 @@ fn parse_simulator_features_from_llsd_xml(
                 || value_node.has_tag_name("uuid")
                 || value_node.has_tag_name("date")
             {
-                inspection.scalar_values.insert(
-                    key_name,
-                    value_node.text().unwrap_or_default().to_string(),
-                );
+                inspection
+                    .scalar_values
+                    .insert(key_name, value_node.text().unwrap_or_default().to_string());
             } else if value_node.has_tag_name("map") {
                 inspection
                     .complex_value_types
@@ -3319,6 +6115,27 @@ mod tests {
     fn make_medium_frequency_packet_with_body(medium_id: u8, body: &[u8]) -> Vec<u8> {
         let mut payload = make_medium_frequency_packet(medium_id);
         payload.extend_from_slice(body);
+        payload
+    }
+
+    fn make_chat_from_simulator_packet(sender: &str, message: &str) -> Vec<u8> {
+        let mut payload = make_low_frequency_packet(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID);
+        let mut sender_bytes = sender.as_bytes().to_vec();
+        sender_bytes.push(0);
+        payload.push(u8::try_from(sender_bytes.len()).expect("sender length should fit in u8"));
+        payload.extend_from_slice(&sender_bytes);
+        payload.extend_from_slice(&[0u8; 16]); // SourceID
+        payload.extend_from_slice(&[0u8; 16]); // OwnerID
+        payload.push(1); // SourceType
+        payload.push(1); // ChatType (normal)
+        payload.push(1); // Audible
+        payload.extend_from_slice(&[0u8; 12]); // Position
+        let mut message_bytes = message.as_bytes().to_vec();
+        message_bytes.push(0);
+        let message_len =
+            u16::try_from(message_bytes.len()).expect("message length should fit in u16");
+        payload.extend_from_slice(&message_len.to_le_bytes());
+        payload.extend_from_slice(&message_bytes);
         payload
     }
 
@@ -3705,9 +6522,10 @@ mod tests {
         .expect("valid UTF-8");
         assert!(encoded.contains("<key>method</key><string>login_to_simulator</string>"));
         assert!(encoded.contains("<key>username</key><string>test.user</string>"));
-        assert!(encoded.contains(
-            "<key>passwd</key><string>$1$5ebe2294ecd0e0f08eab7690d2a6ee69</string>"
-        ));
+        assert!(
+            encoded
+                .contains("<key>passwd</key><string>$1$5ebe2294ecd0e0f08eab7690d2a6ee69</string>")
+        );
         assert!(!encoded.contains("<key>password</key>"));
         assert!(encoded.contains("<string>inventory-root</string>"));
         assert!(encoded.contains("<key>options</key><array>"));
@@ -3729,9 +6547,10 @@ mod tests {
 
         assert!(encoded.contains("<key>first</key><string>first</string>"));
         assert!(encoded.contains("<key>last</key><string>last</string>"));
-        assert!(encoded.contains(
-            "<key>passwd</key><string>$1$5ebe2294ecd0e0f08eab7690d2a6ee69</string>"
-        ));
+        assert!(
+            encoded
+                .contains("<key>passwd</key><string>$1$5ebe2294ecd0e0f08eab7690d2a6ee69</string>")
+        );
     }
 
     #[test]
@@ -4026,6 +6845,7 @@ mod tests {
 
         let capability_map = r#"<llsd><map>
             <key>EventQueueGet</key><string>https://cap.example/event</string>
+            <key>AgentProfile</key><string>https://cap.example/agent-profile</string>
             <key>MapLayer</key><string>https://cap.example/map</string>
         </map></llsd>"#;
 
@@ -4034,6 +6854,7 @@ mod tests {
             .and(header("content-type", "application/llsd+xml"))
             .and(body_string_contains("<llsd><array>"))
             .and(body_string_contains("<string>EventQueueGet</string>"))
+            .and(body_string_contains("<string>AgentProfile</string>"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/llsd+xml")
@@ -4071,6 +6892,10 @@ mod tests {
             caps.entries.get("MapLayer").map(String::as_str),
             Some("https://cap.example/map")
         );
+        assert_eq!(
+            caps.entries.get("AgentProfile").map(String::as_str),
+            Some("https://cap.example/agent-profile")
+        );
     }
 
     #[tokio::test]
@@ -4095,7 +6920,9 @@ mod tests {
             .and(path("/eventqueue"))
             .and(header("content-type", "application/llsd+xml"))
             .and(body_string_contains("<key>ack</key><integer>0</integer>"))
-            .and(body_string_contains("<key>done</key><boolean>false</boolean>"))
+            .and(body_string_contains(
+                "<key>done</key><boolean>false</boolean>",
+            ))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/llsd+xml")
@@ -4122,7 +6949,10 @@ mod tests {
         assert_eq!(inspection.event_count, 2);
         assert_eq!(
             inspection.event_names,
-            vec!["EnableSimulator".to_string(), "ParcelProperties".to_string()]
+            vec![
+                "EnableSimulator".to_string(),
+                "ParcelProperties".to_string()
+            ]
         );
         assert!(inspection.top_level_keys.iter().any(|key| key == "events"));
         assert!(inspection.top_level_keys.iter().any(|key| key == "id"));
@@ -4190,7 +7020,10 @@ mod tests {
             .await
             .expect_err("event queue should fail");
         match err {
-            ConnectionError::EventQueueOneShotFailed { attempts_len, attempts } => {
+            ConnectionError::EventQueueOneShotFailed {
+                attempts_len,
+                attempts,
+            } => {
                 assert_eq!(attempts_len, 1);
                 assert_eq!(attempts.len(), 1);
                 assert_eq!(attempts[0].status, Some(400));
@@ -4227,7 +7060,10 @@ mod tests {
             .await
             .expect_err("event queue should fail after retries");
         match err {
-            ConnectionError::EventQueueOneShotFailed { attempts_len, attempts } => {
+            ConnectionError::EventQueueOneShotFailed {
+                attempts_len,
+                attempts,
+            } => {
                 assert_eq!(attempts_len, MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS);
                 assert_eq!(attempts.len(), MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS);
                 assert!(attempts.iter().all(|attempt| attempt.retryable));
@@ -4273,14 +7109,27 @@ mod tests {
             .await
             .expect("simulator features fetch should succeed");
 
-        assert!(inspection.top_level_keys.iter().any(|k| k == "MeshRezEnabled"));
-        assert!(inspection.top_level_keys.iter().any(|k| k == "OpenSimExtras"));
+        assert!(
+            inspection
+                .top_level_keys
+                .iter()
+                .any(|k| k == "MeshRezEnabled")
+        );
+        assert!(
+            inspection
+                .top_level_keys
+                .iter()
+                .any(|k| k == "OpenSimExtras")
+        );
         assert_eq!(
             inspection.scalar_values.get("Channel").map(String::as_str),
             Some("Second Life Server")
         );
         assert_eq!(
-            inspection.complex_value_types.get("OpenSimExtras").map(String::as_str),
+            inspection
+                .complex_value_types
+                .get("OpenSimExtras")
+                .map(String::as_str),
             Some("map")
         );
     }
@@ -4327,7 +7176,10 @@ mod tests {
             Some("1.0")
         );
         assert_eq!(
-            inspection.complex_value_types.get("MapBlocks").map(String::as_str),
+            inspection
+                .complex_value_types
+                .get("MapBlocks")
+                .map(String::as_str),
             Some("array")
         );
     }
@@ -4419,7 +7271,9 @@ mod tests {
         );
 
         let state = connection
-            .advance_first_simulator_handshake_scaffold(FirstSimulatorHandshakeStage::UseCircuitCode)
+            .advance_first_simulator_handshake_scaffold(
+                FirstSimulatorHandshakeStage::UseCircuitCode,
+            )
             .expect("stage should advance to use circuit code");
         assert_eq!(state.stage, FirstSimulatorHandshakeStage::UseCircuitCode);
 
@@ -4488,7 +7342,10 @@ mod tests {
             .expect_err("out-of-order transition should fail");
         match err {
             ConnectionError::InvalidFirstSimulatorHandshakeTransition { from, to } => {
-                assert_eq!(from, FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady);
+                assert_eq!(
+                    from,
+                    FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady
+                );
                 assert_eq!(to, FirstSimulatorHandshakeStage::CompleteAgentMovement);
             }
             other => panic!("expected InvalidFirstSimulatorHandshakeTransition, got {other:?}"),
@@ -4512,7 +7369,9 @@ mod tests {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -4568,7 +7427,10 @@ mod tests {
             lludp_low_frequency_message_number(LLUDP_USE_CIRCUIT_CODE_LOW_ID)
         );
         assert_eq!(body.len(), 36);
-        assert_eq!(u32::from_le_bytes(body[0..4].try_into().expect("code bytes")), 424242);
+        assert_eq!(
+            u32::from_le_bytes(body[0..4].try_into().expect("code bytes")),
+            424242
+        );
 
         let diagnostics = connection.first_simulator_handshake_send_diagnostics();
         assert_eq!(diagnostics.len(), 1);
@@ -4582,12 +7444,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_first_simulator_complete_agent_movement_sends_datagram_and_waits_for_movement_complete(
-    ) {
+    async fn send_first_simulator_complete_agent_movement_sends_datagram_and_waits_for_movement_complete()
+     {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -4712,7 +7576,10 @@ mod tests {
             .expect_err("complete agent movement should fail before use circuit code");
         match err {
             ConnectionError::InvalidFirstSimulatorHandshakeTransition { from, to } => {
-                assert_eq!(from, FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady);
+                assert_eq!(
+                    from,
+                    FirstSimulatorHandshakeStage::BootstrapPrerequisitesReady
+                );
                 assert_eq!(to, FirstSimulatorHandshakeStage::CompleteAgentMovement);
             }
             other => panic!("expected InvalidFirstSimulatorHandshakeTransition, got {other:?}"),
@@ -4754,7 +7621,10 @@ mod tests {
         assert_eq!(test_message.packet_message_number, Some(0xffff0001));
 
         let region = classify_first_simulator_inbound_message(&make_low_frequency_packet(148));
-        assert_eq!(region.kind, FirstSimulatorInboundMessageKind::RegionHandshake);
+        assert_eq!(
+            region.kind,
+            FirstSimulatorInboundMessageKind::RegionHandshake
+        );
         assert_eq!(
             region.scope,
             FirstSimulatorInboundTrafficScope::BootstrapRelevant
@@ -4800,7 +7670,10 @@ mod tests {
         );
 
         let enable = classify_first_simulator_inbound_message(&make_low_frequency_packet(151));
-        assert_eq!(enable.kind, FirstSimulatorInboundMessageKind::EnableSimulator);
+        assert_eq!(
+            enable.kind,
+            FirstSimulatorInboundMessageKind::EnableSimulator
+        );
         assert_eq!(
             enable.scope,
             FirstSimulatorInboundTrafficScope::BootstrapRelevant
@@ -4812,8 +7685,7 @@ mod tests {
         );
         assert_eq!(enable.packet_message_number, Some(0xffff0097));
 
-        let agent_data =
-            classify_first_simulator_inbound_message(&make_low_frequency_packet(387));
+        let agent_data = classify_first_simulator_inbound_message(&make_low_frequency_packet(387));
         assert_eq!(
             agent_data.kind,
             FirstSimulatorInboundMessageKind::AgentDataUpdate
@@ -4829,7 +7701,8 @@ mod tests {
         );
         assert_eq!(agent_data.packet_message_number, Some(0xffff0183));
 
-        let packet_ack = classify_first_simulator_inbound_message(&make_low_frequency_packet(0xFFFB));
+        let packet_ack =
+            classify_first_simulator_inbound_message(&make_low_frequency_packet(0xFFFB));
         assert_eq!(packet_ack.kind, FirstSimulatorInboundMessageKind::PacketAck);
         assert_eq!(
             packet_ack.scope,
@@ -4854,7 +7727,10 @@ mod tests {
 
         let viewer_effect =
             classify_first_simulator_inbound_message(&make_medium_frequency_packet(17));
-        assert_eq!(viewer_effect.kind, FirstSimulatorInboundMessageKind::ViewerEffect);
+        assert_eq!(
+            viewer_effect.kind,
+            FirstSimulatorInboundMessageKind::ViewerEffect
+        );
         assert_eq!(
             viewer_effect.scope,
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
@@ -4873,11 +7749,17 @@ mod tests {
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
         );
         assert_eq!(coarse_location_update.signal, "packet:0x0000ff06");
-        assert_eq!(coarse_location_update.packet_message_number, Some(0x0000ff06));
+        assert_eq!(
+            coarse_location_update.packet_message_number,
+            Some(0x0000ff06)
+        );
 
         let attached_sound =
             classify_first_simulator_inbound_message(&make_medium_frequency_packet(13));
-        assert_eq!(attached_sound.kind, FirstSimulatorInboundMessageKind::AttachedSound);
+        assert_eq!(
+            attached_sound.kind,
+            FirstSimulatorInboundMessageKind::AttachedSound
+        );
         assert_eq!(
             attached_sound.scope,
             FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
@@ -4892,7 +7774,10 @@ mod tests {
 
         let crossed_region =
             classify_first_simulator_inbound_message(&make_medium_frequency_packet(7));
-        assert_eq!(crossed_region.kind, FirstSimulatorInboundMessageKind::CrossedRegion);
+        assert_eq!(
+            crossed_region.kind,
+            FirstSimulatorInboundMessageKind::CrossedRegion
+        );
         assert_eq!(
             crossed_region.scope,
             FirstSimulatorInboundTrafficScope::RegionTransitionControl
@@ -4941,7 +7826,10 @@ mod tests {
         assert_eq!(json_fallback.packet_message_number, None);
 
         let irrelevant = classify_first_simulator_inbound_message(b"totally unrelated");
-        assert_eq!(irrelevant.kind, FirstSimulatorInboundMessageKind::Irrelevant);
+        assert_eq!(
+            irrelevant.kind,
+            FirstSimulatorInboundMessageKind::Irrelevant
+        );
         assert_eq!(irrelevant.scope, FirstSimulatorInboundTrafficScope::Unknown);
         assert_eq!(
             irrelevant.decode_source,
@@ -4950,9 +7838,16 @@ mod tests {
         assert_eq!(irrelevant.packet_message_number, None);
         assert_eq!(irrelevant.signal, "text:none");
 
-        let unknown_packet = classify_first_simulator_inbound_message(&make_low_frequency_packet(42));
-        assert_eq!(unknown_packet.kind, FirstSimulatorInboundMessageKind::Irrelevant);
-        assert_eq!(unknown_packet.scope, FirstSimulatorInboundTrafficScope::Unknown);
+        let unknown_packet =
+            classify_first_simulator_inbound_message(&make_low_frequency_packet(42));
+        assert_eq!(
+            unknown_packet.kind,
+            FirstSimulatorInboundMessageKind::Irrelevant
+        );
+        assert_eq!(
+            unknown_packet.scope,
+            FirstSimulatorInboundTrafficScope::Unknown
+        );
         assert_eq!(
             unknown_packet.decode_source,
             FirstSimulatorInboundDecodeSource::Unknown
@@ -5071,7 +7966,10 @@ mod tests {
         let summary = connection.simulator_payload_decode_summary();
         assert_eq!(summary.simulator_viewer_time_updates, 1);
         assert_eq!(summary.simulator_viewer_time_last_body_len, Some(5));
-        assert_eq!(summary.simulator_viewer_time_last_signature, Some(0xDDCCBBAA));
+        assert_eq!(
+            summary.simulator_viewer_time_last_signature,
+            Some(0xDDCCBBAA)
+        );
     }
 
     #[tokio::test]
@@ -5079,7 +7977,9 @@ mod tests {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -5219,7 +8119,9 @@ mod tests {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -5377,7 +8279,9 @@ mod tests {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -5445,7 +8349,10 @@ mod tests {
         let send_diagnostics = connection.first_simulator_handshake_send_diagnostics();
         assert_eq!(send_diagnostics.len(), 2);
         assert!(send_diagnostics.iter().all(|diag| diag.success));
-        assert_eq!(send_diagnostics[0].packet_id + 1, send_diagnostics[1].packet_id);
+        assert_eq!(
+            send_diagnostics[0].packet_id + 1,
+            send_diagnostics[1].packet_id
+        );
         assert_eq!(
             send_diagnostics[0].packet_message_number,
             Some(lludp_low_frequency_message_number(
@@ -5474,7 +8381,9 @@ mod tests {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -5557,7 +8466,7 @@ mod tests {
             connection
                 .first_simulator_handshake_state()
                 .expect("state should exist")
-            .stage,
+                .stage,
             FirstSimulatorHandshakeStage::AgentMovementComplete
         );
     }
@@ -5567,7 +8476,9 @@ mod tests {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -5739,14 +8650,26 @@ mod tests {
         );
         let early_traffic = connection.early_simulator_traffic_observations();
         assert_eq!(early_traffic.len(), 5);
-        assert_eq!(early_traffic[0].kind, EarlySimulatorTrafficKind::HealthMessage);
-        assert_eq!(early_traffic[1].kind, EarlySimulatorTrafficKind::OnlineNotification);
+        assert_eq!(
+            early_traffic[0].kind,
+            EarlySimulatorTrafficKind::HealthMessage
+        );
+        assert_eq!(
+            early_traffic[1].kind,
+            EarlySimulatorTrafficKind::OnlineNotification
+        );
         assert_eq!(
             early_traffic[2].kind,
             EarlySimulatorTrafficKind::CoarseLocationUpdate
         );
-        assert_eq!(early_traffic[3].kind, EarlySimulatorTrafficKind::AttachedSound);
-        assert_eq!(early_traffic[4].kind, EarlySimulatorTrafficKind::ViewerEffect);
+        assert_eq!(
+            early_traffic[3].kind,
+            EarlySimulatorTrafficKind::AttachedSound
+        );
+        assert_eq!(
+            early_traffic[4].kind,
+            EarlySimulatorTrafficKind::ViewerEffect
+        );
         let early_summary = connection.summarize_early_simulator_traffic();
         assert_eq!(early_summary.observations, 5);
         assert_eq!(early_summary.health_message, 1);
@@ -5758,12 +8681,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_first_simulator_handshake_window_with_tail_summarizes_region_transition_and_repeated_unknowns(
-    ) {
+    async fn probe_first_simulator_handshake_window_with_tail_summarizes_region_transition_and_repeated_unknowns()
+     {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -5869,7 +8794,10 @@ mod tests {
             summary.unknown_packet_message_numbers,
             vec![0xffff002a, 0xffff002a]
         );
-        assert_eq!(summary.repeated_unknown_packet_message_numbers, vec![0xffff002a]);
+        assert_eq!(
+            summary.repeated_unknown_packet_message_numbers,
+            vec![0xffff002a]
+        );
 
         let region_control_observations = connection.region_transition_control_observations();
         assert_eq!(region_control_observations.len(), 2);
@@ -5889,19 +8817,24 @@ mod tests {
 
         let early_traffic = connection.early_simulator_traffic_observations();
         assert_eq!(early_traffic.len(), 1);
-        assert_eq!(early_traffic[0].kind, EarlySimulatorTrafficKind::ViewerEffect);
+        assert_eq!(
+            early_traffic[0].kind,
+            EarlySimulatorTrafficKind::ViewerEffect
+        );
         let early_summary = connection.summarize_early_simulator_traffic();
         assert_eq!(early_summary.observations, 1);
         assert_eq!(early_summary.viewer_effect, 1);
     }
 
     #[tokio::test]
-    async fn probe_first_simulator_handshake_window_with_policy_uses_post_movement_timeout_and_can_stop_on_region_control(
-    ) {
+    async fn probe_first_simulator_handshake_window_with_policy_uses_post_movement_timeout_and_can_stop_on_region_control()
+     {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
-        let listener_addr = listener.local_addr().expect("listener address should exist");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -6001,5 +8934,221 @@ mod tests {
         assert_eq!(handoff_summary.crossed_region, 1);
         assert_eq!(handoff_summary.confirm_enable_simulator, 0);
         assert!(!handoff_summary.not_seen_in_run);
+    }
+
+    #[test]
+    fn parse_event_queue_poll_from_json_extracts_scalar_fields() {
+        let value = json!({
+            "id": 9,
+            "events": [{
+                "message": "ChatFromSimulator",
+                "body": {
+                    "from_name": "Tester Resident",
+                    "message": "hello world",
+                    "channel": 0
+                }
+            }]
+        });
+        let poll = parse_event_queue_poll_from_json(&value).expect("poll parsing should succeed");
+        assert_eq!(poll.id, Some(9));
+        assert_eq!(poll.events.len(), 1);
+        assert_eq!(poll.events[0].message, "ChatFromSimulator");
+        assert_eq!(
+            poll.events[0].fields.get("from_name").map(String::as_str),
+            Some("Tester Resident")
+        );
+    }
+
+    #[test]
+    fn extract_nearby_chat_messages_filters_chat_like_events() {
+        let connection = Connection::new(ConnectionConfig::default());
+        let poll = EventQueuePollResult {
+            id: Some(1),
+            events: vec![
+                EventQueueMessage {
+                    message: String::from("ChatFromSimulator"),
+                    fields: BTreeMap::from([
+                        (String::from("from_name"), String::from("Alpha Resident")),
+                        (String::from("message"), String::from("hello")),
+                    ]),
+                },
+                EventQueueMessage {
+                    message: String::from("Unrelated"),
+                    fields: BTreeMap::new(),
+                },
+            ],
+        };
+        let nearby = connection.extract_nearby_chat_messages(&poll);
+        assert_eq!(nearby.len(), 1);
+        assert_eq!(nearby[0].sender, "Alpha Resident");
+        assert_eq!(nearby[0].text, "hello");
+    }
+
+    #[tokio::test]
+    async fn send_nearby_chat_uses_lludp_chat_from_viewer_and_decodes_response() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let (_, sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("use circuit should arrive");
+            let (_, sender_2) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("complete movement should arrive");
+            assert_eq!(sender, sender_2);
+            let (chat_len, chat_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("chat packet should arrive");
+            assert_eq!(sender, chat_sender);
+            let (flags, _, message_number, body) =
+                decode_outbound_handshake_payload(&buf[..chat_len]);
+            assert_eq!(flags & LLUDP_RELIABLE_FLAG, LLUDP_RELIABLE_FLAG);
+            assert_eq!(
+                message_number,
+                lludp_low_frequency_message_number(LLUDP_CHAT_FROM_VIEWER_LOW_ID)
+            );
+            assert!(body.len() > 34);
+            let msg_len = u16::from_le_bytes([body[32], body[33]]) as usize;
+            let msg = &body[34..34 + msg_len];
+            assert_eq!(msg.last().copied(), Some(0));
+            assert_eq!(
+                std::str::from_utf8(&msg[..msg_len - 1]).expect("message should be utf-8"),
+                "test message"
+            );
+            let _ = listener
+                .send_to(
+                    &make_chat_from_simulator_packet("Echo Resident", "roger that"),
+                    chat_sender,
+                )
+                .await;
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let received = connection
+            .send_nearby_chat("test message", "127.0.0.1:0", Duration::from_secs(1), 4)
+            .await
+            .expect("chat send should succeed");
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].sender, "Echo Resident");
+        assert_eq!(received[0].text, "roger that");
+    }
+
+    #[test]
+    fn llsd_codec_decodes_buddy_list_entries() {
+        let codec = LlsdLoginCodec;
+        let body = br#"
+<llsd><map>
+<key>login</key><boolean>true</boolean>
+<key>agent_id</key><string>11111111-1111-1111-1111-111111111111</string>
+<key>session_id</key><string>22222222-2222-2222-2222-222222222222</string>
+<key>secure_session_id</key><string>33333333-3333-3333-3333-333333333333</string>
+<key>circuit_code</key><integer>424242</integer>
+<key>sim_ip</key><string>127.0.0.1</string>
+<key>sim_port</key><integer>13000</integer>
+<key>region_x</key><integer>1000</integer>
+<key>region_y</key><integer>1001</integer>
+<key>seed_capability</key><string>https://seed-cap.example.invalid</string>
+<key>buddy-list</key><array>
+  <map>
+    <key>buddy_id</key><uuid>aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa</uuid>
+    <key>buddy_rights_has</key><integer>1</integer>
+    <key>buddy_rights_given</key><integer>2</integer>
+  </map>
+</array>
+</map></llsd>
+"#;
+        let response = codec
+            .decode_response(body)
+            .expect("llsd decode should succeed");
+        assert_eq!(response.buddy_list.len(), 1);
+        assert_eq!(
+            response.buddy_list[0].buddy_id,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+        assert_eq!(response.buddy_list[0].rights_has, 1);
+        assert_eq!(response.buddy_list[0].rights_given, 2);
+    }
+
+    #[test]
+    fn decode_social_events_extracts_online_notification_ids() {
+        let mut payload = make_low_frequency_packet(LLUDP_ONLINE_NOTIFICATION_LOW_ID);
+        payload.push(2);
+        payload.extend_from_slice(&[0xaa; 16]);
+        payload.extend_from_slice(&[0xbb; 16]);
+        let events = decode_social_events(&payload);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], SocialEvent::FriendOnline { .. }));
+    }
+
+    #[test]
+    fn parse_resolved_avatar_names_supports_json_agents_array() {
+        let body = br#"{
+            "agents":[
+                {"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","display_name":"Alpha Resident"}
+            ]
+        }"#;
+        let names = parse_resolved_avatar_names(body, Some("application/json"))
+            .expect("name response should parse");
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        assert_eq!(names[0].display_name, "Alpha Resident");
+    }
+
+    #[test]
+    fn parse_resolved_avatar_names_supports_llsd_agents_array() {
+        let body = br#"
+<llsd><map>
+  <key>agents</key><array>
+    <map>
+      <key>id</key><uuid>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</uuid>
+      <key>display_name</key><string>Bravo Resident</string>
+    </map>
+  </array>
+</map></llsd>
+"#;
+        let names = parse_resolved_avatar_names(body, Some("application/llsd+xml"))
+            .expect("name response should parse");
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].id, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        assert_eq!(names[0].display_name, "Bravo Resident");
     }
 }

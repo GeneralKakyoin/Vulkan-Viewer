@@ -104,12 +104,6 @@ Additional rules:
 
 ### Final Goal
 The long-term goal is feature parity with conventional Second Life / OpenSim viewers while replacing legacy architecture with a modern Rust-based design.
-
-### Current Delivery Phase
-The current delivery phase is still login compatibility and post-foundation protocol alignment.
-
-Agents must not jump ahead into simulator/world integration until login/bootstrap is credible and documented.
-
 ---
 
 ## Repository Truth Rule
@@ -125,6 +119,7 @@ Before making changes, agents must read in this order:
 5. `docs/ARCHITECTURE.md`
 6. `docs/INTERFACES.md`
 7. `docs/FIRESTORM_REFERENCE.md`
+7.1 `docs/FIRESTORM_INDEX.md`
 6. relevant `docs/RESEARCH/*`
 7. then inspect code
 
