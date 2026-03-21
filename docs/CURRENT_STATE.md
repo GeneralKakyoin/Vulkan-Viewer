@@ -54,7 +54,12 @@ Within this phase, the bounded pre-world object/state slice is now substantially
     - `VIEWER_LOGIN_AGREE_TOS`
     - `VIEWER_LOGIN_READ_CRITICAL`
     - `VIEWER_LOGIN_MFA_TOKEN`
+  - login startup now includes narrow wire fallback behavior for SL-like endpoints:
+    - primary attempt uses configured wire format
+    - when primary is `llsd` and response matches `viewer-data` + missing-password request-shape signature, app retries once with `xmlrpc`
+    - fallback outcome is surfaced in relay diagnostics (primary/final wire + classified reason)
   - app now surfaces explicit startup status in UI (`starting`, `connected`, `disabled`, `failed`)
+  - startup failures now map to stable diagnostic classes (connect transport, login transport, login request-shape, auth, tos/mfa/update required, reconnect)
   - debug overlay displays live-derived connection/handshake/traffic summary fields
 - sandbox cube visual indicator now reflects live state:
     - default/offline: red, scale 1.0
@@ -269,6 +274,11 @@ Within this phase, the bounded pre-world object/state slice is now substantially
 - successful real live login achieved
 - minimal seed capability fetch transport path implemented in `viewer_net`
 - one-shot EventQueueGet inspection path implemented in `viewer_net`
+- one-shot EventQueueGet retries now use bounded exponential backoff with stable per-attempt diagnostics:
+  - retry class (`timeout` / `transport` / `upstream_http` / `non_retryable_http` / `unknown`)
+  - retry reason
+  - scheduled backoff delay when retrying
+  - terminal reason on final attempt
 - one-shot SimulatorFeatures inspection path implemented in `viewer_net`
 - one-shot MapLayer inspection path implemented in `viewer_net`
 - capability one-shot requests now send explicit LLSD `Accept` headers

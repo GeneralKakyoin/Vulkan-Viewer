@@ -24,6 +24,8 @@ use viewer_grid::{
 const MAX_LOGIN_REDIRECTS: usize = 4;
 const MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS: usize = 3;
 const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
+const EVENT_QUEUE_ONE_SHOT_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
+const EVENT_QUEUE_ONE_SHOT_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 const LLSD_XML_CONTENT_TYPE: &str = "application/llsd+xml";
 const LLUDP_PACKET_ID_SIZE: usize = 6;
 const LLUDP_MINIMUM_VALID_PACKET_SIZE: usize = LLUDP_PACKET_ID_SIZE + 1;
@@ -794,6 +796,19 @@ pub struct LoginTraceFinalResult {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginFallbackClassifiedReason {
+    RequestShapeMissingPassword,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginFallbackOutcome {
+    pub primary_wire_format: LoginWireFormat,
+    pub fallback_used: bool,
+    pub final_wire_format: LoginWireFormat,
+    pub classified_reason: Option<LoginFallbackClassifiedReason>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub account_name: String,
@@ -1202,8 +1217,22 @@ pub struct EventQueueAttemptDiagnostic {
     pub status: Option<u16>,
     pub elapsed_ms: u128,
     pub retryable: bool,
+    pub retry_class: EventQueueRetryClass,
+    pub retry_reason: String,
+    pub scheduled_backoff_ms: Option<u128>,
+    pub terminal_reason: Option<String>,
     pub error_kind: String,
     pub response_headers: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EventQueueRetryClass {
+    #[default]
+    Unknown,
+    Timeout,
+    Transport,
+    UpstreamHttp,
+    NonRetryableHttp,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1449,6 +1478,58 @@ impl Connection {
         adapter: &A,
         intent: LoginIntent,
     ) -> Result<(GridLoginResult, LoginTrace), ConnectionError> {
+        self.login_with_trace_using_wire(adapter, intent, self.config.wire_format)
+            .await
+    }
+
+    pub async fn login_with_trace_with_fallback<A: GridLoginAdapter>(
+        &mut self,
+        adapter: &A,
+        intent: LoginIntent,
+    ) -> Result<(GridLoginResult, LoginTrace, LoginFallbackOutcome), ConnectionError> {
+        let primary_wire_format = self.config.wire_format;
+        let (primary_result, primary_trace) = self
+            .login_with_trace_using_wire(adapter, intent.clone(), primary_wire_format)
+            .await?;
+        if let Some(classified_reason) = classify_login_request_shape_failure(
+            primary_wire_format,
+            &self.config.endpoint,
+            &primary_trace.final_response,
+        ) {
+            let fallback_wire_format = LoginWireFormat::XmlRpc;
+            let (fallback_result, fallback_trace) = self
+                .login_with_trace_using_wire(adapter, intent, fallback_wire_format)
+                .await?;
+            return Ok((
+                fallback_result,
+                fallback_trace,
+                LoginFallbackOutcome {
+                    primary_wire_format,
+                    fallback_used: true,
+                    final_wire_format: fallback_wire_format,
+                    classified_reason: Some(classified_reason),
+                },
+            ));
+        }
+
+        Ok((
+            primary_result,
+            primary_trace,
+            LoginFallbackOutcome {
+                primary_wire_format,
+                fallback_used: false,
+                final_wire_format: primary_wire_format,
+                classified_reason: None,
+            },
+        ))
+    }
+
+    async fn login_with_trace_using_wire<A: GridLoginAdapter>(
+        &mut self,
+        adapter: &A,
+        intent: LoginIntent,
+        wire_format: LoginWireFormat,
+    ) -> Result<(GridLoginResult, LoginTrace), ConnectionError> {
         if self.state != ConnectionState::Connected {
             return Err(ConnectionError::InvalidState(self.state));
         }
@@ -1457,7 +1538,7 @@ impl Connection {
         let mut endpoint = self.config.endpoint.clone();
         let mut http_method = Method::POST;
         let mut redirects = 0;
-        let codec = self.config.wire_format.codec();
+        let codec = wire_format.codec();
         let mut trace = LoginTrace {
             initial_request: trace_request(&request),
             redirect_steps: Vec::new(),
@@ -2313,16 +2394,29 @@ impl Connection {
             let response = match response {
                 Ok(response) => response,
                 Err(err) => {
-                    let retryable = err.is_timeout() || err.is_connect() || err.is_request();
+                    let (retryable, retry_class, retry_reason) =
+                        classify_event_queue_transport_retry(&err);
+                    let scheduled_backoff_ms =
+                        event_queue_retry_backoff_ms(attempt, retryable, None);
+                    let terminal_reason = if scheduled_backoff_ms.is_none() {
+                        Some(retry_reason.clone())
+                    } else {
+                        None
+                    };
                     attempts.push(EventQueueAttemptDiagnostic {
                         attempt,
                         status: None,
                         elapsed_ms,
                         retryable,
+                        retry_class,
+                        retry_reason,
+                        scheduled_backoff_ms,
+                        terminal_reason,
                         error_kind: format!("transport:{err}"),
                         response_headers: Vec::new(),
                     });
-                    if retryable && attempt < MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
+                    if let Some(backoff_ms) = scheduled_backoff_ms {
+                        tokio::time::sleep(Duration::from_millis(backoff_ms as u64)).await;
                         continue;
                     }
                     return Err(ConnectionError::EventQueueOneShotFailed {
@@ -2356,15 +2450,28 @@ impl Connection {
 
             let body = String::from_utf8_lossy(&bytes).to_string();
             let retryable = is_retryable_event_queue_http_failure(status, &body);
+            let retry_class = classify_event_queue_http_retry(status, retryable);
+            let retry_reason = event_queue_http_retry_reason(status, &body, retryable);
+            let scheduled_backoff_ms = event_queue_retry_backoff_ms(attempt, retryable, Some(status));
+            let terminal_reason = if scheduled_backoff_ms.is_none() {
+                Some(retry_reason.clone())
+            } else {
+                None
+            };
             attempts.push(EventQueueAttemptDiagnostic {
                 attempt,
                 status: Some(status.as_u16()),
                 elapsed_ms,
                 retryable,
+                retry_class,
+                retry_reason,
+                scheduled_backoff_ms,
+                terminal_reason,
                 error_kind: format!("http:{status}"),
                 response_headers: headers,
             });
-            if retryable && attempt < MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
+            if let Some(backoff_ms) = scheduled_backoff_ms {
+                tokio::time::sleep(Duration::from_millis(backoff_ms as u64)).await;
                 continue;
             }
             return Err(ConnectionError::EventQueueOneShotFailed {
@@ -4869,6 +4976,103 @@ fn classify_first_simulator_inbound_from_json(
     None
 }
 
+fn classify_login_request_shape_failure(
+    wire_format: LoginWireFormat,
+    endpoint: &str,
+    response: &LoginTraceResponse,
+) -> Option<LoginFallbackClassifiedReason> {
+    if wire_format != LoginWireFormat::Llsd {
+        return None;
+    }
+    if !looks_like_second_life_login_endpoint(endpoint) {
+        return None;
+    }
+
+    let reason = response.reason.as_deref().unwrap_or_default();
+    let message = response
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if reason.eq_ignore_ascii_case("viewer-data") && message.contains("missing password") {
+        return Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword);
+    }
+
+    None
+}
+
+fn looks_like_second_life_login_endpoint(endpoint: &str) -> bool {
+    let lowered = endpoint.to_ascii_lowercase();
+    lowered.contains("login.agni.lindenlab.com") || lowered.contains("secondlife.com")
+}
+
+fn classify_event_queue_transport_retry(err: &reqwest::Error) -> (bool, EventQueueRetryClass, String) {
+    if err.is_timeout() {
+        return (
+            true,
+            EventQueueRetryClass::Timeout,
+            String::from("transport timeout"),
+        );
+    }
+    if err.is_connect() || err.is_request() {
+        return (
+            true,
+            EventQueueRetryClass::Transport,
+            String::from("transport request/connect failure"),
+        );
+    }
+    (
+        false,
+        EventQueueRetryClass::Unknown,
+        String::from("non-retryable transport error"),
+    )
+}
+
+fn classify_event_queue_http_retry(status: StatusCode, retryable: bool) -> EventQueueRetryClass {
+    if retryable {
+        return EventQueueRetryClass::UpstreamHttp;
+    }
+    if status.is_client_error() || status.is_server_error() {
+        return EventQueueRetryClass::NonRetryableHttp;
+    }
+    EventQueueRetryClass::Unknown
+}
+
+fn event_queue_http_retry_reason(status: StatusCode, body: &str, retryable: bool) -> String {
+    if retryable {
+        return format!("retryable upstream http failure ({status})");
+    }
+    let compact_body = body
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact_body.is_empty() {
+        return format!("non-retryable http failure ({status})");
+    }
+    format!("non-retryable http failure ({status}): {compact_body}")
+}
+
+fn event_queue_retry_backoff_ms(
+    attempt: usize,
+    retryable: bool,
+    status: Option<StatusCode>,
+) -> Option<u128> {
+    if !retryable || attempt >= MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
+        return None;
+    }
+    if let Some(status) = status {
+        if !status.is_server_error() && !matches!(status.as_u16(), 499 | 502 | 503 | 504) {
+            return None;
+        }
+    }
+    let exp = attempt.saturating_sub(1) as u32;
+    let multiplier = 1u128 << exp.min(8);
+    let base_ms = EVENT_QUEUE_ONE_SHOT_RETRY_BASE_DELAY.as_millis();
+    let max_ms = EVENT_QUEUE_ONE_SHOT_RETRY_MAX_DELAY.as_millis();
+    Some((base_ms * multiplier).min(max_ms))
+}
+
 fn is_retryable_event_queue_http_failure(status: StatusCode, body: &str) -> bool {
     if status.is_server_error() {
         return true;
@@ -6420,6 +6624,96 @@ mod tests {
         assert_eq!(trace.initial_request.start_location, "last");
     }
 
+    #[tokio::test]
+    async fn login_with_trace_with_fallback_retries_llsd_request_shape_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secondlife.com/login"))
+            .and(header("content-type", "application/llsd+xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<llsd><map>
+                    <key>login</key><boolean>false</boolean>
+                    <key>reason</key><string>viewer-data</string>
+                    <key>message</key><string>Missing password</string>
+                </map></llsd>"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/secondlife.com/login"))
+            .and(header("content-type", "text/xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<?xml version="1.0"?>
+<methodResponse><params><param><value><struct>
+<member><name>login</name><value><boolean>0</boolean></value></member>
+<member><name>reason</name><value><string>key</string></value></member>
+<member><name>message</name><value><string>invalid credentials</string></value></member>
+</struct></value></param></params></methodResponse>"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/secondlife.com/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            wire_format: LoginWireFormat::Llsd,
+        });
+        let adapter = SecondLifeAdapter;
+        connection.connect().await.expect("connect should succeed");
+
+        let (result, _trace, fallback) = connection
+            .login_with_trace_with_fallback(&adapter, make_intent(true))
+            .await
+            .expect("fallback login should return terminal result");
+
+        assert!(matches!(result, GridLoginResult::Failed(_)));
+        assert!(fallback.fallback_used);
+        assert_eq!(fallback.primary_wire_format, LoginWireFormat::Llsd);
+        assert_eq!(fallback.final_wire_format, LoginWireFormat::XmlRpc);
+        assert_eq!(
+            fallback.classified_reason,
+            Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword)
+        );
+    }
+
+    #[tokio::test]
+    async fn login_with_trace_with_fallback_does_not_retry_auth_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/secondlife.com/login"))
+            .and(header("content-type", "application/llsd+xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<llsd><map>
+                    <key>login</key><boolean>false</boolean>
+                    <key>reason</key><string>key</string>
+                    <key>message</key><string>invalid credentials</string>
+                </map></llsd>"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/secondlife.com/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            wire_format: LoginWireFormat::Llsd,
+        });
+        let adapter = SecondLifeAdapter;
+        connection.connect().await.expect("connect should succeed");
+
+        let (result, _trace, fallback) = connection
+            .login_with_trace_with_fallback(&adapter, make_intent(true))
+            .await
+            .expect("login should return terminal result");
+
+        assert!(matches!(result, GridLoginResult::Failed(_)));
+        assert!(!fallback.fallback_used);
+        assert_eq!(fallback.final_wire_format, LoginWireFormat::Llsd);
+        assert_eq!(fallback.classified_reason, None);
+    }
+
     #[test]
     fn json_codec_decodes_wrapped_login_response() {
         let codec = JsonLoginCodec;
@@ -6959,6 +7253,9 @@ mod tests {
                 assert_eq!(attempts.len(), 1);
                 assert_eq!(attempts[0].status, Some(400));
                 assert!(!attempts[0].retryable);
+                assert_eq!(attempts[0].retry_class, EventQueueRetryClass::NonRetryableHttp);
+                assert!(attempts[0].scheduled_backoff_ms.is_none());
+                assert!(attempts[0].terminal_reason.is_some());
             }
             other => panic!("expected EventQueueOneShotFailed, got {other:?}"),
         }
@@ -6999,9 +7296,22 @@ mod tests {
                 assert_eq!(attempts.len(), MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS);
                 assert!(attempts.iter().all(|attempt| attempt.retryable));
                 assert!(attempts.iter().all(|attempt| attempt.status == Some(500)));
+                assert_eq!(attempts[0].scheduled_backoff_ms, Some(250));
+                assert_eq!(attempts[1].scheduled_backoff_ms, Some(500));
+                assert!(attempts[2].scheduled_backoff_ms.is_none());
+                assert!(attempts[2].terminal_reason.is_some());
             }
             other => panic!("expected EventQueueOneShotFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn event_queue_retry_backoff_is_bounded_exponential() {
+        assert_eq!(event_queue_retry_backoff_ms(1, true, Some(StatusCode::BAD_GATEWAY)), Some(250));
+        assert_eq!(event_queue_retry_backoff_ms(2, true, Some(StatusCode::BAD_GATEWAY)), Some(500));
+        assert_eq!(event_queue_retry_backoff_ms(3, true, Some(StatusCode::BAD_GATEWAY)), None);
+        assert_eq!(event_queue_retry_backoff_ms(1, true, Some(StatusCode::BAD_REQUEST)), None);
+        assert_eq!(event_queue_retry_backoff_ms(1, false, Some(StatusCode::BAD_GATEWAY)), None);
     }
 
     #[tokio::test]

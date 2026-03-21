@@ -2,6 +2,34 @@
 
 ## Last Completed Work
 
+- Implemented bootstrap reliability milestone slice for startup/login diagnostics with strict scope boundaries:
+  - added typed login fallback outcome model in `viewer_net`:
+    - primary wire format
+    - fallback-used flag
+    - final wire format
+    - classified fallback reason
+  - added single-step SL endpoint fallback behavior:
+    - if primary `LLSD` login trace matches request-shape signature (`viewer-data` + missing password), retry once with `XML-RPC`
+    - no open-ended codec cycling
+- Hardened EventQueue one-shot retry diagnostics in `viewer_net`:
+  - bounded exponential retry backoff (`250ms`, `500ms`, capped by attempt budget)
+  - per-attempt structured fields now include:
+    - retry class
+    - retry reason
+    - scheduled backoff delay
+    - terminal reason
+- Standardized startup failure projection in `viewer_app`:
+  - startup failures now use stable classes (connect transport, login transport, login request-shape, auth, tos/mfa/update-required, reconnect)
+  - startup status rendering now includes class + message for deterministic debug interpretation
+  - live relay emits explicit login wire-fallback event when fallback is used
+- Added focused tests:
+  - `viewer_net`: fallback trigger/no-trigger behavior, bounded retry metadata/backoff assertions
+  - `viewer_app`: startup failure class mapping for request-shape and auth paths
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+  - manual live smoke (`cargo run -p viewer_app`) passed with successful login and active live profile/runtime relay flow
+
 - Implemented avatar placeholder world slice V1 (coarse presence + self) across `viewer_net` -> `viewer_app` -> `viewer_core` -> `viewer_ui`.
 - Added world avatar placeholder core model and scene application path:
   - scene now renders dedicated placeholder instances for self vs others

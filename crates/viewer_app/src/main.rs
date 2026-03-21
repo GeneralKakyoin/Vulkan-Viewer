@@ -24,9 +24,9 @@ use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
 };
 use viewer_net::{
-    AgentProfileData, Connection, ConnectionConfig, ConnectionError,
-    FirstSimulatorInboundTrafficScope, LoginWireFormat, NearbyChatMessage, SocialCircuit,
-    SocialEvent, poll_event_queue_url_once,
+    AgentProfileData, Connection, ConnectionConfig, ConnectionError, LoginFallbackClassifiedReason,
+    LoginFallbackOutcome, LoginTrace, LoginWireFormat, FirstSimulatorInboundTrafficScope,
+    NearbyChatMessage, SocialCircuit, SocialEvent, poll_event_queue_url_once,
 };
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
@@ -148,7 +148,27 @@ enum LiveStartupStatus {
     DisabledMissingConfig,
     Starting,
     Connected,
-    Failed(String),
+    Failed(LiveStartupFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveStartupFailureClass {
+    MissingConfig,
+    ConnectTransport,
+    LoginRequestTransport,
+    LoginRequestShape,
+    LoginAuth,
+    LoginRequiresTos,
+    LoginRequiresMfa,
+    LoginUpdateRequired,
+    LoginOther,
+    ConnectionLostReconnecting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveStartupFailure {
+    class: LiveStartupFailureClass,
+    message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -368,7 +388,10 @@ impl LiveVisualState {
             }
             LiveStartupStatus::Starting => String::from("starting"),
             LiveStartupStatus::Connected => String::from("connected"),
-            LiveStartupStatus::Failed(reason) => format!("failed ({reason})"),
+            LiveStartupStatus::Failed(failure) => {
+                let class = startup_failure_class_label(failure.class);
+                format!("failed ({class}: {})", failure.message)
+            }
         }
     }
 }
@@ -529,9 +552,10 @@ where
                 LiveStartupPlan {
                     config: None,
                     enabled: false,
-                    startup_status: LiveStartupStatus::Failed(String::from(
-                        "missing required VIEWER_LOGIN_* env vars",
-                    )),
+                    startup_status: LiveStartupStatus::Failed(LiveStartupFailure {
+                        class: LiveStartupFailureClass::MissingConfig,
+                        message: String::from("missing required VIEWER_LOGIN_* env vars"),
+                    }),
                 }
             }
         }
@@ -608,12 +632,14 @@ async fn run_in_process_live_feed(
         let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Starting));
 
         if connection.connect().await.is_err() {
+            let failure = LiveStartupFailure {
+                class: LiveStartupFailureClass::ConnectTransport,
+                message: String::from("connect failed"),
+            };
             let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
-                String::from("connect failed"),
+                failure.message.clone(),
             )));
-            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
-                String::from("connect failed"),
-            )));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(failure)));
             reconnect_attempt = reconnect_attempt.saturating_add(1);
             emit_relay(&tx, RuntimeRelayLevel::Warn, "connect", "connect failed");
             tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
@@ -629,13 +655,17 @@ async fn run_in_process_live_feed(
             mfa_token: config.mfa_token.clone(),
         };
 
-        let Ok((result, _trace)) = connection.login_with_trace(&adapter, intent).await else {
+        let Ok((result, trace, fallback)) =
+            connection.login_with_trace_with_fallback(&adapter, intent).await
+        else {
+            let failure = LiveStartupFailure {
+                class: LiveStartupFailureClass::LoginRequestTransport,
+                message: String::from("login request failed"),
+            };
             let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
-                String::from("login request failed"),
+                failure.message.clone(),
             )));
-            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
-                String::from("login request failed"),
-            )));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(failure)));
             reconnect_attempt = reconnect_attempt.saturating_add(1);
             emit_relay(
                 &tx,
@@ -646,22 +676,25 @@ async fn run_in_process_live_feed(
             tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
             continue;
         };
+        emit_login_fallback_relay(&tx, &fallback);
 
         let mut snapshot = build_live_visual_snapshot_from_result(&result);
         let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
         if !snapshot.logged_in {
+            let failure = startup_failure_from_login_outcome(&result, &trace, &fallback);
             let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
-                String::from("login not successful"),
+                failure.message.clone(),
             )));
-            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
-                String::from("login not successful"),
-            )));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(failure.clone())));
             reconnect_attempt = reconnect_attempt.saturating_add(1);
             emit_relay(
                 &tx,
                 RuntimeRelayLevel::Warn,
                 "login",
-                "login not successful",
+                &format!(
+                    "login not successful ({})",
+                    startup_failure_class_label(failure.class)
+                ),
             );
             tokio::time::sleep(reconnect_backoff_duration(reconnect_attempt)).await;
             continue;
@@ -1433,12 +1466,14 @@ async fn run_in_process_live_feed(
             }
 
             if should_reconnect {
+                let failure = LiveStartupFailure {
+                    class: LiveStartupFailureClass::ConnectionLostReconnecting,
+                    message: String::from("connection lost; reconnecting"),
+                };
                 let _ = tx.send(LiveFeedUpdate::ChatConnection(
                     ChatConnectionState::Reconnecting,
                 ));
-                let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
-                    String::from("connection lost; reconnecting"),
-                )));
+                let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(failure)));
                 emit_relay(
                     &tx,
                     RuntimeRelayLevel::Warn,
@@ -1865,6 +1900,99 @@ fn parse_wire_format(value: &str) -> LoginWireFormat {
         "json" => LoginWireFormat::Json,
         "xmlrpc" | "xml-rpc" => LoginWireFormat::XmlRpc,
         _ => LoginWireFormat::Llsd,
+    }
+}
+
+fn startup_failure_class_label(class: LiveStartupFailureClass) -> &'static str {
+    match class {
+        LiveStartupFailureClass::MissingConfig => "missing_config",
+        LiveStartupFailureClass::ConnectTransport => "connect_transport",
+        LiveStartupFailureClass::LoginRequestTransport => "login_transport",
+        LiveStartupFailureClass::LoginRequestShape => "login_request_shape",
+        LiveStartupFailureClass::LoginAuth => "login_auth",
+        LiveStartupFailureClass::LoginRequiresTos => "login_requires_tos",
+        LiveStartupFailureClass::LoginRequiresMfa => "login_requires_mfa",
+        LiveStartupFailureClass::LoginUpdateRequired => "login_update_required",
+        LiveStartupFailureClass::LoginOther => "login_other",
+        LiveStartupFailureClass::ConnectionLostReconnecting => "connection_reconnecting",
+    }
+}
+
+fn emit_login_fallback_relay(tx: &mpsc::Sender<LiveFeedUpdate>, fallback: &LoginFallbackOutcome) {
+    if !fallback.fallback_used {
+        return;
+    }
+    let reason = match fallback.classified_reason {
+        Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword) => "request_shape_missing_password",
+        None => "unknown",
+    };
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "login",
+        &format!(
+            "wire fallback used: {:?} -> {:?} ({reason})",
+            fallback.primary_wire_format, fallback.final_wire_format
+        ),
+    );
+}
+
+fn startup_failure_from_login_outcome(
+    result: &GridLoginResult,
+    trace: &LoginTrace,
+    fallback: &LoginFallbackOutcome,
+) -> LiveStartupFailure {
+    if fallback.classified_reason == Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword)
+    {
+        return LiveStartupFailure {
+            class: LiveStartupFailureClass::LoginRequestShape,
+            message: String::from("login request shape rejected (missing password signature)"),
+        };
+    }
+
+    match result {
+        GridLoginResult::RequiresTos { message } => LiveStartupFailure {
+            class: LiveStartupFailureClass::LoginRequiresTos,
+            message: message
+                .clone()
+                .unwrap_or_else(|| String::from("terms of service required")),
+        },
+        GridLoginResult::RequiresMfa { message } => LiveStartupFailure {
+            class: LiveStartupFailureClass::LoginRequiresMfa,
+            message: message
+                .clone()
+                .unwrap_or_else(|| String::from("multi-factor token required")),
+        },
+        GridLoginResult::UpdateRequired { message } => LiveStartupFailure {
+            class: LiveStartupFailureClass::LoginUpdateRequired,
+            message: message
+                .clone()
+                .unwrap_or_else(|| String::from("viewer update required")),
+        },
+        GridLoginResult::Failed(error) => {
+            let is_auth = error
+                .reason
+                .as_deref()
+                .map(|reason| reason.eq_ignore_ascii_case("key"))
+                .unwrap_or(false);
+            LiveStartupFailure {
+                class: if is_auth {
+                    LiveStartupFailureClass::LoginAuth
+                } else {
+                    LiveStartupFailureClass::LoginOther
+                },
+                message: error
+                    .message
+                    .clone()
+                    .or_else(|| trace.final_result.message.clone())
+                    .or_else(|| trace.final_response.message.clone())
+                    .unwrap_or_else(|| String::from("login not successful")),
+            }
+        }
+        GridLoginResult::Redirect { .. } | GridLoginResult::Success(_) => LiveStartupFailure {
+            class: LiveStartupFailureClass::LoginOther,
+            message: String::from("login not successful"),
+        },
     }
 }
 
@@ -3034,6 +3162,7 @@ impl ApplicationHandler for ViewerApp {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use viewer_grid::{GridLoginError, GridLoginErrorClass};
 
     #[test]
     fn in_process_config_requires_endpoint_username_and_password() {
@@ -3150,6 +3279,84 @@ mod tests {
         assert!(!plan.enabled);
         assert!(plan.config.is_none());
         assert!(matches!(plan.startup_status, LiveStartupStatus::Failed(_)));
+    }
+
+    #[test]
+    fn startup_failure_mapping_uses_login_request_shape_class_for_missing_password_signature() {
+        let result = GridLoginResult::Failed(GridLoginError {
+            class: GridLoginErrorClass::Unknown,
+            reason: Some(String::from("viewer-data")),
+            message: Some(String::from("Missing password")),
+        });
+        let trace = LoginTrace {
+            initial_request: viewer_net::LoginTraceRequest {
+                method: String::from("login_to_simulator"),
+                start_location: String::from("last"),
+                options: vec![],
+                agree_to_tos: true,
+                read_critical: true,
+                had_mfa_token: false,
+            },
+            redirect_steps: vec![],
+            final_response: viewer_net::LoginTraceResponse {
+                login: Some(false),
+                reason: Some(String::from("viewer-data")),
+                message: Some(String::from("Missing password")),
+            },
+            final_result: viewer_net::LoginTraceFinalResult {
+                outcome: String::from("failed"),
+                reason: Some(String::from("viewer-data")),
+                message: Some(String::from("Missing password")),
+            },
+        };
+        let fallback = LoginFallbackOutcome {
+            primary_wire_format: LoginWireFormat::Llsd,
+            fallback_used: true,
+            final_wire_format: LoginWireFormat::XmlRpc,
+            classified_reason: Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword),
+        };
+
+        let failure = startup_failure_from_login_outcome(&result, &trace, &fallback);
+        assert_eq!(failure.class, LiveStartupFailureClass::LoginRequestShape);
+    }
+
+    #[test]
+    fn startup_failure_mapping_uses_auth_class_for_reason_key() {
+        let result = GridLoginResult::Failed(GridLoginError {
+            class: GridLoginErrorClass::AuthFailed,
+            reason: Some(String::from("key")),
+            message: Some(String::from("invalid credentials")),
+        });
+        let trace = LoginTrace {
+            initial_request: viewer_net::LoginTraceRequest {
+                method: String::from("login_to_simulator"),
+                start_location: String::from("last"),
+                options: vec![],
+                agree_to_tos: true,
+                read_critical: true,
+                had_mfa_token: false,
+            },
+            redirect_steps: vec![],
+            final_response: viewer_net::LoginTraceResponse {
+                login: Some(false),
+                reason: Some(String::from("key")),
+                message: Some(String::from("invalid credentials")),
+            },
+            final_result: viewer_net::LoginTraceFinalResult {
+                outcome: String::from("failed"),
+                reason: Some(String::from("key")),
+                message: Some(String::from("invalid credentials")),
+            },
+        };
+        let fallback = LoginFallbackOutcome {
+            primary_wire_format: LoginWireFormat::Llsd,
+            fallback_used: false,
+            final_wire_format: LoginWireFormat::Llsd,
+            classified_reason: None,
+        };
+
+        let failure = startup_failure_from_login_outcome(&result, &trace, &fallback);
+        assert_eq!(failure.class, LiveStartupFailureClass::LoginAuth);
     }
 
     #[test]
