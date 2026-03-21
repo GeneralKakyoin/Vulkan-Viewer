@@ -13,8 +13,9 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
 use viewer_core::{
-    AvatarProfileState, AvatarProfileTab, Camera, ChatConnectionState, ChatMessage, ChatSendStatus,
-    ChatState, DirectImMessage, FirstLifeProfile, FriendEntry, LiveVisualSnapshot,
+    AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
+    ChatMessage, ChatSendStatus, ChatState, DirectImMessage, FirstLifeProfile, FriendEntry,
+    LiveVisualSnapshot,
     ProfileClassifiedDetails, ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes,
     ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene,
     SecondLifeProfile, SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter,
@@ -2579,6 +2580,16 @@ fn should_apply_live_visual_snapshot(
     previous != next
 }
 
+fn apply_avatar_render_mode(
+    scene: &mut Scene,
+    social_state: &mut SocialState,
+    avatars: &[WorldAvatarPlaceholder],
+    mode: AvatarRenderMode,
+) {
+    social_state.avatar_render_mode = mode;
+    scene.apply_world_avatar_placeholders(avatars, mode);
+}
+
 impl ViewerApp {
     fn init_window(event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
         let window = event_loop
@@ -2897,8 +2908,12 @@ impl AppState {
                 .apply_world_object_ingestion_seam(&next_world_ingestion_seam);
             self.last_applied_world_ingestion_seam = Some(next_world_ingestion_seam.clone());
         }
-        self.scene
-            .apply_world_avatar_placeholders(&self.world_avatars);
+        apply_avatar_render_mode(
+            &mut self.scene,
+            &mut self.social_state,
+            &self.world_avatars,
+            self.renderer.avatar_render_mode(),
+        );
         self.world_ingestion_seam = next_world_ingestion_seam;
 
         let window = self.window.clone();
@@ -3450,6 +3465,45 @@ mod tests {
             Some(&viewer_time_second),
             &coarse_neighbor_changed
         ));
+    }
+
+    #[test]
+    fn apply_avatar_render_mode_updates_social_diagnostic_and_scene_output() {
+        let mut scene = Scene::prototype();
+        let mut social = SocialState::default();
+        let avatars = vec![WorldAvatarPlaceholder {
+            agent_id: String::from("avatar-id"),
+            world_position: [1.0, 0.0, 1.0],
+            local_position: Some([10, 20, 30]),
+            sim_name: Some(String::from("TestSim")),
+            display_name: String::from("Avatar"),
+            is_self: false,
+            last_update_unix_ms: 1,
+            stale: false,
+        }];
+
+        apply_avatar_render_mode(&mut scene, &mut social, &avatars, AvatarRenderMode::Proxy);
+        assert_eq!(social.avatar_render_mode, AvatarRenderMode::Proxy);
+        assert!(
+            scene.instances.iter().any(|instance| {
+                instance.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
+                    && instance.mesh == viewer_core::MeshKind::AvatarProxy
+            })
+        );
+
+        apply_avatar_render_mode(
+            &mut scene,
+            &mut social,
+            &avatars,
+            AvatarRenderMode::FallbackBox,
+        );
+        assert_eq!(social.avatar_render_mode, AvatarRenderMode::FallbackBox);
+        assert!(
+            scene.instances.iter().any(|instance| {
+                instance.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
+                    && instance.mesh == viewer_core::MeshKind::Cube
+            })
+        );
     }
 
     #[test]

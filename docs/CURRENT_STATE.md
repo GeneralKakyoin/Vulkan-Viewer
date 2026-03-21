@@ -1,12 +1,17 @@
 # CURRENT_STATE.md
 
-## Latest Update (Avatar Placeholders V1)
-- world avatar placeholders now render from live simulator coarse presence plus explicit self-avatar inclusion
-- placeholder labels now render as projected 2D overlays above each in-world placeholder
+## Latest Update (Avatar Proxy Visuals V1)
+- world avatars now render as shared asset-backed proxy meshes from the same coarse+self pipeline
+- proxy visuals keep the same lifecycle semantics (`seen/updated/stale/removed`) with self/other/stale tint+scale mapping
+- runtime fallback path is now explicit:
+  - if avatar proxy rendering is unavailable, avatars fall back to box placeholders in the same frame
+  - fallback can be forced for diagnostics with `VIEWER_RENDER_FORCE_AVATAR_PROXY_FALLBACK=1`
+- avatar labels continue to render as projected 2D overlays above each in-world avatar
 - label precedence in app runtime:
   - live resolved name
   - cached/known friend name
   - UUID-short fallback
+- debug runtime now surfaces compact avatar render mode status (`proxy` or `fallback-box`)
 - runtime relay now includes avatar lifecycle events:
   - `avatar_seen`
   - `avatar_updated`
@@ -25,7 +30,7 @@
   - clearer loading/error surface per selected tab
 
 Known V1 limits:
-- avatar placeholders are simple box markers (not rigged avatars)
+- avatar proxies are lightweight shared mesh stand-ins (not rigged avatars)
 - coarse decode currently supports both reduced payloads and Firestorm-like extended payload shape; if IDs are missing in payload, placeholders use deterministic fallback IDs
 
 ## Current Phase

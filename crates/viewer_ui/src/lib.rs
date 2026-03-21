@@ -2,8 +2,9 @@ use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
-    AvatarProfileState, AvatarProfileTab, Camera, ChatConnectionState, ChatSendStatus, ChatState,
-    LiveVisualSnapshot, ProfileLoadStatus, RuntimeRelayLevel, SocialState, WorldAvatarPlaceholder,
+    AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
+    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus, RuntimeRelayLevel,
+    SocialState, WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -245,6 +246,13 @@ fn send_chip(send_status: &ChatSendStatus) -> Option<(&'static str, egui::Color3
     }
 }
 
+fn avatar_render_mode_label(mode: AvatarRenderMode) -> &'static str {
+    match mode {
+        AvatarRenderMode::Proxy => "proxy",
+        AvatarRenderMode::FallbackBox => "fallback-box",
+    }
+}
+
 fn sorted_friend_ids_for_filter(social_state: &SocialState, filter: ThreadFilter) -> Vec<String> {
     let mut ids: Vec<String> = social_state.friends.iter().map(|f| f.id.clone()).collect();
     match filter {
@@ -405,6 +413,10 @@ impl UiSystem {
                                 surface_size.width, surface_size.height
                             ));
                             ui.label(format!("Live startup: {live_startup_status}"));
+                            ui.label(format!(
+                                "Avatar render: {}",
+                                avatar_render_mode_label(social_state.avatar_render_mode)
+                            ));
                             ui.label(format!("Sim: {}", world_sim_name.unwrap_or("unknown")));
                             if let Some([x, y, z]) = world_self_location {
                                 ui.label(format!("Location: {:.1}, {:.1}, {:.1}", x, y, z));
@@ -1230,5 +1242,14 @@ mod tests {
         );
         let ids = sorted_friend_ids_for_filter(&social, ThreadFilter::Recent);
         assert_eq!(ids, vec![String::from("b"), String::from("a")]);
+    }
+
+    #[test]
+    fn avatar_render_mode_label_reports_proxy_and_fallback() {
+        assert_eq!(avatar_render_mode_label(AvatarRenderMode::Proxy), "proxy");
+        assert_eq!(
+            avatar_render_mode_label(AvatarRenderMode::FallbackBox),
+            "fallback-box"
+        );
     }
 }

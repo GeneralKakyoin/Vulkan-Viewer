@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use viewer_core::{Camera, MeshKind, Scene, Transform};
+use viewer_core::{AvatarRenderMode, Camera, MeshKind, Scene, Transform};
 use wgpu::util::DeviceExt;
 use wgpu::{
     Buffer, BufferUsages, ColorTargetState, CommandEncoder, CommandEncoderDescriptor,
@@ -33,6 +33,7 @@ pub struct RenderBackend {
     axis_vertex_count: u32,
     ground_mesh: MeshBuffers,
     cube_mesh: MeshBuffers,
+    avatar_proxy_mesh: Option<MeshBuffers>,
 }
 
 struct MeshBuffers {
@@ -320,6 +321,45 @@ impl RenderBackend {
             cube_indices.len() as u32,
         );
 
+        let avatar_proxy_mesh = if avatar_proxy_fallback_forced() {
+            None
+        } else {
+            let avatar_vertices: [[f32; 3]; 16] = [
+                // torso
+                [-0.20, 0.00, -0.12],
+                [0.20, 0.00, -0.12],
+                [0.20, 0.70, -0.12],
+                [-0.20, 0.70, -0.12],
+                [-0.20, 0.00, 0.12],
+                [0.20, 0.00, 0.12],
+                [0.20, 0.70, 0.12],
+                [-0.20, 0.70, 0.12],
+                // head
+                [-0.14, 0.72, -0.14],
+                [0.14, 0.72, -0.14],
+                [0.14, 1.00, -0.14],
+                [-0.14, 1.00, -0.14],
+                [-0.14, 0.72, 0.14],
+                [0.14, 0.72, 0.14],
+                [0.14, 1.00, 0.14],
+                [-0.14, 1.00, 0.14],
+            ];
+            let avatar_indices: [u16; 72] = [
+                // torso
+                0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 4, 0, 3, 4, 3, 7, 1, 5, 6, 1, 6, 2, 3, 2,
+                6, 3, 6, 7, 4, 5, 1, 4, 1, 0, // head
+                8, 9, 10, 8, 10, 11, 12, 14, 13, 12, 15, 14, 12, 8, 11, 12, 11, 15, 9, 13, 14,
+                9, 14, 10, 11, 10, 14, 11, 14, 15, 12, 13, 9, 12, 9, 8,
+            ];
+            Some(create_mesh_buffers(
+                &device,
+                "avatar_proxy",
+                bytemuck::cast_slice(&avatar_vertices),
+                bytemuck::cast_slice(&avatar_indices),
+                avatar_indices.len() as u32,
+            ))
+        };
+
         Ok(Self {
             surface,
             device,
@@ -339,7 +379,16 @@ impl RenderBackend {
             axis_vertex_count: axis_vertices.len() as u32,
             ground_mesh,
             cube_mesh,
+            avatar_proxy_mesh,
         })
+    }
+
+    pub fn avatar_render_mode(&self) -> AvatarRenderMode {
+        if self.avatar_proxy_mesh.is_some() {
+            AvatarRenderMode::Proxy
+        } else {
+            AvatarRenderMode::FallbackBox
+        }
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -442,7 +491,7 @@ impl RenderBackend {
                         render_pass.set_vertex_buffer(0, self.axis_vertex_buffer.slice(..));
                         render_pass.draw(0..self.axis_vertex_count, 0..1);
                     }
-                    MeshKind::GroundPlane | MeshKind::Cube => {
+                    MeshKind::GroundPlane | MeshKind::Cube | MeshKind::AvatarProxy => {
                         if object_offset_index >= object_offsets.len() {
                             continue;
                         }
@@ -450,6 +499,12 @@ impl RenderBackend {
                         let mesh = match instance.mesh {
                             MeshKind::GroundPlane => &self.ground_mesh,
                             MeshKind::Cube => &self.cube_mesh,
+                            MeshKind::AvatarProxy => {
+                                let Some(mesh) = self.avatar_proxy_mesh.as_ref() else {
+                                    continue;
+                                };
+                                mesh
+                            }
                             MeshKind::AxisMarker => unreachable!(),
                         };
 
@@ -555,6 +610,15 @@ fn align_up(value: u64, alignment: u64) -> u64 {
         return value;
     }
     value.div_ceil(alignment) * alignment
+}
+
+fn avatar_proxy_fallback_forced() -> bool {
+    matches!(
+        std::env::var("VIEWER_RENDER_FORCE_AVATAR_PROXY_FALLBACK")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 fn create_depth_resources(

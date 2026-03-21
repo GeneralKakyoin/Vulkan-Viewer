@@ -13,6 +13,14 @@ pub enum MeshKind {
     AxisMarker,
     GroundPlane,
     Cube,
+    AvatarProxy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AvatarRenderMode {
+    #[default]
+    Proxy,
+    FallbackBox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +304,7 @@ pub struct SocialState {
     pub selected_friend_id: Option<String>,
     pub im_draft: String,
     pub im_threads: Vec<DirectImThread>,
+    pub avatar_render_mode: AvatarRenderMode,
     pub relay: RuntimeRelayState,
     next_im_message_id: u64,
 }
@@ -1677,14 +1686,38 @@ impl Scene {
         }
     }
 
-    pub fn apply_world_avatar_placeholders(&mut self, avatars: &[WorldAvatarPlaceholder]) {
+    pub fn apply_world_avatar_placeholders(
+        &mut self,
+        avatars: &[WorldAvatarPlaceholder],
+        mode: AvatarRenderMode,
+    ) {
         self.instances.retain(|instance| {
             instance.role != InstanceRole::WorldAvatarPlaceholderSelf
                 && instance.role != InstanceRole::WorldAvatarPlaceholderOther
         });
         for avatar in avatars {
+            let (mesh, scale, color) = match (mode, avatar.is_self, avatar.stale) {
+                (AvatarRenderMode::Proxy, true, _) => {
+                    (MeshKind::AvatarProxy, [0.38, 1.30, 0.38], [0.22, 0.86, 0.40])
+                }
+                (AvatarRenderMode::Proxy, false, true) => {
+                    (MeshKind::AvatarProxy, [0.34, 1.16, 0.34], [0.66, 0.50, 0.38])
+                }
+                (AvatarRenderMode::Proxy, false, false) => {
+                    (MeshKind::AvatarProxy, [0.36, 1.22, 0.36], [0.30, 0.74, 0.98])
+                }
+                (AvatarRenderMode::FallbackBox, true, _) => {
+                    (MeshKind::Cube, [0.32, 1.20, 0.32], [0.22, 0.86, 0.40])
+                }
+                (AvatarRenderMode::FallbackBox, false, true) => {
+                    (MeshKind::Cube, [0.30, 1.10, 0.30], [0.66, 0.50, 0.38])
+                }
+                (AvatarRenderMode::FallbackBox, false, false) => {
+                    (MeshKind::Cube, [0.30, 1.10, 0.30], [0.30, 0.74, 0.98])
+                }
+            };
             self.instances.push(RenderableInstance {
-                mesh: MeshKind::Cube,
+                mesh,
                 role: if avatar.is_self {
                     InstanceRole::WorldAvatarPlaceholderSelf
                 } else {
@@ -1692,19 +1725,9 @@ impl Scene {
                 },
                 transform: Transform {
                     position: avatar.world_position,
-                    scale: if avatar.is_self {
-                        [0.32, 1.20, 0.32]
-                    } else {
-                        [0.30, 1.10, 0.30]
-                    },
+                    scale,
                 },
-                color: if avatar.is_self {
-                    [0.22, 0.86, 0.40]
-                } else if avatar.stale {
-                    [0.66, 0.50, 0.38]
-                } else {
-                    [0.30, 0.74, 0.98]
-                },
+                color,
             });
         }
     }
@@ -4333,6 +4356,79 @@ mod tests {
         });
         assert_eq!(chat.messages.len(), 1);
         assert_eq!(chat.messages[0].text, "hello");
+    }
+
+    #[test]
+    fn scene_uses_avatar_proxy_mesh_in_proxy_mode() {
+        let mut scene = Scene::prototype();
+        let avatars = vec![
+            WorldAvatarPlaceholder {
+                agent_id: String::from("self-id"),
+                world_position: [1.0, 0.0, 2.0],
+                local_position: Some([1, 2, 3]),
+                sim_name: Some(String::from("TestSim")),
+                display_name: String::from("Self"),
+                is_self: true,
+                last_update_unix_ms: 10,
+                stale: false,
+            },
+            WorldAvatarPlaceholder {
+                agent_id: String::from("other-id"),
+                world_position: [2.0, 0.0, 3.0],
+                local_position: Some([2, 3, 4]),
+                sim_name: Some(String::from("TestSim")),
+                display_name: String::from("Other"),
+                is_self: false,
+                last_update_unix_ms: 10,
+                stale: true,
+            },
+        ];
+
+        scene.apply_world_avatar_placeholders(&avatars, AvatarRenderMode::Proxy);
+
+        let self_avatar = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderSelf)
+            .expect("self avatar should be present");
+        assert_eq!(self_avatar.mesh, MeshKind::AvatarProxy);
+        assert_eq!(self_avatar.color, [0.22, 0.86, 0.40]);
+        assert_eq!(self_avatar.transform.scale, [0.38, 1.30, 0.38]);
+
+        let other_avatar = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
+            .expect("other avatar should be present");
+        assert_eq!(other_avatar.mesh, MeshKind::AvatarProxy);
+        assert_eq!(other_avatar.color, [0.66, 0.50, 0.38]);
+        assert_eq!(other_avatar.transform.scale, [0.34, 1.16, 0.34]);
+    }
+
+    #[test]
+    fn scene_falls_back_to_box_mesh_in_fallback_mode() {
+        let mut scene = Scene::prototype();
+        let avatars = vec![WorldAvatarPlaceholder {
+            agent_id: String::from("other-id"),
+            world_position: [2.0, 0.0, 3.0],
+            local_position: Some([2, 3, 4]),
+            sim_name: Some(String::from("TestSim")),
+            display_name: String::from("Other"),
+            is_self: false,
+            last_update_unix_ms: 10,
+            stale: false,
+        }];
+
+        scene.apply_world_avatar_placeholders(&avatars, AvatarRenderMode::FallbackBox);
+
+        let avatar = scene
+            .instances
+            .iter()
+            .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
+            .expect("other avatar should be present");
+        assert_eq!(avatar.mesh, MeshKind::Cube);
+        assert_eq!(avatar.color, [0.30, 0.74, 0.98]);
+        assert_eq!(avatar.transform.scale, [0.30, 1.10, 0.30]);
     }
 
     #[test]

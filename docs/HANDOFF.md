@@ -2,6 +2,28 @@
 
 ## Last Completed Work
 
+- Implemented **Avatar Proxy Visuals V1** (bounded AVI milestone) across `viewer_core` -> `viewer_render` -> `viewer_app` -> `viewer_ui`:
+  - added dedicated avatar mesh kind in shared scene model (`MeshKind::AvatarProxy`)
+  - replaced avatar placeholder scene emission with mode-aware avatar visual emission:
+    - `Proxy` mode: shared proxy mesh with self/other/stale visual mapping
+    - `FallbackBox` mode: deterministic existing cube visuals
+  - added compact avatar render diagnostic contract:
+    - `AvatarRenderMode` (`Proxy` / `FallbackBox`)
+    - app now syncs render mode into `SocialState`
+    - UI runtime panel now shows `Avatar render: proxy|fallback-box`
+  - added shared proxy mesh resource in renderer (single reusable mesh, no per-avatar buffer duplication)
+  - added explicit runtime fallback switch for diagnostics/containment:
+    - `VIEWER_RENDER_FORCE_AVATAR_PROXY_FALLBACK=1`
+  - kept coarse+self feed, avatar lifecycle merge/supervision, labels, and crate boundaries unchanged
+- Added focused tests:
+  - `viewer_core`: proxy-mode mesh mapping and fallback box mapping for avatar scene roles
+  - `viewer_app`: render-mode sync keeps social diagnostic mode aligned with scene output
+  - `viewer_ui`: avatar render-mode label mapping
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+  - `cargo run -p viewer_app` launched in both normal and forced-fallback modes (CLI timeout expected because window is interactive)
+
 - Implemented unified UI redesign pass for Chat+IM and Profile with data-dense layout while preserving boundaries (`viewer_ui` presentation, `viewer_app` orchestration, `viewer_core` UI-facing state only):
   - Chat+IM now renders as a two-pane workspace:
     - left pane: conversation list with `All` / `Online` / `Recent` filters
@@ -79,8 +101,8 @@
 - In-process login now respects `VIEWER_LOGIN_AGREE_TOS`, `VIEWER_LOGIN_READ_CRITICAL`, and `VIEWER_LOGIN_MFA_TOKEN`, so TOS/MFA-gated logins can be driven from env without code changes.
 
 ## Immediate Next Task
-- Replace placeholder geometry with first asset-backed avatar proxies while preserving the same coarse/self tracking and label pipeline.
-- Keep the current runtime relay and projection path intact as the debugging baseline.
+- Add first world-avatar interaction hooks (open profile / IM) from existing avatar surfaces without adding new backend workflows.
+- Keep current avatar proxy/fallback diagnostics and coarse+self pipeline intact while expanding interaction usability.
 
 ## Files Likely Involved (next step)
 - `crates/viewer_app/src/main.rs`
