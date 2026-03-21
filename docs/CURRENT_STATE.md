@@ -397,7 +397,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
 - scope model established
 - workflow discipline defined in AGENTS
 - autonomous milestone-driven execution policy clarified in AGENTS
-- repo Antigravity config and low-cost subagent profiles added for bounded worker/explorer use
+- repo Codex config and low-cost subagent profiles added for bounded worker/explorer use
 - skills policy now explicitly checks `.agents/skills/viewer/` first (then `.agents/skills/` fallback)
 
 ---

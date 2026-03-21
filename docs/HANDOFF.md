@@ -765,14 +765,14 @@
   - strengthened `AGENTS.MD` autonomous execution guidance for milestone-driven progress
   - clarified low-cost subagent usage expectations and main-session responsibilities
   - wired skill-discovery policy to check `.agents/skills/viewer/` first with `.agents/skills/` fallback
-- Added repo Antigravity runtime config alignment in `.antigravity/config.toml`:
+- Added repo Codex runtime config alignment in `.codex/config.toml`:
   - stronger main session model retained
   - `workspace-write` sandbox with network enabled
   - `on-request` approval policy
   - conservative subagent fan-out
 - Added bounded low-cost subagent profiles:
-  - `.antigravity/agents/worker.toml`
-  - `.antigravity/agents/explorer.toml`
+  - `.codex/agents/worker.toml`
+  - `.codex/agents/explorer.toml`
 - Added minimal seed capability fetch support in `viewer_net` after logged-in session establishment
 - Seed capability response parsing currently extracts top-level capability name -> URL pairs for initial inspection
 - Added focused test coverage for login -> seed capability fetch path using LLSD capability map fixture

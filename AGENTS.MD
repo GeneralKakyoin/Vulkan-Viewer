@@ -69,7 +69,7 @@ Use a stronger model only when at least one of these is true:
   - scaffolding
   - simple bug fixes
   - narrow protocol comparison work
-- `gpt-5.3`:
+- `gpt-5.3-codex`:
   - architecture decisions
   - interface changes
   - protocol ambiguity resolution
