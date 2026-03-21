@@ -14,6 +14,15 @@
   - `avatar_removed`
   - `avatar_name_resolved`
 - profile/chat windows remain user-resizable with stable default size behavior
+- chat + IM UI now uses a denser two-pane workspace:
+  - left thread pane with All/Online/Recent filters and unread counters
+  - right active conversation pane with compact grouped message rows
+  - Enter sends and Shift+Enter inserts newline in nearby/IM composers
+  - state-only unread controls are available (`Mark read`, `Clear all unread`)
+- profile window received a data-dense redesign:
+  - grouped header summary with tab load status
+  - tab jump combo + refresh controls
+  - clearer loading/error surface per selected tab
 
 Known V1 limits:
 - avatar placeholders are simple box markers (not rigged avatars)
@@ -255,6 +264,11 @@ Within this phase, the bounded pre-world object/state slice is now substantially
 - `viewer_app` remains orchestration-only
 - `viewer_render` owns rendering
 - `viewer_ui` owns egui/debug UI
+- `viewer_core` now carries small UI-only direct-IM thread metadata:
+  - `last_activity_unix_ms`
+  - `unread_count`
+  - `last_read_unix_ms`
+  - helper APIs for mark-read/clear-unread and recent-thread ordering
 - `viewer_net` owns transport/session
 - `viewer_grid` owns grid-specific semantics
 

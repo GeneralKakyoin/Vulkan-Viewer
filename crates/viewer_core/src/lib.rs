@@ -250,6 +250,9 @@ pub struct DirectImThread {
     pub session_id: String,
     pub participant_id: String,
     pub messages: Vec<DirectImMessage>,
+    pub last_activity_unix_ms: u64,
+    pub unread_count: u32,
+    pub last_read_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +381,8 @@ impl SocialState {
 
     pub fn upsert_thread_message(&mut self, message: DirectImMessage, participant_id: &str) {
         let session_id = message.session_id.clone();
+        let message_at = message.observed_at_unix_ms;
+        let incoming = !message.outgoing;
         let thread = if let Some(existing) = self
             .im_threads
             .iter_mut()
@@ -389,6 +394,9 @@ impl SocialState {
                 session_id: session_id.clone(),
                 participant_id: participant_id.to_string(),
                 messages: Vec::new(),
+                last_activity_unix_ms: 0,
+                unread_count: 0,
+                last_read_unix_ms: None,
             });
             self.im_threads
                 .iter_mut()
@@ -397,11 +405,49 @@ impl SocialState {
         };
         if !thread.messages.iter().any(|m| m.id == message.id) {
             thread.messages.push(message);
+            thread.last_activity_unix_ms = thread.last_activity_unix_ms.max(message_at);
+            if incoming {
+                thread.unread_count = thread.unread_count.saturating_add(1);
+            }
             if thread.messages.len() > 300 {
                 let keep_from = thread.messages.len() - 300;
                 thread.messages.drain(0..keep_from);
             }
         }
+    }
+
+    pub fn mark_thread_read_by_participant(&mut self, participant_id: &str, at_unix_ms: u64) {
+        if let Some(thread) = self
+            .im_threads
+            .iter_mut()
+            .find(|t| t.participant_id == participant_id || t.session_id == participant_id)
+        {
+            thread.unread_count = 0;
+            thread.last_read_unix_ms = Some(at_unix_ms);
+        }
+    }
+
+    pub fn clear_all_unread(&mut self, at_unix_ms: u64) {
+        for thread in &mut self.im_threads {
+            thread.unread_count = 0;
+            thread.last_read_unix_ms = Some(at_unix_ms);
+        }
+    }
+
+    pub fn thread_for_participant(&self, participant_id: &str) -> Option<&DirectImThread> {
+        self.im_threads
+            .iter()
+            .find(|t| t.participant_id == participant_id || t.session_id == participant_id)
+    }
+
+    pub fn sorted_thread_participants_by_recent(&self) -> Vec<String> {
+        let mut pairs: Vec<(String, u64)> = self
+            .im_threads
+            .iter()
+            .map(|thread| (thread.participant_id.clone(), thread.last_activity_unix_ms))
+            .collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        pairs.into_iter().map(|(id, _)| id).collect()
     }
 
     pub fn next_im_message_id(&mut self) -> u64 {
@@ -4304,5 +4350,68 @@ mod tests {
         assert_eq!(chat.send_status, ChatSendStatus::Sent);
         chat.reset_send_status();
         assert_eq!(chat.send_status, ChatSendStatus::Idle);
+    }
+
+    #[test]
+    fn social_state_tracks_unread_and_mark_read() {
+        let mut social = SocialState::default();
+        social.upsert_thread_message(
+            DirectImMessage {
+                id: 1,
+                session_id: String::from("session-a"),
+                peer_id: String::from("friend-a"),
+                from_id: String::from("friend-a"),
+                from_name: String::from("Friend A"),
+                text: String::from("hello"),
+                observed_at_unix_ms: 10,
+                outgoing: false,
+            },
+            "friend-a",
+        );
+        let thread = social
+            .thread_for_participant("friend-a")
+            .expect("thread should exist");
+        assert_eq!(thread.unread_count, 1);
+        assert_eq!(thread.last_activity_unix_ms, 10);
+
+        social.mark_thread_read_by_participant("friend-a", 20);
+        let thread = social
+            .thread_for_participant("friend-a")
+            .expect("thread should exist");
+        assert_eq!(thread.unread_count, 0);
+        assert_eq!(thread.last_read_unix_ms, Some(20));
+    }
+
+    #[test]
+    fn social_state_sorts_thread_participants_by_recent_activity() {
+        let mut social = SocialState::default();
+        social.upsert_thread_message(
+            DirectImMessage {
+                id: 1,
+                session_id: String::from("session-a"),
+                peer_id: String::from("friend-a"),
+                from_id: String::from("friend-a"),
+                from_name: String::from("Friend A"),
+                text: String::from("older"),
+                observed_at_unix_ms: 10,
+                outgoing: false,
+            },
+            "friend-a",
+        );
+        social.upsert_thread_message(
+            DirectImMessage {
+                id: 2,
+                session_id: String::from("session-b"),
+                peer_id: String::from("friend-b"),
+                from_id: String::from("friend-b"),
+                from_name: String::from("Friend B"),
+                text: String::from("newer"),
+                observed_at_unix_ms: 50,
+                outgoing: false,
+            },
+            "friend-b",
+        );
+        let sorted = social.sorted_thread_participants_by_recent();
+        assert_eq!(sorted, vec![String::from("friend-b"), String::from("friend-a")]);
     }
 }

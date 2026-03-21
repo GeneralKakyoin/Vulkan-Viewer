@@ -2,6 +2,32 @@
 
 ## Last Completed Work
 
+- Implemented unified UI redesign pass for Chat+IM and Profile with data-dense layout while preserving boundaries (`viewer_ui` presentation, `viewer_app` orchestration, `viewer_core` UI-facing state only):
+  - Chat+IM now renders as a two-pane workspace:
+    - left pane: conversation list with `All` / `Online` / `Recent` filters
+    - right pane: active conversation with compact grouped message rows
+  - Nearby and Direct IM composers now support `Enter` send and `Shift+Enter` newline.
+  - Inline status chips now show connection/send state without banner-heavy noise.
+  - Added state-only unread controls:
+    - per-thread `Mark read`
+    - global `Clear all unread`
+  - Added quick profile navigation controls:
+    - tab jump combo
+    - refresh action retained and surfaced in header controls
+  - Reorganized Debug/Runtime Relay surfaces with collapsible sections for better scanability.
+- Added minimal UI-facing thread metadata in `viewer_core`:
+  - `DirectImThread.last_activity_unix_ms`
+  - `DirectImThread.unread_count`
+  - `DirectImThread.last_read_unix_ms`
+  - `SocialState` helpers for mark-read, clear-unread, and recent-thread ordering
+- Added focused tests:
+  - `viewer_core` unread + recent ordering behavior
+  - `viewer_ui` enter/send shortcut semantics and recent-thread filter ordering
+- Validation:
+  - `cargo check` passed
+  - `cargo test` passed
+  - `cargo run -p viewer_app` compiles and launches, but timed out in this CLI because the interactive app window stays open (non-self-terminating run)
+
 - Implemented bootstrap reliability milestone slice for startup/login diagnostics with strict scope boundaries:
   - added typed login fallback outcome model in `viewer_net`:
     - primary wire format
