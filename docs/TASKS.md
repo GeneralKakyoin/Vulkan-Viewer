@@ -1,36 +1,91 @@
 # TASKS.md
 
+A living task document for the Vulkan-Viewer rewrite. Contains planning guidance, execution guidance, and the active task list. See `docs/HANDOFF.md` for the immediate next step and `docs/ARCHITECTURE.md` for crate boundaries.
+
+---
+
+## HOW TO PLAN A TASK
+
+If asked to plan a task, follow these steps:
+
+1. **Read the mandatory docs first.** Always: `HANDOFF.md` → `CURRENT_STATE.md` → `ARCHITECTURE.md` → `INTERFACES.md` → `TASKS.md` → `LEARNINGS.md`. Do not skip this.
+2. **Identify the owning crate.** Name it before writing a plan. If you cannot name it, re-read `ARCHITECTURE.md`.
+3. **Research before asking.** Answerable-from-repo questions (which type owns this? what lane exists?) should be answered by exploration, not by asking the user. Only ask questions that represent genuine tradeoffs or product intent.
+4. **Check plan against roadmap.** Ensure the task aligns with the active milestones in `docs/RENDERING_ROADMAP_V2.md` or `MASTER_PLAN.md`.
+5. **Write a plan to a new file.** Use the format below. A good plan is decision-complete: the implementer needs no additional context beyond the plan doc and the docs it references.
+6. **Validate the plan against invariants and learnings.** Does it respect seam ownership? Does it stay within crate bounds? Does it avoid common failure patterns documented in `LEARNINGS.md`?
+7. **Present to user for sign-off** before beginning implementation.
+
+### Task plan format
+
+```
+## Task: {title}
+
+### Goal
+{one sentence}
+
+### Owning crate(s)
+{list; must not change: list}
+
+### Approach
+{steps, in order}
+
+### Validation
+{exact commands + what to check}
+
+### Assumptions
+{anything inferred that is not in docs}
+
+### Crate boundary check
+{confirm what does and does not change}
+```
+
+---
+
+## HOW TO EXECUTE A TASK
+
+If asked to execute a plan, follow these steps:
+
+1. **Read the plan doc fully.** Confirm crate ownership and invariants are still correct against current docs.
+2. **Implement narrowly.** Do not refactor, clean up, or expand scope beyond the plan. If you discover unexpected complexity, stop and document it instead of expanding.
+3. **Validate as you go.** Run `cargo check` after each meaningful change. Do not accumulate multiple untested changes.
+4. **Write focused tests.** Every new type, decode path, seam lane, or scene role requires a test. See `AGENTS.md` Rule 5 for test requirements.
+5. **Run full validation before declaring done**: `cargo check` + `cargo test` must both pass clean.
+6. **Update continuity docs.** At minimum: update `HANDOFF.md`. Update `CURRENT_STATE.md` if behavior changes. Update `TASKS.md` if task state changes. **Update `LEARNINGS.md` if new durable wisdom was discovered.**
+7. **Report completion** using the format in `AGENTS.md` Rule 10.
+
+---
+
 ## Current Focus
-Only work on the smallest steps that advance bounded world-facing live diagnostics while preserving crate boundaries and stopping before broad object/world decoding.
 
-Latest priority shift:
-- avatar placeholder slice is now in place (coarse + self + projected labels)
-- next smallest step is improving placeholder fidelity (asset-backed proxies) without widening transport scope
+The primary focus has shifted to the **Rendering Roadmap V2**. We are moving from basic diagnostic markers to a procedural geometry engine and modern PBR pipeline.
 
-Status note:
-- bounded pre-world object/state phase is now substantially complete
-- bounded broader-ingestion phase is now substantially complete:
-  - coarse-neighborhood sampling now carries bounded second+third coarse samples
-  - mapping is in place and test-protected across decode -> snapshot -> seam (`DecodedCoarseNeighborhoodPayload`) -> scene neighborhood-family roles
-- next phase should be a narrower bounded world/object refinement step that stays below broad object/world decoding
+Latest priority:
+- `docs/RENDERING_ROADMAP_V2.md` is now the source of truth for rendering evolution.
+- Next major hurdle is **Milestone 2: LLVolume Geometry Engine**.
+- Preserve crate boundaries: `viewer_core` owns geometry generation; `viewer_render` owns GPU submission.
+- [x] Research Rendering Requirements
+- [x] Plan Roadmap Update
+- [x] Update Roadmap (V2)
+- [x] Plan Milestone M3 (Expanded Scope)
+  - [x] Verify current state vs M1/M2
+  - [x] Research Material/Texture requirements
+  - [x] Gather user preferences (UV, PBR, Anim)
+  - [x] Create `PLAN_M3.md` (Decision-complete draft)
+  - [x] In-depth Firestorm Research (M3)
+  - [x] Update for Expanded Scope (Asset-backed world rendering)
 
 ---
 
 ## Active Tasks
 
-### T0 - Avatar Placeholder V1 stabilization
+### T0 - Rendering Roadmap V2 Implementation
 Why it matters:
-The first in-world avatar visibility path now exists and should be stabilized before broader world decoding.
-
-Dependencies:
-- current coarse decode summary in `viewer_net`
-- current app merge/supervision and label projection behavior
+The roadmap provides the rigorous planning needed to build a high-fidelity renderer without architectural erosion.
 
 Done when:
-- placeholder lifecycle (seen/updated/stale/removed) remains stable through reconnect cycles
-- self placeholder remains present even when coarse ID blocks are missing
-- label projection remains readable while camera moves
-- no regressions in chat/IM/profile windows
+- Milestone 1 (Spatial Foundation) is fully refined and validated.
+- Milestone 2 (LLVolume) creates visually accurate SL primitives.
 
 ---
 
@@ -102,7 +157,7 @@ Dependencies:
 Done when:
 - first-region handshake ordering is documented from Firestorm behavior reference
 - dependencies between seed grant, circuit setup, and movement completion are explicit
-- crate-boundary ownership is mapped without starting simulator transport implementation
+- handshake-stage requirements are documented
 - typed handshake-stage scaffold exists in `viewer_net` with focused transition tests
 
 ---
@@ -153,7 +208,7 @@ Status update:
 Done when:
 - the next inbound packets after initial `AgentMovementComplete` are captured with bounded diagnostics
 - typed classification is expanded only for the small set repeatedly observed in this stage
-- progression remains handshake/bootstrap-focused (no world-state subsystem implementation)
+- progression remains handshake/bootstrap-focused
 
 Status update:
 - materially advanced: bounded post-movement tail capture now exists (`probe_first_simulator_handshake_window_with_tail`)
@@ -186,7 +241,7 @@ Status update:
   - optional post-AMC timeout override in bounded probe policy path
   - optional early-stop when first region-transition control packet is observed
   - this enables longer/sparser control-signal capture without introducing polling loops
-- next phase: type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed, without broad world/object decoding
+- next phase: type only targeted medium handoff IDs (`CrossedRegion` / `ConfirmEnableSimulator`) if repeatedly observed
 
 ### T8 - First connected world slice
 Done when:
@@ -200,7 +255,7 @@ Status update:
   - sandbox visual indicator now reflects live handshake status (no world/object decoding)
 - remaining to complete T8:
   - replace file-based bridge with narrow in-process live-state feed
-  - keep scope diagnostic-first and stop before broad object/world-state rendering
+  - keep scope diagnostic-first
 
 Status update (latest):
 - in-process live-state feed is now the primary app path when login env vars are present
@@ -313,16 +368,6 @@ Status update (latest):
 - T8 status:
   - substantially complete for the current bounded pre-world object/state phase
   - next phase should begin the first richer bounded world/object ingestion slice through the existing seam,
-    while preserving the hard stop before broad object/world decoding
+    while preserving architectural boundaries
 
 ---
-
-## Explicitly Deferred
-
-Do not work on these yet unless the plan changes:
-- simulator/world integration implementation beyond bootstrap staging
-- viewer login UI integration
-- asset-backed world rendering
-- inventory/chat/map shells
-- media/voice
-- broad OpenSim divergence support

@@ -9,3 +9,4 @@ authors.workspace = true
 serde.workspace = true
 bevy_ecs.workspace = true
 thiserror.workspace = true
+bytemuck.workspace = true

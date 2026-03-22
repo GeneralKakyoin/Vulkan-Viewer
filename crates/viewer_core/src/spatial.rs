@@ -106,23 +106,45 @@ impl OctreeNode {
         self.children = Some(Box::new(children));
     }
 
-    pub fn remove(&mut self, instance_id: usize) -> bool {
+    pub fn remove(&mut self, instance_id: usize, aabb: Aabb) -> bool {
+        // Optimization: skip if node bounds don't contain item center (or could use full AABB check)
+        // For Milestone 1, we keep it simple but check children only if they could contain the AABB.
+        
         // First check locally
         if let Some(idx) = self.items.iter().position(|&(id, _)| id == instance_id) {
             self.items.swap_remove(idx);
             return true;
         }
 
-        // If not found locally, check children
+        // If not found locally, check child that would contain it
         if let Some(ref mut children) = self.children {
-            for child in children.iter_mut() {
-                if child.remove(instance_id) {
+            let octant = Self::get_octant(&self.center, &aabb.center);
+            let child = &mut children[octant];
+            if child.remove(instance_id, aabb) {
+                return true;
+            }
+            
+            // Fallback: search all children if it might have straddled
+            for (i, c) in children.iter_mut().enumerate() {
+                if i == octant { continue; }
+                if c.remove(instance_id, aabb) {
                     return true;
                 }
             }
         }
 
         false
+    }
+    
+    pub fn collect_all(&self, items: &mut Vec<usize>) {
+        for (id, _) in &self.items {
+            items.push(*id);
+        }
+        if let Some(ref children) = self.children {
+            for child in children.iter() {
+                child.collect_all(items);
+            }
+        }
     }
 
     pub fn query_frustum(&self, frustum: &Frustum, visible_items: &mut Vec<usize>) {
@@ -155,17 +177,6 @@ impl OctreeNode {
             }
         }
     }
-
-    fn collect_all(&self, items: &mut Vec<usize>) {
-        for (id, _) in &self.items {
-            items.push(*id);
-        }
-        if let Some(ref children) = self.children {
-            for child in children.iter() {
-                child.collect_all(items);
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -184,8 +195,15 @@ impl Octree {
         self.root.insert(instance_id, aabb);
     }
 
-    pub fn remove(&mut self, instance_id: usize) -> bool {
-        self.root.remove(instance_id)
+    pub fn remove(&mut self, instance_id: usize, aabb: Aabb) -> bool {
+        self.root.remove(instance_id, aabb)
+    }
+    
+    pub fn update(&mut self, instance_id: usize, old_aabb: Aabb, new_aabb: Aabb) {
+        // For Milestone 1, we just remove and re-insert.
+        // A future optimization could check if they are in the same node.
+        self.remove(instance_id, old_aabb);
+        self.insert(instance_id, new_aabb);
     }
 
     pub fn query_frustum(&self, frustum: &Frustum) -> Vec<usize> {

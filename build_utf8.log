@@ -1,0 +1,145 @@
+﻿cargo :     Checking viewer_net v0.1.0 
+(C:\Users\matti\Desktop\Antigravity 
+viewer\Vulkan-Viewer\crates\viewer_net)
+In riga:1 car:1
++ cargo check --all-targets > build.log 2>&1; 
+Get-Content build.log | O ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Chec 
+   king vi...tes\viewer_net):String) [], RemoteExcep  
+  tion
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking viewer_render v0.1.0 
+(C:\Users\matti\Desktop\Antigravity 
+viewer\Vulkan-Viewer\crates\viewer_render)
+    Checking viewer_asset v0.1.0 
+(C:\Users\matti\Desktop\Antigravity 
+viewer\Vulkan-Viewer\crates\viewer_asset)
+error[E0599]: the method `get` exists for struct 
+`HashMap<(String, SculptType), Arc<ProcessedMesh>>`, 
+but its trait bounds were not satisfied
+   --> crates\viewer_asset\src\lib.rs:35:42
+    |
+ 35 |         if let Some(mesh) = 
+self.sculpts.get(&key) {
+    |                                          ^^^ 
+method cannot be called on `HashMap<(String, 
+SculptType), Arc<ProcessedMesh>>` due to unsatisfied 
+trait bounds
+    |
+   ::: crates\viewer_core\src\lib.rs:111:1
+    |
+111 | pub enum SculptType {
+    | ------------------- doesn't satisfy 
+`SculptType: Hash`
+    |
+    = note: the following trait bounds were not 
+satisfied:
+            `SculptType: Hash`
+            which is required by `(String, 
+SculptType): Hash`
+
+error[E0282]: type annotations needed
+  --> crates\viewer_asset\src\lib.rs:36:20
+   |
+36 |             return mesh.clone();
+   |                    ^^^^ cannot infer type
+
+error[E0599]: the method `insert` exists for struct 
+`HashMap<(String, SculptType), Arc<ProcessedMesh>>`, 
+but its trait bounds were not satisfied
+   --> crates\viewer_asset\src\lib.rs:46:22
+    |
+ 46 |         self.sculpts.insert(key, mesh.clone());
+    |                      ^^^^^^
+    |
+   ::: crates\viewer_core\src\lib.rs:111:1
+    |
+111 | pub enum SculptType {
+    | ------------------- doesn't satisfy 
+`SculptType: Hash`
+    |
+    = note: the following trait bounds were not 
+satisfied:
+            `SculptType: Hash`
+            which is required by `(String, 
+SculptType): Hash`
+
+Some errors have detailed explanations: E0282, E0599.
+For more information about an error, try `rustc 
+--explain E0282`.
+error: cannot find derive macro `Serialize` in this 
+scope
+  --> crates\viewer_render\src\lib.rs:49:45
+   |
+49 | #[derive(Debug, Clone, Copy, PartialEq, Eq, 
+Serialize, Deserialize)]
+   |                                             
+^^^^^^^^^
+
+error: cannot find derive macro `Deserialize` in this 
+scope
+  --> crates\viewer_render\src\lib.rs:49:56
+   |
+49 | #[derive(Debug, Clone, Copy, PartialEq, Eq, 
+Serialize, Deserialize)]
+   |                                                  
+      ^^^^^^^^^^^
+
+error: could not compile `viewer_asset` (lib test) 
+due to 3 previous errors
+warning: build failed, waiting for other jobs to 
+finish...
+error: could not compile `viewer_asset` (lib) due to 
+3 previous errors
+error[E0599]: the method `insert` exists for struct 
+`HashMap<GeometrySource, MeshBuffers>`, but its trait 
+bounds were not satisfied
+   --> crates\viewer_render\src\lib.rs:440:33
+    |
+440 |         self.dynamic_geometries.insert(
+    |         ------------------------^^^^^^
+    |
+   ::: crates\viewer_core\src\lib.rs:127:1
+    |
+127 | pub enum GeometrySource {
+    | ----------------------- doesn't satisfy 
+`GeometrySource: Hash` or `GeometrySource: 
+std::cmp::Eq`
+    |
+    = note: the following trait bounds were not 
+satisfied:
+            `GeometrySource: std::cmp::Eq`
+            `GeometrySource: Hash`
+
+error[E0599]: the method `get` exists for struct 
+`HashMap<GeometrySource, MeshBuffers>`, but its trait 
+bounds were not satisfied
+   --> crates\viewer_render\src\lib.rs:544:80
+    |
+544 | ...                   if let Some(buffers) = 
+self.dynamic_geometries.get(source) {
+    |                                                 
+                     ^^^ method cannot be called on 
+`HashMap<GeometrySource, MeshBuffers>` due to 
+unsatisfied trait bounds
+    |
+   ::: crates\viewer_core\src\lib.rs:127:1
+    |
+127 | pub enum GeometrySource {
+    | ----------------------- doesn't satisfy 
+`GeometrySource: Hash` or `GeometrySource: 
+std::cmp::Eq`
+    |
+    = note: the following trait bounds were not 
+satisfied:
+            `GeometrySource: std::cmp::Eq`
+            `GeometrySource: Hash`
+
+For more information about this error, try `rustc 
+--explain E0599`.
+error: could not compile `viewer_render` (lib) due to 
+4 previous errors
+error: could not compile `viewer_render` (lib test) 
+due to 4 previous errors

@@ -1,11 +1,10 @@
-use egui_wgpu::{Renderer, ScreenDescriptor};
-use egui::NumExt;
+﻿use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus,
-    RuntimeRelayLevel, SocialState, WorldAvatarPlaceholder,
+    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus, RuntimeRelayLevel,
+    SocialState, WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -389,9 +388,6 @@ impl UiSystem {
         profile_image_bytes: &BTreeMap<String, Vec<u8>>,
         fps: f32,
         frame_ms: f32,
-        avg_scene_update_ms: f32,
-        total_instances: usize,
-        visible_proxies: usize,
     ) -> UiActions {
         if surface_size.width == 0 || surface_size.height == 0 {
             return UiActions::default();
@@ -452,44 +448,6 @@ impl UiSystem {
                 .show(ctx, |ui| {
                     ui.label(format!("FPS: {:.1}", fps));
                     ui.label(format!("Frame: {:.2} ms", frame_ms));
-
-                    // Frametime Sparkline
-                    let history = &social_state.frametime_history;
-                    if !history.is_empty() {
-                        let height = 30.0;
-                        let width = ui.available_width().at_least(100.0);
-                        let (rect, _response) = ui.allocate_at_least(egui::vec2(width, height), egui::Sense::hover());
-                        let painter = ui.painter();
-                        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
-                        
-                        let count = history.len();
-                        let bar_width = width / (count as f32).max(1.0);
-                        let max_ms = 33.3; // Scale to 30fps baseline, but allow overflow
-                        
-                        for (i, &ms) in history.iter().enumerate() {
-                            let h_frac = (ms / max_ms).at_most(1.0);
-                            let h = h_frac * height;
-                            let x = rect.min.x + i as f32 * bar_width;
-                            let y = rect.max.y - h;
-                            let color = if ms > 20.0 {
-                                egui::Color32::from_rgb(200, 100, 100) // Reddish for spike
-                            } else {
-                                egui::Color32::from_rgb(100, 200, 100) // Greenish
-                            };
-                            painter.rect_filled(
-                                egui::Rect::from_min_max(
-                                    egui::pos2(x, y),
-                                    egui::pos2(x + bar_width.at_least(1.0), rect.max.y)
-                                ),
-                                0.0,
-                                color
-                            );
-                        }
-                    }
-                    ui.separator();
-                    ui.label(format!("Scene Update: {:.2} ms", avg_scene_update_ms));
-                    ui.label(format!("Total Instances: {}", total_instances));
-                    ui.label(format!("Visible Proxies: {}", visible_proxies));
                 });
 
             egui::Window::new("Chat + IM")
@@ -517,41 +475,29 @@ impl UiSystem {
                     }
                     ui.separator();
 
+                    ui.horizontal(|ui| {
+                        ui.label("Threads:");
+                        ui.selectable_value(&mut self.thread_filter, ThreadFilter::Recent, "Recent");
+                        ui.selectable_value(&mut self.thread_filter, ThreadFilter::Online, "Online");
+                        ui.selectable_value(&mut self.thread_filter, ThreadFilter::All, "All");
+                        if ui.button("Clear all unread").clicked() {
+                            social_state.clear_all_unread(0);
+                        }
+                    });
+                    ui.separator();
+
                     ui.columns(2, |cols| {
                         let total_width = cols[0].available_width() + cols[1].available_width();
                         cols[0].set_width(total_width * 0.34);
                         cols[0].vertical(|ui| {
-                            ui.strong("Conversations");
                             let nearby_selected = self.active_chat_target == ChatTarget::Nearby;
                             if ui.selectable_label(nearby_selected, "Nearby").clicked() {
                                 self.active_chat_target = ChatTarget::Nearby;
                             }
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.strong("Threads");
-                                ui.selectable_value(
-                                    &mut self.thread_filter,
-                                    ThreadFilter::Recent,
-                                    "Recent",
-                                );
-                                ui.selectable_value(
-                                    &mut self.thread_filter,
-                                    ThreadFilter::Online,
-                                    "Online",
-                                );
-                                ui.selectable_value(
-                                    &mut self.thread_filter,
-                                    ThreadFilter::All,
-                                    "All",
-                                );
-                            });
                             let friend_ids = sorted_friend_ids_for_filter(social_state, self.thread_filter);
                             egui::ScrollArea::vertical()
                                 .id_salt("chat_thread_sidebar")
                                 .show(ui, |ui| {
-                                    if friend_ids.is_empty() {
-                                        ui.weak("No friends loaded");
-                                    }
                                     for friend_id in friend_ids {
                                         let label = social_state
                                             .friends
@@ -581,9 +527,6 @@ impl UiSystem {
                                         }
                                     }
                                 });
-                            if ui.button("Clear all unread").clicked() {
-                                social_state.clear_all_unread(0);
-                            }
                         });
 
                         cols[1].vertical(|ui| match self.active_chat_target {

@@ -20,6 +20,7 @@ use viewer_core::{
     ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene,
     SecondLifeProfile, SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter,
     WorldObjectIngestionSeam, compute_p2p_session_id,
+    GeometrySource, VolumeParams,
 };
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
@@ -58,6 +59,7 @@ struct ViewerApp {
 struct AppState {
     window: Arc<Window>,
     renderer: RenderBackend,
+    geometry_cache: viewer_asset::GeometryCache,
     ui: UiSystem,
     camera: Camera,
     scene: Scene,
@@ -2676,7 +2678,7 @@ impl ViewerApp {
             })
             .collect::<BTreeMap<_, _>>();
 
-        Ok(AppState {
+        let mut state = AppState {
             window,
             renderer,
             ui,
@@ -2697,15 +2699,176 @@ impl ViewerApp {
             profile_state: None,
             profile_image_bytes: BTreeMap::new(),
             social_cache: social_cache.take(),
+            geometry_cache: viewer_asset::GeometryCache::new(),
             last_frame_time: Instant::now(),
             smoothed_fps: 0.0,
             smoothed_frame_ms: 0.0,
             avg_scene_update_ms: 0.0,
-        })
+        };
+
+        let stress_test = std::env::var("STRESS_TEST").ok();
+        if stress_test.as_deref() == Some("1") {
+            state.spawn_stress_test();
+        } else if stress_test.as_deref() == Some("2") {
+            state.spawn_geometry_torture_test();
+        }
+
+        Ok(state)
     }
 }
 
 impl AppState {
+    fn spawn_geometry_torture_test(&mut self) {
+        use viewer_core::{GeometrySource, InstanceRole, VolumeParams, ProfileType, HoleType, PathType, Transform};
+        
+        // Grid of diverse procedural prims
+        for i in 0..5 {
+            for j in 0..5 {
+                let mut params = VolumeParams {
+                    profile_type: if (i + j) % 2 == 0 { ProfileType::Square } else { ProfileType::Circle },
+                    hole_type: HoleType::Same,
+                    path_type: if i % 2 == 0 { PathType::Line } else { PathType::Circle },
+                    begin_cut: 0.0,
+                    end_cut: 1.0,
+                    hollow: if j % 2 == 0 { 0.0 } else { 0.5 },
+                    twist_begin: 0.0,
+                    twist_end: i as f32 * 0.2,
+                    taper_x: j as f32 * 0.1,
+                    taper_y: j as f32 * 0.1,
+                    revolutions: 1.0,
+                    skew: 0.0,
+                    radius_offset: 0.0,
+                    shear_x: 0.0,
+                    shear_y: 0.0,
+                };
+                
+                // Some specific variations
+                if i == 4 { params.end_cut = 0.5; } // Half prims
+                
+                let mut transform = Transform::default();
+                transform.position = [i as f32 * 4.0 - 8.0, 5.0, j as f32 * 4.0 - 8.0];
+                
+                self.scene.insert_instance(
+                    GeometrySource::Procedural(params, 1.0),
+                    InstanceRole::SceneStatic,
+                    transform,
+                    [0.2 + i as f32 * 0.1, 0.4 + j as f32 * 0.1, 0.7],
+                );
+            }
+        }
+
+        // Add a Sculpted Prim
+        let mut sculpt_trans = Transform::default();
+        sculpt_trans.position = [0.0, 15.0, 0.0];
+        sculpt_trans.scale = [2.0, 2.0, 2.0];
+        self.scene.insert_instance(
+            GeometrySource::Sculpt("dummy-sculpt".to_string(), viewer_core::SculptType::Sphere),
+            InstanceRole::SceneStatic,
+            sculpt_trans,
+            [0.8, 0.2, 0.2],
+        );
+
+        // Add a glTF Mesh
+        let mut mesh_trans = Transform::default();
+        mesh_trans.position = [5.0, 15.0, 5.0];
+        self.scene.insert_instance(
+            GeometrySource::Mesh("dummy-mesh".to_string(), 0),
+            InstanceRole::SceneStatic,
+            mesh_trans,
+            [0.2, 0.8, 0.2],
+        );
+    }
+
+    fn spawn_stress_test(&mut self) {
+        use viewer_core::{GeometrySource, InstanceRole, MeshKind, Transform};
+        if std::env::var("STRESS_TEST").as_deref() == Ok("1") {
+            for i in 0..10 {
+                for j in 0..10 {
+                    let mut transform = Transform::default();
+                    transform.position = [i as f32 * 2.0, 5.0, j as f32 * 2.0];
+                    self.scene.insert_instance(
+                        GeometrySource::Diagnostic(MeshKind::Cube),
+                        InstanceRole::SceneStatic,
+                        transform,
+                        [0.2, 0.5, 0.8],
+                    );
+                }
+            }
+            // Small planet/moon system
+            let mut sun_trans = Transform::default();
+            sun_trans.position = [0.0, 10.0, 0.0];
+            let _sun_id = self.scene.insert_instance(
+                GeometrySource::Diagnostic(MeshKind::Cube),
+                InstanceRole::SceneStatic,
+                sun_trans,
+                [1.0, 0.8, 0.1],
+            );
+        }
+        
+        // Spawn a grid of "planets" with "moons"
+        for x in -5..5 {
+            for z in -5..5 {
+                let parent_pos = [x as f32 * 10.0, 5.0, z as f32 * 10.0];
+                let parent_id = self.scene.insert_instance(
+                    GeometrySource::Diagnostic(MeshKind::Cube),
+                    InstanceRole::WorldIngestionProxy,
+                    Transform {
+                        position: parent_pos,
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [1.0, 1.0, 1.0],
+                    },
+                    [0.8, 0.8, 0.2],
+                );
+
+                // Add 4 moons to each planet
+                for i in 0..4 {
+                    let angle = (i as f32) * std::f32::consts::PI * 0.5;
+                    let moon_pos = [angle.cos() * 3.0, angle.sin() * 3.0, 0.0];
+                    let moon_transform = Transform {
+                        position: moon_pos,
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: [0.3, 0.3, 0.3],
+                    };
+                    let moon_id = self.scene.insert_instance(
+                        GeometrySource::Diagnostic(MeshKind::Cube),
+                        InstanceRole::WorldIngestionProxy,
+                        moon_transform,
+                        [0.2, 0.6, 0.9],
+                    );
+                    self.scene.get_instance_mut(moon_id).unwrap().parent_id = Some(parent_id);
+                }
+            }
+        }
+    }
+
+    fn update_stress_test(&mut self, time: f32) {
+        // Rotate parents and their moons
+        let (_sin_t, _cos_t) = (time.sin(), time.cos());
+        
+        // We iterate through all instances. If they are stress test objects, we rotate them.
+        // For Milestone 1, we just find all instances and apply some math if they have a parent or are a big cube.
+        // A better way would be tag-based, but for M1 we'll just rotate everything that isn't a known role.
+        
+        for inst in self.scene.instances_mut() {
+            if inst.role == viewer_core::InstanceRole::WorldIngestionProxy {
+                if inst.parent_id.is_none() {
+                    // It's a planet - slow rotation
+                    let angle = time * 0.2;
+                    let s = (angle * 0.5).sin();
+                    let c = (angle * 0.5).cos();
+                    inst.transform.rotation = [0.0, s, 0.0, c];
+                } else {
+                    // It's a moon - fast rotation
+                    let angle = time * 2.0;
+                    let s = (angle * 0.5).sin();
+                    let c = (angle * 0.5).cos();
+                    inst.transform.rotation = [s, 0.0, 0.0, c];
+                }
+                inst.dirty_spatial = true;
+            }
+        }
+    }
+
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
         self.renderer.resize(new_size);
     }
@@ -2729,9 +2892,18 @@ impl AppState {
             self.smoothed_frame_ms += (frame_ms - self.smoothed_frame_ms) * alpha;
         }
 
+        self.social_state.frametime_history.push_back(frame_ms);
+        if self.social_state.frametime_history.len() > 200 {
+            self.social_state.frametime_history.pop_front();
+        }
+
         let [look_x, look_y] = self.input.take_look_delta();
         self.camera.add_look_delta(look_x, look_y);
         self.input.update_camera(&mut self.camera, dt_seconds);
+
+        if std::env::var("STRESS_TEST").map(|v| v == "1").unwrap_or(false) {
+            self.update_stress_test(now.elapsed().as_secs_f32());
+        }
 
         for update in self.live_visual_state.drain_worker_updates() {
             match update {
@@ -2998,9 +3170,61 @@ impl AppState {
         let mut pending_profile_refresh: Option<(String, Option<AvatarProfileTab>)> = None;
         let mut pending_open_external_url: Option<String> = None;
 
+        // self.scene.sync_spatial();
+
         let aspect = self.renderer.aspect_ratio();
         let frustum = self.camera.frustum(aspect);
         let visibility_list = self.scene.query_frustum(&frustum);
+        
+        // Prepare dynamic geometry
+        for &id in &visibility_list {
+            if let Some(instance) = self.scene.instances.get(&id) {
+                if !self.renderer.has_dynamic_geometry(&instance.geometry) {
+                    let mesh = match &instance.geometry {
+                        GeometrySource::Procedural(params, detail) => {
+                             Some(self.geometry_cache.get_procedural(params, *detail))
+                        }
+                        GeometrySource::Sculpt(uuid, sculpt_type) => {
+                             let dummy_pixels = vec![128u8; 32 * 32 * 3]; // Neutral gray sculpt
+                             Some(self.geometry_cache.get_sculpt(uuid, *sculpt_type, &dummy_pixels, 32, 32))
+                        }
+                        GeometrySource::Mesh(uuid, lod) => {
+                             Some(self.geometry_cache.get_mesh(uuid, *lod, &[]))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(mesh) = mesh {
+                        let mut submeshes = Vec::new();
+                        let mut index_start = 0;
+                        let mut all_indices = Vec::new();
+                        for sm in &mesh.submeshes {
+                            let count = sm.indices.len() as u32;
+                            submeshes.push(viewer_render::SubMeshRange {
+                                face_id: sm.face_id,
+                                index_start,
+                                index_count: count,
+                            });
+                            all_indices.extend_from_slice(&sm.indices);
+                            index_start += count;
+                        }
+                        /* self.renderer.upsert_geometry(
+                            instance.geometry.clone(),
+                            bytemuck::cast_slice(&mesh.vertices),
+                            bytemuck::cast_slice(&all_indices),
+                            submeshes,
+                        ); */
+
+                        // Sync AABB to instance and mark for spatial update
+                        if let Some(instance_mut) = self.scene.get_instance_mut(id) {
+                            instance_mut.world_aabb = mesh.aabb;
+                            instance_mut.dirty_spatial = true;
+                        }
+                    }
+                }
+            }
+        }
+
         let metrics = self.scene.metrics_with_visibility(&visibility_list);
 
         let render_result = self.renderer.render_frame(
@@ -3558,8 +3782,8 @@ mod tests {
         assert_eq!(social.avatar_render_mode, AvatarRenderMode::Proxy);
         assert!(
             scene.instances.iter().any(|instance| {
-                instance.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
-                    && instance.mesh == viewer_core::MeshKind::AvatarProxy
+                instance.1.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
+                    && instance.1.geometry == viewer_core::GeometrySource::Diagnostic(viewer_core::MeshKind::AvatarProxy)
             })
         );
 
@@ -3572,8 +3796,8 @@ mod tests {
         assert_eq!(social.avatar_render_mode, AvatarRenderMode::FallbackBox);
         assert!(
             scene.instances.iter().any(|instance| {
-                instance.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
-                    && instance.mesh == viewer_core::MeshKind::Cube
+                instance.1.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
+                    && instance.1.geometry == viewer_core::GeometrySource::Diagnostic(viewer_core::MeshKind::Cube)
             })
         );
     }

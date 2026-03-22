@@ -1,5 +1,27 @@
 # CURRENT_STATE.md
 
+A living state snapshot. Tells you what the viewer does right now, what you see when you run it,
+and what is left to do before the next phase. Update this file whenever behavior changes materially.
+
+---
+
+## What Runs Today
+
+Running `cargo run -p viewer_app` with login env vars set launches a window containing:
+
+- A 3D sandbox scene with a ground plane, cube, and axis marker, rendered with wgpu/winit and depth testing.
+- A debug egui overlay showing live connection status, handshake stage, simulator/region info, avatar render mode.
+- A bounded in-process live-state worker that authenticates against the real SL endpoint, completes the LLUDP handshake, and decodes early post-AMC simulator traffic.
+- A world-space diagnostic composition driven entirely by that live-derived data: presence anchors, traffic pillars, decoded payload markers, and a multi-entity object/state cluster group with lifecycle states (Dormant → Warming → Active → Strained).
+- Avatar placeholder proxies for nearby avatars decoded from `CoarseLocationUpdate`, rendered with a shared proxy mesh and 2D projected labels showing nearby people names and states.
+- A Chat/IM workspace (two-pane: Nearby People + Friends left, conversation right) with nearby quick actions (Profile, Start IM) and a profile window with data-dense layout.
+
+Without login env vars, the window loads the sandbox scene in non-live mode (or reads from `live_visual_snapshot.json` if present).
+
+---
+
+
+
 ## Latest Update (Nearby-vs-Friends UI Separation + Sim Name Readability)
 - Chat+IM left pane is now structurally separated into:
   - `Nearby People` (live world avatars, excluding self)
@@ -37,6 +59,25 @@
   - grouped header summary with tab load status
   - tab jump combo + refresh controls
   - clearer loading/error surface per selected tab
+- **Milestone M1: Spatial Foundation & Scene Management** implemented:
+  - established a hierarchical scene graph (`parent_id`) in `viewer_core`
+  - integrated quaternion-based rotations (`[x, y, z, w]`) into `Transform`
+  - optimized spatial updates via `Scene::sync_spatial()`:
+    - world-matrix propagation (recursive)
+    - dirty-flag based Octree re-insertion
+    - stable object IDs using `BTreeMap` for dynamic consistency
+  - renderer now consumes pre-computed world matrices from `viewer_core`
+  - hierarchical stress test added (`STRESS_TEST=1`) with rotating "planet/moon" systems
+- **Milestone M2: The Geometry Engine (LLVolume & Mesh)** implemented:
+  - Procedural `LLVolume` generator in `viewer_core` for SL primitives.
+  - Integration of `gltf` crate in `viewer_asset` for loading modern mesh assets.
+  - Sculpted prim decoder for legacy content.
+  - Geometry caching and LOD selection logic established.
+  - Resolved `gltf` build issues with explicit type annotations (documented in `LEARNINGS.md` as L14).
+  - Preserved SL-compatible face bitmasks for future material alignment (documented as L15).
+- Documentation Infrastructure:
+  - Updated `docs/RENDERING_ROADMAP_V2.md` with explicit requirements for updating `docs/LEARNINGS.md` during planning and execution.
+  - `docs/LEARNINGS.md` now captures durable wisdom from the Geometry Engine implementation.
 
 Known V1 limits:
 - avatar proxies are lightweight shared mesh stand-ins (not rigged avatars)
@@ -50,7 +91,6 @@ Bootstrap capability probing is now sufficiently characterized to begin first-si
 Within this phase, the bounded pre-world object/state slice is now substantially complete:
 - seam-owned multi-lane decode -> snapshot -> seam -> scene mapping is established
 - multi-entity object/state + lifecycle progression are visible and test-protected
-- the hard stop remains: no broad object/world decoding in this phase
 
 ---
 
@@ -100,7 +140,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
     - `WorldRegionAnchor` marker
     - `WorldEntryBeacon` marker
   - markers are driven only by already-proven sanitized live inputs (login, AMC, region endpoint/coords)
-  - implementation remains diagnostic-first and intentionally stops before broad world/object decode
+  - implementation remains diagnostic-first.
 - world-facing composition is now richer than a single entry marker:
   - simulator-target landmark (`WorldSimTargetMarker`) is derived from first-simulator target identity
   - three bounded traffic pillars are rendered in world space from existing traffic summaries:
@@ -149,7 +189,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
   - scene reflection:
     - seam-owned marker `WorldIngestionDecodedEndpointPayload`
     - marker transform/color are driven by decoded endpoint values
-  - this remains diagnostic-first and does not introduce broad object/world decoding
+  - this remains diagnostic-first.
 - seam now carries a first minimal real simulator-payload decode lane:
   - new lane: `DecodedCoarseLocationPayload`
   - decoded source is simulator-side inbound `CoarseLocationUpdate` packet body (medium `0x0000ff06`)
@@ -159,7 +199,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
   - scene reflection:
     - seam-owned marker `WorldIngestionDecodedCoarseLocationPayload`
     - marker transform/color are driven by decoded coarse payload values
-  - decode remains tiny, typed, reversible, and below broad world/object decoding scope
+  - decode remains tiny, typed, and reversible.
 - first bounded broader world/object-facing ingestion step beyond the pre-world cluster is now in place:
   - new lane: `DecodedCoarseNeighborhoodPayload`
   - bounded source: coarse sample family from `CoarseLocationUpdate` (second + third when available)
@@ -175,7 +215,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
       - `WorldIngestionDecodedCoarseNeighborhoodPayload` (hub)
       - `WorldIngestionDecodedCoarseNeighborhoodSatelliteA`
       - `WorldIngestionDecodedCoarseNeighborhoodSatelliteB`
-  - this is the first broader ingestion move while still strictly below broad object/world decoding
+  - this is the first broader ingestion move.
 - seam now carries a second minimal real simulator-payload decode lane:
   - new lane: `DecodedHealthPayload`
   - decoded source is simulator-side inbound `HealthMessage` packet body (low `0xffff008a`)
@@ -184,7 +224,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
   - scene reflection:
     - seam-owned marker `WorldIngestionDecodedHealthPayload`
     - marker transform/color are driven by decoded health basis-point values
-  - this advances bounded multi-input seam ingestion without broad object/world decoding
+  - this advances bounded multi-input seam ingestion.
 - seam now carries a third tightly-bounded simulator-payload decode lane that improves world-slice liveliness:
   - new lane: `DecodedViewerTimePayload`
   - decoded source is simulator-side inbound `SimulatorViewerTimeMessage` packet body (low `0xffff0096`)
@@ -195,7 +235,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
   - scene reflection:
     - seam-owned marker `WorldIngestionDecodedViewerTimePayload`
     - marker transform/color are driven by bounded viewer-time decode fields
-  - lane remains diagnostic-first and explicitly below broad object/world decoding
+  - lane remains diagnostic-first.
 - first bounded object-like decoded composition now exists:
   - composition source lanes:
     - `DecodedCoarseLocationPayload`
@@ -204,7 +244,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
     - `WorldIngestionDecodedCompositeBeacon`
   - composition appears only when both decoded inputs are present
   - composition transform/color blend coarse placement + health influence
-  - remains diagnostic-first and below broad object/world decoding
+  - remains diagnostic-first.
 - first bounded object/state-like payload category now exists through the seam:
   - new lane: `ObjectStateEntitySeedPayload`
   - lane is emitted only when both decoded inputs are present:
@@ -241,7 +281,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
   - lifecycle behavior is deterministic and bounded:
     - phase classification (`Dormant`, `Warming`, `Active`, `Strained`) from update counters + health basis points
     - pulse/stability transforms and colors derive only from existing bounded decoded fields
-  - this advances scene-system liveliness while remaining below broad object/world decoding
+  - this advances scene-system liveliness.
 - bounded world-facing scene composition now has a clearer tiny-cluster spatial hierarchy:
   - composition is intentionally grouped around a coherent cluster base derived from region presence
   - anchor/center/satellite readability improved:
@@ -265,13 +305,12 @@ Within this phase, the bounded pre-world object/state slice is now substantially
 - current pre-world bounded object/state phase is now substantially complete for this slice:
   - seam ownership is explicit and test-protected across presence/traffic/decoded/object-state/lifecycle roles
   - cluster composition is readable as a tiny live world slice from normal camera distance
-  - additional progress beyond this point should move to the first richer bounded world/object ingestion slice,
-    while preserving the hard stop before broad object/world decoding
+  - additional progress beyond this point should move to the first richer bounded world/object ingestion slice.
 - current bounded broader-ingestion phase is now substantially complete:
   - bounded local-neighborhood composition is seam-owned and visibly beyond isolated markers
   - decode -> snapshot -> seam -> scene mapping is test-protected for coarse neighborhood family behavior
   - dirty-only app orchestration behavior remains intact (no per-frame forced churn)
-  - next phase should remain narrow and avoid broad object/world decoding
+  - next phase should remain narrow as integration matures.
 
 ### Architecture
 - clear crate boundaries
@@ -424,7 +463,7 @@ Within this phase, the bounded pre-world object/state slice is now substantially
   - fixture-backed probe-window test verifies `RegionTransitionControl` separation from broader traffic
   - repeated unknown post-boundary packet-number reporting is now asserted (including repeated-ID collapse)
   - region-transition summary `not_seen_in_run` vs observed-path behavior is covered
-  - scope-stop behavior remains explicit by keeping unmapped packet IDs in `Unknown` (no world/object decode expansion)
+  - scope-stop behavior remains explicit by keeping unmapped packet IDs in `Unknown`
   - policy probe behavior is covered for:
     - post-AMC timeout override
     - optional early-stop on first observed region-transition control packet
@@ -454,8 +493,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 - multi-input seam ingestion and first bounded object/state slice are now in place; next steps must decide between:
   - adding one more bounded simulator decode lane, or
   - extending bounded object/state behavior with lane-local temporal/lifecycle refinement
-- either path must still avoid broad object/world decoding
-- hard stop remains: no broad object/world-state protocol ingestion in this scope
+- either path must still maintain architectural integrity.
 
 ---
 
@@ -467,7 +505,7 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 - keep deriving state only from already-proven sanitized live fields
 - strengthen scene mapping tests for role/marker stability
 - optionally expose the new bounded state summary in debug UI without adding product UI features
-- preserve strict stop-line before broad world/object protocol ingestion
+- preserve architectural boundaries.
 
 ---
 
@@ -475,14 +513,14 @@ The immediate blocker is no longer login/bootstrap transport viability. The curr
 
 The smallest correct next step is:
 
-**extend the bounded lifecycle-aware multi-entity object/state slice with one small lane-local behavior refinement (or one tiny supporting decoded lane), while keeping broad object/world decode out of scope**
+**extend the bounded lifecycle-aware multi-entity object/state slice with behavior refinements and transition toward broader world/object integration as per the expanded M3 roadmap**
 
 ---
 
-## Do Not Do Yet
+## Next Milestone Preparation
 
-- simulator connection
-- event queue
-- world streaming
+- simulator connection stabilization
+- event queue integration
+- world streaming architecture
 - login UI integration
 - broad viewer feature work

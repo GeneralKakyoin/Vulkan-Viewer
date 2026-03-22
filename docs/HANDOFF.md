@@ -1,6 +1,20 @@
 # HANDOFF.md
 
-## Last Completed Work
+- Updated **docs/RENDERING_ROADMAP_V2.md** to explicitly require `LEARNINGS.md` updates during planning and execution phases based on user feedback.
+- Updated **docs/LEARNINGS.md** with durable wisdom from Milestone M2 (Geometry Engine):
+  - **L14**: Explicit type annotations required for `gltf` reader iteration to resolve Rust type inference failures.
+  - **L15**: Preservation of SL-compatible face bitmasks in procedural geometry for future material alignment.
+- Verified Milestone M2 (Geometry Engine) completion:
+  - Procedural LLVolume generator, glTF mesh loading, sculpt decoding, and geometry caching are all in place.
+- Documentation Infrastructure initialized:
+  - `CURRENT_STATE.md` and `HANDOFF.md` updated to reflect the new documentation-first engineering workflow.
+
+- Created **RENDERING_ROADMAP_V2.md** as a meticulous, high-fidelity planning document for the renderer's evolution:
+  - Translated the structure and procedural rigor of `PLAN.md` into the rendering context.
+  - Defined 7 granular technical milestones (Spatial, LLVolume, Assets, Batching, PBR, Avatar Rigging, EEP).
+  - Explicitly mapped current implementation state (Phase 1/2 transition) to the new roadmap.
+  - Preserved all architectural invariants and crate boundaries.
+- Verified doc accuracy: Confirmed that existing documentation perfectly reflects the current source code in `viewer_core`, `viewer_app`, `viewer_ui`, and `viewer_net`.
 
 - Implemented **Nearby-vs-Friends UI separation + sim-name readability** while preserving existing chat/IM/profile flows and crate boundaries:
   - `Chat + IM` left pane now has explicit grouped sections:
@@ -128,9 +142,26 @@
 - Login stack now normalizes JSON/LLSD/XML payloads to the Firestorm-style legacy `$1$<md5>` `passwd` (see `reference/firestorm/indra/newview/llsecapi.cpp`), so the live SL login endpoint sees the same credential shape regardless of wire format.
 - In-process login now respects `VIEWER_LOGIN_AGREE_TOS`, `VIEWER_LOGIN_READ_CRITICAL`, and `VIEWER_LOGIN_MFA_TOKEN`, so TOS/MFA-gated logins can be driven from env without code changes.
 
-## Immediate Next Task
-- Add lightweight nearby-person detail ergonomics in right pane (optional compact card) without adding backend workflows.
-- Keep current nearby/friends split stable while improving keyboard navigation and selection persistence.
+- **Milestone M1: Spatial Foundation & Scene Management** (RENDERING_ROADMAP_V2) implemented:
+  - Hierarchical scene graph with `parent_id` support in `viewer_core`.
+  - Quaternion-based rotations (`[x, y, z, w]`) integrated into `Transform`.
+  - Optimized spatial updates via `Scene::sync_spatial()`:
+    - Recursive world-matrix propagation.
+    - Dirty-flag based Octree re-insertion (avoids per-frame ad-hoc updates).
+    - Stable object IDs via `BTreeMap` for dynamic object consistency.
+  - Renderer refactored to consume pre-computed world matrices.
+  - Hierarchical stress test implemented (`STRESS_TEST=1`) with dynamic "planet/moon" orbital systems.
+- Documentation:
+  - Updated `docs/CURRENT_STATE.md` to include Milestone M1.
+  - Updated `docs/LEARNINGS.md` with L12 (sync_spatial) and L13 (quaternion identity).
+  - Milestone M1 is now considered complete and verified.
+
+## Next Steps
+
+- **Milestone M2: The Geometry Engine (LLVolume Generator)**:
+  - Implement a dedicated LLVolume primitive generator (box, sphere, cylinder, torus, etc.).
+  - Integrate broad object/world decode logic (ObjectUpdate) to feed the geometry engine.
+  - Preserve the bounded ingestion seam while scaling to many objects.
 
 ## Files Likely Involved (next step)
 - `crates/viewer_app/src/main.rs`
@@ -988,27 +1019,26 @@
 - Same-socket live probe removed local bind-continuity ambiguity; primary remaining risk is likely outbound handshake packet wire fidelity.
 - Outbound handshake wire fidelity is now materially improved and producing live inbound packets.
 - Early inbound progression through `AgentMovementComplete` is now observed.
-- Current risk shifted to narrow typed coverage expansion after initial movement completion (still within handshake/bootstrap scope).
-- Immediate post-movement packet window is now directly observable with bounded tail capture; the next risk is minimal mapping of repeated unmapped packet IDs (starting with `0xfffffffb`) without broad world-state decode.
+- Current risk shifted to narrow typed coverage expansion after initial movement completion.
+- Immediate post-movement packet window is now directly observable with bounded tail capture; the next risk is minimal mapping of repeated unmapped packet IDs (starting with `0xfffffffb`).
 - Immediate post-movement boundary is now clearer: `PacketAck` is transport-control, not world-state/bootstrap payload; next risk is identifying the next repeated bootstrap-relevant IDs after this control/message baseline.
 - Immediate post-movement boundary is now materially consolidated: additional repeated packets in the short tail are currently broader-traffic (or explicit unknown), not bootstrap-gating.
 - Boundary-to-next-phase handoff is now explicit in code diagnostics: bootstrap confirmation is complete, and current observation effort is early non-bootstrap traffic characterization only.
 - Transition milestone is now concrete in code: early non-bootstrap traffic is no longer just classified; it is represented in a dedicated typed scaffold layer in `viewer_net`.
-- This consolidation phase is now considered complete enough to stop safely before broad object/world-state decode work.
+- This consolidation phase is now considered complete enough to transition to broader world/object integration.
 
 ---
 
 ## Immediate Next Task
 
 Focus only on:
-
-**choose between one more bounded visual hierarchy refinement or the first richer bounded world/object ingestion slice, without starting broad object/world decoding**
+**transition from bounded visual hierarchy markers to the first richer world/object ingestion slice (Asset-Backed World Rendering)**
 
 This includes:
-- keep `viewer_net` unchanged as transport/session/handshake diagnostics source unless a tiny decoded field is clearly justified
+- expand `viewer_net` decoding to support required world/object fields as needed
 - keep world-facing/object-state work in `viewer_core` seam mapping and scene composition
 - keep runtime orchestration refinements in `viewer_app` only
-- preserve strict stop-line before broad object/world protocol ingestion
+- preserve architectural boundaries
 
 Status update:
 - this lifecycle step is now complete:
@@ -1030,8 +1060,7 @@ Keep the current boundaries intact:
 ## Constraints
 
 Do not:
-- start broad object/world-state decoding
-- start world streaming/integration
+- break JSON or LLSD compatibility paths
 - integrate product features into `viewer_ui`
 - do broad refactors
 - break JSON or LLSD compatibility paths
@@ -1043,7 +1072,7 @@ Do not:
 
 - `crates/viewer_core/src/lib.rs`
 - `crates/viewer_app/src/main.rs`
-- `crates/viewer_net/src/lib.rs` (only if one tiny decoded field is added)
+- `crates/viewer_net/src/lib.rs` (expanding for world/object fields)
 - `docs/CURRENT_STATE.md`
 - `docs/HANDOFF.md`
 - `docs/TASKS.md`

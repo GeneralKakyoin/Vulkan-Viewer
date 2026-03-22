@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 pub mod spatial;
+pub mod geometry;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -24,7 +25,97 @@ impl Camera {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize, PartialEq)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub tex_coord: [f32; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AvatarRenderMode {
+    #[default]
+    Proxy,
+    FallbackBox,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ProfileType {
+    Square,
+    Circle,
+    TriangleIso,
+    TriangleEqual,
+    TriangleRight,
+    HalfCircle,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum HoleType {
+    Same,
+    Circle,
+    Square,
+    Triangle,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PathType {
+    Line,
+    Circle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VolumeParams {
+    pub profile_type: ProfileType,
+    pub hole_type: HoleType,
+    pub path_type: PathType,
+    
+    pub begin_cut: f32,
+    pub end_cut: f32,
+    pub hollow: f32,
+    
+    pub twist_begin: f32,
+    pub twist_end: f32,
+    pub taper_x: f32,
+    pub taper_y: f32,
+    pub revolutions: f32,
+    pub skew: f32,
+    pub radius_offset: f32,
+    pub shear_x: f32,
+    pub shear_y: f32,
+}
+
+impl Eq for VolumeParams {}
+
+impl std::hash::Hash for VolumeParams {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.profile_type.hash(state);
+        self.hole_type.hash(state);
+        self.path_type.hash(state);
+        self.begin_cut.to_bits().hash(state);
+        self.end_cut.to_bits().hash(state);
+        self.hollow.to_bits().hash(state);
+        self.twist_begin.to_bits().hash(state);
+        self.twist_end.to_bits().hash(state);
+        self.taper_x.to_bits().hash(state);
+        self.taper_y.to_bits().hash(state);
+        self.revolutions.to_bits().hash(state);
+        self.skew.to_bits().hash(state);
+        self.radius_offset.to_bits().hash(state);
+        self.shear_x.to_bits().hash(state);
+        self.shear_y.to_bits().hash(state);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum SculptType {
+    Sphere,
+    Torus,
+    Plane,
+    Cylinder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MeshKind {
     AxisMarker,
     GroundPlane,
@@ -32,11 +123,36 @@ pub enum MeshKind {
     AvatarProxy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AvatarRenderMode {
-    #[default]
-    Proxy,
-    FallbackBox,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GeometrySource {
+    Procedural(VolumeParams, f32), // Params, LOD/Detail
+    Sculpt(String, SculptType),    // Texture UUID String, Type
+    Mesh(String, u32),             // Asset UUID String, LOD level
+    Diagnostic(MeshKind),          // Cube, Axis, Plane (internal)
+}
+
+impl Eq for GeometrySource {}
+
+impl std::hash::Hash for GeometrySource {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            GeometrySource::Procedural(params, lod) => {
+                params.hash(state);
+                lod.to_bits().hash(state);
+            }
+            GeometrySource::Sculpt(uuid, sculpt_type) => {
+                uuid.hash(state);
+                sculpt_type.hash(state);
+            }
+            GeometrySource::Mesh(uuid, lod) => {
+                uuid.hash(state);
+                lod.hash(state);
+            }
+            GeometrySource::Diagnostic(kind) => {
+                kind.hash(state);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,9 +319,10 @@ impl Frustum {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform {
     pub position: [f32; 3],
+    pub rotation: [f32; 4], // Quaternion [x, y, z, w]
     pub scale: [f32; 3],
 }
 
@@ -219,32 +336,49 @@ impl Default for Transform {
     fn default() -> Self {
         Self {
             position: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0], // Identity quaternion
             scale: [1.0, 1.0, 1.0],
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RenderableInstance {
-    pub mesh: MeshKind,
+    pub geometry: GeometrySource,
     pub role: InstanceRole,
     pub transform: Transform,
     pub color: [f32; 3],
+    pub parent_id: Option<usize>,
+    pub stable_id: Option<String>,
+    pub world_matrix: [[f32; 4]; 4],
+    pub world_aabb: Aabb,
+    pub dirty_spatial: bool,
 }
 
 impl RenderableInstance {
-    pub fn aabb(&self) -> Aabb {
-        // Our basic primitives (Cube, GroundPlane) are bounded within [-0.5, 0.5] in local space
-        // so their half-extents are half of their scale magnitude.
-        let half_extents = [
-            (self.transform.scale[0] * 0.5).abs(),
-            (self.transform.scale[1] * 0.5).abs(),
-            (self.transform.scale[2] * 0.5).abs(),
-        ];
-        Aabb {
-            center: self.transform.position,
-            size: half_extents,
+    pub fn new(geometry: GeometrySource, role: InstanceRole, transform: Transform, color: [f32; 3]) -> Self {
+        Self {
+            geometry,
+            role,
+            transform,
+            color,
+            parent_id: None,
+            stable_id: None,
+            world_matrix: transform_to_mat4(transform),
+            world_aabb: Aabb {
+                center: transform.position,
+                size: [
+                    (transform.scale[0] * 0.5).abs(),
+                    (transform.scale[1] * 0.5).abs(),
+                    (transform.scale[2] * 0.5).abs(),
+                ],
+            },
+            dirty_spatial: true,
         }
+    }
+
+    pub fn aabb(&self) -> Aabb {
+        self.world_aabb
     }
 }
 
@@ -253,6 +387,7 @@ pub struct Scene {
     pub instances: BTreeMap<usize, RenderableInstance>,
     pub octree: crate::spatial::Octree,
     pub next_id: usize,
+    pub instance_map: BTreeMap<String, usize>, // agent_id -> instance_id
 }
 
 impl Default for Scene {
@@ -261,6 +396,7 @@ impl Default for Scene {
             instances: BTreeMap::new(),
             octree: crate::spatial::Octree::new(1024.0), // Large enough for current diagnostics
             next_id: 0,
+            instance_map: BTreeMap::new(),
         }
     }
 }
@@ -477,7 +613,7 @@ impl RuntimeRelayState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SocialState {
     pub friends: Vec<FriendEntry>,
     pub selected_friend_id: Option<String>,
@@ -485,6 +621,7 @@ pub struct SocialState {
     pub im_threads: Vec<DirectImThread>,
     pub avatar_render_mode: AvatarRenderMode,
     pub relay: RuntimeRelayState,
+    pub frametime_history: VecDeque<f32>,
     next_im_message_id: u64,
 }
 
@@ -1507,46 +1644,67 @@ impl Scene {
 
     pub fn prototype() -> Self {
         let mut scene = Self::default();
-        scene.insert_instance(RenderableInstance {
-            mesh: MeshKind::AxisMarker,
-            role: InstanceRole::SceneStatic,
-            transform: Transform::default(),
-            color: [0.60, 0.65, 0.70],
-        });
-        scene.insert_instance(RenderableInstance {
-            mesh: MeshKind::GroundPlane,
-            role: InstanceRole::SceneStatic,
-            transform: Transform {
+        scene.insert_instance(
+            GeometrySource::Diagnostic(MeshKind::AxisMarker),
+            InstanceRole::SceneStatic,
+            Transform::default(),
+            [0.60, 0.65, 0.70],
+        );
+        scene.insert_instance(
+            GeometrySource::Diagnostic(MeshKind::GroundPlane),
+            InstanceRole::SceneStatic,
+            Transform {
                 position: [0.0, -0.01, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [256.0, 1.0, 256.0],
             },
-            color: [0.18, 0.20, 0.22],
-        });
-        scene.insert_instance(RenderableInstance {
-            mesh: MeshKind::Cube,
-            role: InstanceRole::SceneStatic,
-            transform: Transform {
+            [0.18, 0.20, 0.22],
+        );
+        scene.insert_instance(
+            GeometrySource::Diagnostic(MeshKind::Cube),
+            InstanceRole::SceneStatic,
+            Transform {
                 position: [0.0, 0.5, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [1.0, 1.0, 1.0],
             },
-            color: [0.85, 0.35, 0.25],
-        });
+            [0.85, 0.35, 0.25],
+        );
         scene
     }
 
-    pub fn insert_instance(&mut self, instance: RenderableInstance) -> usize {
+    pub fn insert_instance(
+        &mut self,
+        geometry: GeometrySource,
+        role: InstanceRole,
+        transform: Transform,
+        color: [f32; 3],
+    ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
+        let instance = RenderableInstance::new(geometry, role, transform, color);
         let aabb = instance.aabb();
         self.instances.insert(id, instance);
         self.octree.insert(id, aabb);
         id
     }
 
+    pub fn instances_mut(&mut self) -> impl Iterator<Item = &mut RenderableInstance> {
+        self.instances.values_mut()
+    }
+
+    pub fn get_instance(&self, id: usize) -> Option<&RenderableInstance> {
+        self.instances.get(&id)
+    }
+
+    pub fn get_instance_mut(&mut self, id: usize) -> Option<&mut RenderableInstance> {
+        self.instances.get_mut(&id)
+    }
+
     pub fn upsert_role(
         &mut self,
         role: InstanceRole,
-        mesh: MeshKind,
+        mesh: GeometrySource,
         transform: Transform,
         color: [f32; 3],
     ) {
@@ -1558,18 +1716,79 @@ impl Scene {
 
         if let Some(id) = existing_id {
             let instance = self.instances.get_mut(&id).unwrap();
-            instance.transform = transform;
-            instance.color = color;
-            let aabb = instance.aabb();
-            self.octree.remove(id);
-            self.octree.insert(id, aabb);
+            if instance.transform != transform || instance.color != color {
+                instance.transform = transform;
+                instance.color = color;
+                instance.dirty_spatial = true;
+                // Note: octree update happens in sync_spatial
+            }
         } else {
-            self.insert_instance(RenderableInstance {
+            self.insert_instance(
                 mesh,
                 role,
                 transform,
                 color,
-            });
+            );
+        }
+    }
+
+    pub fn sync_spatial(&mut self) {
+        // Collect dirty IDs
+        let dirty_ids: Vec<usize> = self.instances.iter()
+            .filter(|(_, inst)| inst.dirty_spatial || inst.parent_id.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Propagation of dirty flag from parent to child
+        // Simplified: we might need multiple passes or topological sort, but for SL hierarchies are shallow.
+        // We'll just do one pass for now as Milestone 1 allows recursion.
+        
+        for id in dirty_ids {
+            let world_matrix = self.get_world_matrix(id);
+            let instance = self.instances.get_mut(&id).unwrap();
+            
+            let old_aabb = instance.world_aabb;
+            instance.world_matrix = world_matrix;
+            
+            // Recompute world AABB
+            // For Milestone 1, we transform the center and keep Axis Aligned box from scale.
+            // This is a simplification; a true world AABB would transform all 8 corners.
+            let world_pos = [world_matrix[3][0], world_matrix[3][1], world_matrix[3][2]];
+            
+            // To handle rotation correctly for AABB, we take absolute value of matrix elements for scale
+            let x_axis = [world_matrix[0][0], world_matrix[0][1], world_matrix[0][2]];
+            let y_axis = [world_matrix[1][0], world_matrix[1][1], world_matrix[1][2]];
+            let z_axis = [world_matrix[2][0], world_matrix[2][1], world_matrix[2][2]];
+            
+            let hx = 0.5 * (x_axis[0].abs() + y_axis[0].abs() + z_axis[0].abs());
+            let hy = 0.5 * (x_axis[1].abs() + y_axis[1].abs() + z_axis[1].abs());
+            let hz = 0.5 * (x_axis[2].abs() + y_axis[2].abs() + z_axis[2].abs());
+            
+            let new_aabb = Aabb {
+                center: world_pos,
+                size: [hx, hy, hz],
+            };
+            
+            if new_aabb != old_aabb {
+                instance.world_aabb = new_aabb;
+                self.octree.remove(id, old_aabb);
+                self.octree.insert(id, new_aabb);
+            }
+            instance.dirty_spatial = false;
+        }
+    }
+
+    pub fn get_world_matrix(&self, id: usize) -> [[f32; 4]; 4] {
+        let Some(instance) = self.instances.get(&id) else {
+            return [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        };
+        
+        let local = transform_to_mat4(instance.transform);
+        if let Some(parent_id) = instance.parent_id {
+            let parent_matrix = self.get_world_matrix(parent_id);
+            mat4_mul(parent_matrix, local)
+        } else {
+            local
         }
     }
 
@@ -1579,7 +1798,7 @@ impl Scene {
         
         // Find existing SceneStatic Cube by role and mesh
         let cube_id = self.instances.iter().find(|(_, instance)| {
-            instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
+            instance.geometry == GeometrySource::Diagnostic(MeshKind::Cube) && instance.role == InstanceRole::SceneStatic
         }).map(|(id, _)| *id);
 
         if let Some(id) = cube_id {
@@ -1600,7 +1819,7 @@ impl Scene {
                 _ => [1.0, 1.0, 1.0],
             };
             let aabb = cube.aabb();
-            self.octree.remove(id);
+            self.octree.remove(id, aabb);
             self.octree.insert(id, aabb);
         } else {
             return;
@@ -1611,7 +1830,7 @@ impl Scene {
         upsert_instance(
             self,
             InstanceRole::LivePlaceholder,
-            MeshKind::AxisMarker,
+            GeometrySource::Diagnostic(MeshKind::AxisMarker),
             live_transform,
             live_color,
         );
@@ -1619,7 +1838,7 @@ impl Scene {
         upsert_instance(
             self,
             InstanceRole::WorldRegionAnchor,
-            MeshKind::Cube,
+            GeometrySource::Diagnostic(MeshKind::Cube),
             world_region_anchor_transform(world_presence),
             world_region_anchor_color(world_presence),
         );
@@ -1627,7 +1846,7 @@ impl Scene {
         upsert_instance(
             self,
             InstanceRole::WorldEntryBeacon,
-            MeshKind::AxisMarker,
+            GeometrySource::Diagnostic(MeshKind::AxisMarker),
             world_entry_beacon_transform(world_presence),
             world_entry_beacon_color(world_presence),
         );
@@ -1635,7 +1854,7 @@ impl Scene {
         upsert_instance(
             self,
             InstanceRole::WorldSimTargetMarker,
-            MeshKind::AxisMarker,
+            GeometrySource::Diagnostic(MeshKind::AxisMarker),
             world_sim_target_transform(snapshot, world_presence),
             world_sim_target_color(world_presence),
         );
@@ -1643,21 +1862,21 @@ impl Scene {
         upsert_instance(
             self,
             InstanceRole::WorldTrafficBroaderPillar,
-            MeshKind::Cube,
+            GeometrySource::Diagnostic(MeshKind::Cube),
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::Broader),
             world_traffic_pillar_color(TrafficPillarKind::Broader),
         );
         upsert_instance(
             self,
             InstanceRole::WorldTrafficUnknownPillar,
-            MeshKind::Cube,
+            GeometrySource::Diagnostic(MeshKind::Cube),
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::Unknown),
             world_traffic_pillar_color(TrafficPillarKind::Unknown),
         );
         upsert_instance(
             self,
             InstanceRole::WorldTrafficRegionControlPillar,
-            MeshKind::Cube,
+            GeometrySource::Diagnostic(MeshKind::Cube),
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::RegionControl),
             world_traffic_pillar_color(TrafficPillarKind::RegionControl),
         );
@@ -1673,7 +1892,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionProxy,
-                MeshKind::Cube,
+                GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_proxy_transform(item),
                 world_ingestion_proxy_color(item),
             );
@@ -1690,7 +1909,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionTrafficPayload,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_traffic_payload_transform(item),
                 world_ingestion_traffic_payload_color(item),
             );
@@ -1710,7 +1929,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedEndpointPayload,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_endpoint_transform(item),
                 world_ingestion_decoded_endpoint_color(item),
             );
@@ -1730,7 +1949,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedCoarseLocationPayload,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_coarse_location_transform(item),
                 world_ingestion_decoded_coarse_location_color(item),
             );
@@ -1749,21 +1968,21 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload,
-                MeshKind::Cube,
+                GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_decoded_coarse_neighborhood_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_color(item),
             );
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_satellite_a_color(item),
             );
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_satellite_b_color(item),
             );
@@ -1791,7 +2010,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedHealthPayload,
-                MeshKind::Cube,
+                GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_decoded_health_transform(item),
                 world_ingestion_decoded_health_color(item),
             );
@@ -1811,7 +2030,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedViewerTimePayload,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_viewer_time_transform(item),
                 world_ingestion_decoded_viewer_time_color(item),
             );
@@ -1836,7 +2055,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldIngestionDecodedCompositeBeacon,
-                MeshKind::Cube,
+                GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_decoded_composite_transform(coarse, health),
                 world_ingestion_decoded_composite_color(health),
             );
@@ -1857,14 +2076,14 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldObjectStateEntityBody,
-                MeshKind::Cube,
+                GeometrySource::Diagnostic(MeshKind::Cube),
                 world_object_state_entity_body_transform(item, 0),
                 world_object_state_entity_body_color(item, 0),
             );
             upsert_instance(
                 self,
                 InstanceRole::WorldObjectStateEntityAura,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_object_state_entity_aura_transform(item, 0),
                 world_object_state_entity_aura_color(item, 0),
             );
@@ -1872,14 +2091,14 @@ impl Scene {
                 upsert_instance(
                     self,
                     InstanceRole::WorldObjectStateEntityWingBody,
-                    MeshKind::Cube,
+                    GeometrySource::Diagnostic(MeshKind::Cube),
                     world_object_state_entity_body_transform(item, 1),
                     world_object_state_entity_body_color(item, 1),
                 );
                 upsert_instance(
                     self,
                     InstanceRole::WorldObjectStateEntityWingAura,
-                    MeshKind::AxisMarker,
+                    GeometrySource::Diagnostic(MeshKind::AxisMarker),
                     world_object_state_entity_aura_transform(item, 1),
                     world_object_state_entity_aura_color(item, 1),
                 );
@@ -1897,14 +2116,14 @@ impl Scene {
                 upsert_instance(
                     self,
                     InstanceRole::WorldObjectStateEntityGuardBody,
-                    MeshKind::Cube,
+                    GeometrySource::Diagnostic(MeshKind::Cube),
                     world_object_state_entity_body_transform(item, 2),
                     world_object_state_entity_body_color(item, 2),
                 );
                 upsert_instance(
                     self,
                     InstanceRole::WorldObjectStateEntityGuardAura,
-                    MeshKind::AxisMarker,
+                    GeometrySource::Diagnostic(MeshKind::AxisMarker),
                     world_object_state_entity_aura_transform(item, 2),
                     world_object_state_entity_aura_color(item, 2),
                 );
@@ -1921,7 +2140,7 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldObjectStateEntityClusterCore,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_object_state_entity_cluster_core_transform(item, entity_count),
                 world_object_state_entity_cluster_core_color(item, entity_count),
             );
@@ -1964,14 +2183,14 @@ impl Scene {
             upsert_instance(
                 self,
                 InstanceRole::WorldObjectStateEntityPulse,
-                MeshKind::AxisMarker,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_object_state_entity_pulse_transform(item),
                 world_object_state_entity_pulse_color(item),
             );
             upsert_instance(
                 self,
                 InstanceRole::WorldObjectStateEntityStability,
-                MeshKind::Cube,
+                GeometrySource::Diagnostic(MeshKind::Cube),
                 world_object_state_entity_stability_transform(item),
                 world_object_state_entity_stability_color(item),
             );
@@ -1992,53 +2211,69 @@ impl Scene {
         avatars: &[WorldAvatarPlaceholder],
         mode: AvatarRenderMode,
     ) {
-        let to_remove: Vec<usize> = self.instances.iter()
-            .filter(|(_, instance)| {
-                instance.role == InstanceRole::WorldAvatarPlaceholderSelf
-                || instance.role == InstanceRole::WorldAvatarPlaceholderOther
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        
-        for id in to_remove {
-            self.instances.remove(&id);
-            self.octree.remove(id);
-        }
+        let mut current_agent_ids = HashSet::new();
 
         for avatar in avatars {
+            current_agent_ids.insert(avatar.agent_id.clone());
+
             let (mesh, scale, color) = match (mode, avatar.is_self, avatar.stale) {
                 (AvatarRenderMode::Proxy, true, _) => {
-                    (MeshKind::AvatarProxy, [0.38, 1.30, 0.38], [0.22, 0.86, 0.40])
+                    (GeometrySource::Diagnostic(MeshKind::AvatarProxy), [0.38, 1.30, 0.38], [1.0, 0.35, 0.15])
                 }
                 (AvatarRenderMode::Proxy, false, true) => {
-                    (MeshKind::AvatarProxy, [0.34, 1.16, 0.34], [0.66, 0.50, 0.38])
+                    (GeometrySource::Diagnostic(MeshKind::AvatarProxy), [0.36, 1.22, 0.36], [0.66, 0.50, 0.38])
                 }
                 (AvatarRenderMode::Proxy, false, false) => {
-                    (MeshKind::AvatarProxy, [0.36, 1.22, 0.36], [0.30, 0.74, 0.98])
+                    (GeometrySource::Diagnostic(MeshKind::AvatarProxy), [0.36, 1.22, 0.36], [0.30, 0.74, 0.98])
                 }
                 (AvatarRenderMode::FallbackBox, true, _) => {
-                    (MeshKind::Cube, [0.32, 1.20, 0.32], [0.22, 0.86, 0.40])
+                    (GeometrySource::Diagnostic(MeshKind::Cube), [0.32, 1.20, 0.32], [1.0, 0.35, 0.15])
                 }
                 (AvatarRenderMode::FallbackBox, false, true) => {
-                    (MeshKind::Cube, [0.30, 1.10, 0.30], [0.66, 0.50, 0.38])
+                    (GeometrySource::Diagnostic(MeshKind::Cube), [0.30, 1.10, 0.30], [0.66, 0.50, 0.38])
                 }
                 (AvatarRenderMode::FallbackBox, false, false) => {
-                    (MeshKind::Cube, [0.30, 1.10, 0.30], [0.30, 0.74, 0.98])
+                    (GeometrySource::Diagnostic(MeshKind::Cube), [0.30, 1.10, 0.30], [0.30, 0.74, 0.98])
                 }
             };
-            self.insert_instance(RenderableInstance {
-                mesh,
-                role: if avatar.is_self {
+
+            let transform = Transform {
+                position: avatar.world_position,
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale,
+            };
+
+            if let Some(&id) = self.instance_map.get(&avatar.agent_id) {
+                let inst = self.instances.get_mut(&id).expect("instance_map drift");
+                if inst.transform != transform || inst.color != color {
+                    inst.transform = transform;
+                    inst.color = color;
+                    inst.geometry = mesh; // Handle mode switch
+                    inst.dirty_spatial = true;
+                }
+            } else {
+                let role = if avatar.is_self {
                     InstanceRole::WorldAvatarPlaceholderSelf
                 } else {
                     InstanceRole::WorldAvatarPlaceholderOther
-                },
-                transform: Transform {
-                    position: avatar.world_position,
-                    scale,
-                },
-                color,
-            });
+                };
+                let id = self.insert_instance(mesh, role, transform, color);
+                self.instance_map.insert(avatar.agent_id.clone(), id);
+            }
+        }
+
+        // Cleanup stale avatars not in the current list
+        let mut to_remove = Vec::new();
+        for (agent_id, &id) in &self.instance_map {
+            if !current_agent_ids.contains(agent_id) {
+                to_remove.push((agent_id.clone(), id));
+            }
+        }
+        for (agent_id, id) in to_remove {
+            self.instance_map.remove(&agent_id);
+            if let Some(inst) = self.instances.remove(&id) {
+                self.octree.remove(id, inst.world_aabb);
+            }
         }
     }
 }
@@ -2046,18 +2281,22 @@ impl Scene {
 fn upsert_instance(
     scene: &mut Scene,
     role: InstanceRole,
-    mesh: MeshKind,
+    geometry: GeometrySource,
     transform: Transform,
     color: [f32; 3],
 ) {
-    scene.upsert_role(role, mesh, transform, color);
+    scene.upsert_role(role, geometry, transform, color);
 }
 
 fn remove_instance(scene: &mut Scene, role: InstanceRole) {
     let id = scene.instances.iter().find(|(_, i)| i.role == role).map(|(id, _)| *id);
     if let Some(id) = id {
-        scene.instances.remove(&id);
-        scene.octree.remove(id);
+        if let Some(inst) = scene.instances.remove(&id) {
+            scene.octree.remove(id, inst.world_aabb);
+            if let Some(ref agent_id) = inst.stable_id {
+                scene.instance_map.remove(agent_id);
+            }
+        }
     }
 }
 
@@ -2083,6 +2322,7 @@ fn world_region_anchor_transform(presence: FirstRegionPresence) -> Transform {
     let [offset_x, offset_z] = world_presence_offset(presence.region_coords);
     Transform {
         position: [3.0 + offset_x, 0.25, offset_z],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [0.45, 0.45, 0.45],
     }
 }
@@ -2103,6 +2343,7 @@ fn world_entry_beacon_transform(presence: FirstRegionPresence) -> Transform {
         WorldEntryStage::Offline => (1.0, [0.40, 0.40, 0.40]),
     };
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [3.0 + offset_x, y, offset_z],
         scale,
     }
@@ -2138,6 +2379,7 @@ fn world_sim_target_transform(
         [0.24, 0.24, 0.24]
     };
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [px, y, pz],
         scale,
     }
@@ -2191,6 +2433,7 @@ fn world_traffic_pillar_transform(
     };
     let height = traffic_pillar_height(slice.traffic.available, raw_count);
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [base_x + x_shift, height * 0.5, base_z + z_shift],
         scale: [0.20, height, 0.20],
     }
@@ -2222,6 +2465,7 @@ fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform 
     let time_updates = item.decoded_viewer_time_updates.unwrap_or(0);
     let hover = (((time_updates % 16) as f32 / 16.0) * core::f32::consts::TAU).cos() * 0.05;
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [base_x, y + hover, base_z + 0.22],
         scale,
     }
@@ -2249,6 +2493,7 @@ fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> 
     let scale = 0.24 + weighted * 0.005;
     Transform {
         position: [base_x + 0.92, y, base_z + 0.18],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [scale, scale, scale],
     }
 }
@@ -2283,6 +2528,7 @@ fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) ->
     let y = 0.48 + ((port % 1000.0) / 1000.0) * 0.6;
     let scale = 0.18 + ((host_tail % 32.0) / 32.0) * 0.14;
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [x, y, z],
         scale: [scale, scale, scale],
     }
@@ -2308,6 +2554,7 @@ fn world_ingestion_decoded_coarse_location_transform(item: WorldObjectIngestionI
     let count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
     let scale = (0.16 + count * 0.01).clamp(0.16, 0.42);
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [x, y, z],
         scale: [scale, scale, scale],
     }
@@ -2335,6 +2582,7 @@ fn world_ingestion_decoded_coarse_neighborhood_transform(
     let count = f32::from(item.decoded_coarse_location_count.unwrap_or(0));
     let scale = (0.18 + count * 0.012).clamp(0.18, 0.52);
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [x, y, z],
         scale: [scale, scale, scale],
     }
@@ -2356,6 +2604,7 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(
     let y = 0.34 + (f32::from(coarse_z) / 255.0) * 0.9;
     Transform {
         position: [x, y, z],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [0.18, 0.18, 0.18],
     }
 }
@@ -2381,6 +2630,7 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(
     let y = 0.30 + (f32::from(coarse_z) / 255.0) * 0.85;
     Transform {
         position: [x, y, z],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [0.15, 0.15, 0.15],
     }
 }
@@ -2401,6 +2651,7 @@ fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> T
     let scale = 0.14 + normalized * 0.34;
     Transform {
         position: [base_x + 0.62, y, base_z - 0.92],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [scale, scale, scale],
     }
 }
@@ -2426,6 +2677,7 @@ fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem)
             y,
             base_z + heading.sin() * radius,
         ],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [scale, scale, scale],
     }
 }
@@ -2451,6 +2703,7 @@ fn world_ingestion_decoded_composite_transform(
     let coarse_count = f32::from(coarse.decoded_coarse_location_count.unwrap_or(0));
     let scale = (0.18 + coarse_count * 0.01 + health_norm * 0.18).clamp(0.18, 0.46);
     Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
         position: [x, y, z],
         scale: [scale, scale, scale],
     }
@@ -2509,6 +2762,7 @@ fn world_object_state_entity_body_transform(
     let scale = (0.22 + health * 0.18 + scale_bias + pulse).clamp(0.14, 0.52);
     Transform {
         position: [x, y + y_bias, z],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [scale, scale * 1.25, scale],
     }
 }
@@ -2559,6 +2813,7 @@ fn world_object_state_entity_aura_transform(
         (body.scale[0] + aura_scale_bias + coarse_count * 0.01 + lifecycle_boost).clamp(0.28, 0.78);
     Transform {
         position: [body.position[0], body.position[1] + 0.42, body.position[2]],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [aura_scale, aura_scale, aura_scale],
     }
 }
@@ -2590,6 +2845,7 @@ fn world_object_state_entity_cluster_core_transform(
     let scale = (0.16 + entity_count as f32 * 0.06 + phase_scale).clamp(0.22, 0.50);
     Transform {
         position: [center_x, center_y + 0.92, center_z],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [scale, scale, scale],
     }
 }
@@ -2662,6 +2918,7 @@ fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> 
             core.position[1] + phase_lift,
             core.position[2],
         ],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [scale, scale, scale],
     }
 }
@@ -2697,6 +2954,7 @@ fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem)
             0.12 + adjusted_height * 0.5,
             center_z + 0.18,
         ],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [width, adjusted_height, width],
     }
 }
@@ -2726,11 +2984,13 @@ fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transfor
             };
             Transform {
                 position: [3.0 + offset_x, y, offset_z],
+                rotation: [0.0, 0.0, 0.0, 1.0],
                 scale,
             }
         }
         _ => Transform {
             position: [3.0, 0.9, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [0.35, 0.35, 0.35],
         },
     }
@@ -2924,7 +3184,7 @@ mod tests {
             .instances
             .values()
             .find(|instance| {
-                instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
+                instance.geometry == GeometrySource::Diagnostic(MeshKind::Cube) && instance.role == InstanceRole::SceneStatic
             })
             .expect("cube should exist");
         assert_eq!(cube.color, [0.85, 0.35, 0.25]);
@@ -2934,21 +3194,21 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::LivePlaceholder)
             .expect("live placeholder should exist");
-        assert_eq!(live_anchor.mesh, MeshKind::AxisMarker);
+        assert_eq!(live_anchor.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert_eq!(live_anchor.transform.position, [3.0, 0.9, 0.0]);
         let region_anchor = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
-        assert_eq!(region_anchor.mesh, MeshKind::Cube);
+        assert_eq!(region_anchor.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert_eq!(region_anchor.color, [0.45, 0.37, 0.33]);
         let entry_beacon = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
-        assert_eq!(entry_beacon.mesh, MeshKind::AxisMarker);
+        assert_eq!(entry_beacon.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert_eq!(entry_beacon.transform.position[1], 1.0);
         let target = scene
             .instances
@@ -3012,7 +3272,7 @@ mod tests {
             .instances
             .values()
             .find(|instance| {
-                instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
+                instance.geometry == GeometrySource::Diagnostic(MeshKind::Cube) && instance.role == InstanceRole::SceneStatic
             })
             .expect("cube should exist");
         assert_eq!(cube.color, [0.94, 0.74, 0.20]);
@@ -3048,7 +3308,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
-        assert_eq!(seam_proxy.mesh, MeshKind::Cube);
+        assert_eq!(seam_proxy.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert_eq!(seam_proxy.transform.position[1], 0.33);
         assert!(
             scene
@@ -3094,7 +3354,7 @@ mod tests {
             .instances
             .values()
             .find(|instance| {
-                instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
+                instance.geometry == GeometrySource::Diagnostic(MeshKind::Cube) && instance.role == InstanceRole::SceneStatic
             })
             .expect("cube should exist");
         assert_eq!(cube.color, [0.20, 0.82, 0.34]);
@@ -3257,7 +3517,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionTrafficPayload)
             .expect("ingestion traffic payload marker should exist");
-        assert_eq!(traffic_payload.mesh, MeshKind::AxisMarker);
+        assert_eq!(traffic_payload.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert!(traffic_payload.transform.scale[0] > 0.22);
         assert_eq!(traffic_payload.color, [0.30, 0.72, 0.94]);
         let decoded_endpoint_payload = scene
@@ -3265,7 +3525,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedEndpointPayload)
             .expect("decoded endpoint payload marker should exist");
-        assert_eq!(decoded_endpoint_payload.mesh, MeshKind::AxisMarker);
+        assert_eq!(decoded_endpoint_payload.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert!(decoded_endpoint_payload.transform.position[1] > 0.48);
         assert_eq!(decoded_endpoint_payload.color, [0.30, 0.84, 0.96]);
         let decoded_health_payload = scene
@@ -3273,7 +3533,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedHealthPayload)
             .expect("decoded health payload marker should exist");
-        assert_eq!(decoded_health_payload.mesh, MeshKind::Cube);
+        assert_eq!(decoded_health_payload.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert!(decoded_health_payload.transform.position[1] > 0.25);
         let decoded_coarse_payload = scene
             .instances
@@ -3282,39 +3542,39 @@ mod tests {
                 instance.role == InstanceRole::WorldIngestionDecodedCoarseLocationPayload
             })
             .expect("decoded coarse payload marker should exist");
-        assert_eq!(decoded_coarse_payload.mesh, MeshKind::AxisMarker);
+        assert_eq!(decoded_coarse_payload.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         let composite = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedCompositeBeacon)
             .expect("decoded composite beacon should exist");
-        assert_eq!(composite.mesh, MeshKind::Cube);
+        assert_eq!(composite.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert!(composite.transform.position[1] > 0.3);
         let entity_body = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
             .expect("object-state entity body should exist");
-        assert_eq!(entity_body.mesh, MeshKind::Cube);
+        assert_eq!(entity_body.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         let entity_aura = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityAura)
             .expect("object-state entity aura should exist");
-        assert_eq!(entity_aura.mesh, MeshKind::AxisMarker);
+        assert_eq!(entity_aura.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert!(entity_aura.transform.position[1] > entity_body.transform.position[1]);
         let wing_body = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
             .expect("object-state wing body should exist");
-        assert_eq!(wing_body.mesh, MeshKind::Cube);
+        assert_eq!(wing_body.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         let wing_aura = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingAura)
             .expect("object-state wing aura should exist");
-        assert_eq!(wing_aura.mesh, MeshKind::AxisMarker);
+        assert_eq!(wing_aura.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert!(
             scene
                 .instances
@@ -3332,20 +3592,20 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
             .expect("object-state cluster core should exist");
-        assert_eq!(cluster_core.mesh, MeshKind::AxisMarker);
+        assert_eq!(cluster_core.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         assert!(cluster_core.transform.position[1] > entity_aura.transform.position[1]);
         let pulse = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("object-state pulse should exist");
-        assert_eq!(pulse.mesh, MeshKind::AxisMarker);
+        assert_eq!(pulse.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker));
         let stability = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
             .expect("object-state stability should exist");
-        assert_eq!(stability.mesh, MeshKind::Cube);
+        assert_eq!(stability.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert!(stability.transform.scale[1] > stability.transform.scale[0]);
     }
 
@@ -4635,8 +4895,8 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderSelf)
             .expect("self avatar should be present");
-        assert_eq!(self_avatar.mesh, MeshKind::AvatarProxy);
-        assert_eq!(self_avatar.color, [0.22, 0.86, 0.40]);
+        assert_eq!(self_avatar.geometry, GeometrySource::Diagnostic(MeshKind::AvatarProxy));
+        assert_eq!(self_avatar.color, [1.0, 0.35, 0.15]);
         assert_eq!(self_avatar.transform.scale, [0.38, 1.30, 0.38]);
 
         let other_avatar = scene
@@ -4644,7 +4904,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
             .expect("other avatar should be present");
-        assert_eq!(other_avatar.mesh, MeshKind::AvatarProxy);
+        assert_eq!(other_avatar.geometry, GeometrySource::Diagnostic(MeshKind::AvatarProxy));
         assert_eq!(other_avatar.color, [0.30, 0.74, 0.98]);
         assert_eq!(other_avatar.transform.scale, [0.36, 1.22, 0.36]);
     }
@@ -4670,7 +4930,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
             .expect("other avatar should be present");
-        assert_eq!(avatar.mesh, MeshKind::Cube);
+        assert_eq!(avatar.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert_eq!(avatar.color, [0.30, 0.74, 0.98]);
         assert_eq!(avatar.transform.scale, [0.30, 1.10, 0.30]);
     }
@@ -4992,9 +5252,60 @@ pub fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+pub fn quat_to_mat4(q: [f32; 4]) -> [[f32; 4]; 4] {
+    let x2 = q[0] + q[0];
+    let y2 = q[1] + q[1];
+    let z2 = q[2] + q[2];
+    let xx = q[0] * x2;
+    let xy = q[0] * y2;
+    let xz = q[0] * z2;
+    let yy = q[1] * y2;
+    let yz = q[1] * z2;
+    let zz = q[2] * z2;
+    let wx = q[3] * x2;
+    let wy = q[3] * y2;
+    let wz = q[3] * z2;
+
+    [
+        [1.0 - (yy + zz), xy + wz, xz - wy, 0.0],
+        [xy - wz, 1.0 - (xx + zz), yz + wx, 0.0],
+        [xz + wy, yz - wx, 1.0 - (xx + yy), 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+pub fn transform_to_mat4(t: Transform) -> [[f32; 4]; 4] {
+    let s = [
+        [t.scale[0], 0.0, 0.0, 0.0],
+        [0.0, t.scale[1], 0.0, 0.0],
+        [0.0, 0.0, t.scale[2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let r = quat_to_mat4(t.rotation);
+    let tr = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [t.position[0], t.position[1], t.position[2], 1.0],
+    ];
+    // T * R * S
+    mat4_mul(tr, mat4_mul(r, s))
+}
+
 pub fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
     [
-        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
-        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
+        m[0][0], m[0][1], m[0][2], m[0][3],
+        m[1][0], m[1][1], m[1][2], m[1][3],
+        m[2][0], m[2][1], m[2][2], m[2][3],
+        m[3][0], m[3][1], m[3][2], m[3][3],
     ]
 }

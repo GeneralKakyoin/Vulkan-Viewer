@@ -1,16 +1,28 @@
-# RENDERING_PHASE_1.md (Phase 1 Action Plan)
+# RENDERING_PHASE_1.md — Spatial Partitioning
 
-## Phase 1: Spatial Partitioning & Scene Graph
+## Summary
 
-### Purpose
-To scale the viewer to handle thousands of simulator objects (prims, avatars, terrain patches), we must replace our flat `Vec<RenderableInstance>` array with an efficient, queryable spatial hierarchy. This phase introduces the core scene management architecture that will dictate all future rendering efficiency. We will use Firestorm's `lLoctree` conceptually to understand SL-specific spatial grouping requirements, but the implementation will be a ground-up, idiomatic Rust spatial partition.
+Replace `viewer_core::Scene`'s flat `Vec<RenderableInstance>` with an Octree + frustum culling
+system so the scene can scale beyond diagnostic markers without GPU performance collapse.
+All existing Phase E seam-owned diagnostic roles must continue to function exactly as before.
+
+## Owning Crate
+
+- **Changes**: `viewer_core` (Octree, Aabb, Frustum, Scene refactor), `viewer_render` (VisibilityList handoff)
+- **Must not change**: `viewer_net`, `viewer_grid`, `viewer_ui`, `viewer_app` (except the Scene frustum query call)
+- **Crate rule**: `viewer_render` receives a flat `VisibilityList`, not a reference to the Octree itself.
+
+---
+
+## Phase 1: Spatial Partitioning &amp; Scene Graph
 
 ### Goal Definition
-By the end of Phase 1, the GPU must not receive draw calls for objects that are behind the camera or outside the viewing frustum. The spatial data must remain strictly in `viewer_core`, while `viewer_render` only consumes the visible result list. This must connect seamlessly to Phase E: the diagnostic seam's `Scene::apply_world_object_ingestion_seam` must continue to function exactly as before, merely inserting into a tree instead of a flat `Vec`.
+By the end of Phase 1, the GPU must not receive draw calls for objects behind the camera or outside the viewing frustum. The spatial data must remain strictly in `viewer_core`; `viewer_render` only consumes the visible result list. The diagnostic seam's `Scene::apply_world_object_ingestion_seam` must continue to function exactly as before — it merely inserts into a tree instead of a flat `Vec`.
 
 ---
 
 ## Action Plan: Completing Phase 1
+
 
 ### Pre-Phase 1: Diagnostic Preservation & Behavioral Reference
 Before we build tree structures, we must establish spatial boundaries for the existing Phase E diagnostic markers and ensure we understand how Firestorm structures its spatial data.

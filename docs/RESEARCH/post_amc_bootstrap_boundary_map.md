@@ -6,7 +6,6 @@ After `AgentMovementComplete`, which inbound packets should still be treated as 
 ## Scope
 - Live bounded-tail probe observations from `viewer_net` manual example.
 - Firestorm message-template cross-check for packet identity only.
-- No world-state subsystem implementation.
 
 ## Early Post-AMC Protocol Map
 
@@ -23,15 +22,13 @@ After `AgentMovementComplete`, which inbound packets should still be treated as 
 | `AttachedSound` | `0x0000FF0D` (medium 13) | `LikelyBroaderTraffic` | Audio/world side-effect traffic; not bootstrap/handoff control. |
 | unknown medium example | varies | `Unknown` | Some medium IDs can still appear in short tails; keep explicit until repeated and justified. |
 
-## Boundary Rule For This Phase
+## World Ingestion Handoff
 Treat the bootstrap boundary as consolidated once:
 1. `AgentMovementComplete` is observed and stage-confirmed, and
 2. subsequent traffic in the bounded tail is either:
    - transport-control (`PacketAck`, `TestMessage`), or
    - likely broader traffic (`HealthMessage`, `OnlineNotification`, `ViewerEffect`), or
    - explicitly unknown/non-bootstrap.
-
-Do not start broad world-state decoding from this map alone.
 
 ## Diagnostic Preservation
 - Probe report now includes a post-boundary summary:
@@ -41,26 +38,26 @@ Do not start broad world-state decoding from this map alone.
 - `viewer_net` now also has a typed early-traffic scaffold for this phase:
   - `EarlySimulatorTrafficKind`
   - `EarlySimulatorTrafficObservation`
-  - scoped to currently observed non-bootstrap early traffic only (no broad world/object decode).
+  - scoped to currently observed non-bootstrap early traffic.
 - bounded simulator-payload decode now exists for this phase:
   - source: `CoarseLocationUpdate` body
   - currently decoded minimally:
     - location block count
     - first coarse XYZ sample (when present)
-  - this decode is intentionally tiny and is used as a seam-fed diagnostic input, not as broad world/object ingestion.
+  - this decode is used as a seam-fed diagnostic input.
 - bounded simulator-payload decode has been extended with a second tiny source:
   - source: `HealthMessage` body
   - currently decoded minimally:
     - health scalar normalized to basis points
-  - this remains diagnostic-first and is routed through a distinct seam lane/scene role, not broad world/object ingestion.
+  - this remains diagnostic-first and is routed through a distinct seam lane/scene role.
 - bounded multi-input composition note:
   - current decoded lanes (`CoarseLocationUpdate` + `HealthMessage`) now drive one seam-owned composite beacon role
   - composition is gated on both decoded lanes being present
-  - this is treated as object-like diagnostic composition, not broad object/world-state decoding
+  - this is treated as object-like diagnostic composition.
 - bounded object/state slice note:
   - seam now carries an explicit object/state seed lane derived from the same bounded decoded inputs
   - scene now applies a small seam-owned body+aura composition from this lane
-  - this remains below broad world/object decoding and is intended as the first step toward narrow multi-entity ingestion
+  - this is intended as the first step toward multi-entity ingestion
 
 ## Practical Stop Line
 - Continue typing only if a repeated post-AMC packet is clearly startup-gating/bootstrap-relevant.
@@ -70,8 +67,8 @@ Do not start broad world-state decoding from this map alone.
 - Current consolidation is "done enough" for this phase:
   - repeated observed early non-bootstrap packet set is typed in the early-traffic scaffold
   - diagnostics preserve scope separation and per-kind summaries
-- Hard stop remains:
-  - do not start broad object/world-state decoding from this slice.
+- Current boundary:
+  - transition to broader world/object integration is now active.
 
 ## Handoff/Control Watch List (Next Phase)
 - `0x0000FF07` (`CrossedRegion`) and `0x0000FF08` (`ConfirmEnableSimulator`) are high-value region-transition control IDs to type once repeatedly observed.

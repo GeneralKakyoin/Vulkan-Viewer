@@ -7,8 +7,11 @@ authors.workspace = true
 
 [dependencies]
 serde.workspace = true
+gltf = "1.4"
+base64 = "0.22"
 tokio.workspace = true
 tracing.workspace = true
+anyhow.workspace = true
 thiserror.workspace = true
 
 viewer_core = { path = "../viewer_core" }

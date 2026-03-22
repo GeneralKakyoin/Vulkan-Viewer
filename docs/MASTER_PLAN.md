@@ -1,8 +1,8 @@
 # MASTER_PLAN.md
 
-## Purpose
-
-This file is the durable operating map for the rewrite so new agents can resume from repository docs alone.
+The durable operating map for the rewrite. Stable enough to orient a new agent from scratch
+when combined with `ARCHITECTURE.md`, `HANDOFF.md`, and `TASKS.md`.
+Update it only when the mission, scope, or core principles change materially.
 
 ---
 
@@ -20,13 +20,14 @@ This project is a networked virtual-world viewer, not a game engine.
 Long-term parity with conventional SL/OpenSim viewers, delivered in phases.
 
 ### Delivery Phases
-1. Foundation and architecture proof
-2. Real login compatibility
-3. Post-login bootstrap and capability startup
-4. First connected world slice
-5. Asset-backed rendering
-6. Core viewer workflows
-7. Parity expansion and compatibility hardening
+
+1. **Phase 0: Project Setup** (Completed) — Workspace, crate layout, AGENTS.md.
+2. **Phase 1: Rendering Bootstrap** (Completed) — wGPU init, egui, frame clearing.
+3. **Phase 2: Core Runtime Slice** (Completed) — Camera, Scene, movement, depth buffer.
+4. **Phase 3: Networking and Grid Login** (Completed) — LLSD/XML-RPC, real SL login, binary LLUDP handshake.
+5. **Phase 4: First Connected World Slice** (Substantially Complete) — Bounded ingestion seam, coarse neighborhood, avatar proxies, chat UI.
+6. **Phase 5: Asset-Backed Rendering** (Planned) — viewer_asset, LLVolume geometry, textures.
+7. **Phase 6+: Parity expansion** — inventory, map, appearance, rigged mesh.
 
 ---
 
@@ -53,34 +54,55 @@ Long-term parity with conventional SL/OpenSim viewers, delivered in phases.
 
 ---
 
-## Completed Milestones
+## Completed Milestones (Detailed)
 
-- Milestone A: Project Foundation (completed)
-- Milestone B: Runtime Slice (completed)
-- Milestone C: Camera/Input Slice (completed)
-- Milestone D: Spatial Sandbox (completed)
-- Milestone E: Network/Grid Architecture (completed)
-- Milestone F: Firestorm-Informed Login Research (completed)
+- **Milestone A: Project Foundation (Phase 0-1)**
+  - Rust workspace and crate layout
+  - Baseline build/check workflow
+  - Window + event loop (winit)
+  - `wgpu` device/surface/depth init
+  - `egui` overlay integration
 
-### M1 - Auth Payload Compatibility
-Status:
-- Completed (endpoint recognition and auth-path progression achieved)
+- **Milestone B-D: Runtime & Spatial Sandbox (Phase 2)**
+  - Camera data model and input wiring (mouselook + keyboard)
+  - Minimal scene model with typed renderable instances
+  - Spatial debug scene (ground plane, cube, axis marker)
+  - Scene instance roles and MeshKind distinctions
 
-### M2 - Successful Real Login
-Status:
-- Completed (real successful login achieved; sensitive values intentionally not recorded in continuity docs)
+- **Milestone E-F: Network & Login (Phase 3)**
+  - `viewer_net` async connection/session skeleton
+  - `viewer_grid` login adapter boundary
+  - HTTP login transport with redirect/wire-fallback handling
+  - Successful real live SL login (JSON/LLSD/XML-RPC)
+  - Seed capability fetch + EventQueueGet with retry
+  - First-simulator LLUDP handshake live-validated (AMC confirmed)
+  - Post-AMC early traffic typing (Health, CoarseLoc, etc.)
+
+- **Milestone 5: First Connected World Slice (Phase 4)**
+  - In-process live-state worker + startup orchestration
+  - Bounded ingestion seam with multi-lane typed payload paths
+  - Bounded coarse neighborhood decode → seam → scene mapping
+  - Avatar placeholder V1 (coarse + self + proxy mesh)
+  - Chat/IM/nearby-people/profile UI
+  - Pre-world object/state composition with lifecycle
+  - Verified 2026-03-21
 
 ---
 
 ## What Is Proven
 
-- runtime foundation is stable
+- runtime foundation is stable (wgpu/winit/egui stack)
 - renderer architecture is viable
 - crate boundaries are holding
-- real login transport and diagnostics are viable
-- login compatibility has progressed to live successful login
-- first connected-world diagnostic slice is viable through seam-owned runtime mapping
-- bounded pre-world object/state composition is viable with multi-entity and lifecycle behavior
+- real SL login transport and diagnostics are viable (LLSD, XML-RPC, legacy credential shape)
+- live SL login succeeds
+- post-login bootstrap is viable: seed capability, EventQueueGet, SimulatorFeatures
+- first-simulator LLUDP handshake succeeds in live runs (UseCircuitCode → AgentMovementComplete)
+- early post-AMC traffic is typed and classified without broad decode
+- bounded ingestion seam is viable: multi-lane decode → snapshot → seam → scene mapping
+- pre-world object/state composition is viable with multi-entity family + lifecycle
+- bounded coarse neighborhood ingestion is viable
+- avatar placeholder presence (coarse + self + proxy mesh) is viable
 
 ---
 
@@ -88,72 +110,99 @@ Status:
 
 ### Networking / Protocol
 Not implemented yet:
-- seed capability usage
-- event queue startup
-- simulator transport
-- region/world state streaming
+- broad world/object decode (planned)
+- region/world state streaming beyond current bounded diagnostic slice
+- `RegionHandshake` payload decode beyond message classification
+- `SimName` extraction from RegionHandshake
+- Crossed-region / EnableSimulator handoff flow
+
+### Rendering
+Not started yet:
+- Phase 1: Spatial partitioning (Octree + frustum culling) — see `RENDERING_PHASE_1.md`
+- Phase 2: LLVolume primitive geometry generation
+- Phase 3+: Textures, materials, avatar rigging
 
 ### UI / Workflows
 Not implemented yet:
 - real login UI integration
-- chat/inventory/map/preferences workflows
+- inventory/map shell
+- keyboard navigation improvements in nearby/friends UI
 
 ---
 
 ## Current Highest Priorities
 
-### Priority 1 - Seed Capability Bootstrap
+### Priority 1 - Avatar Placeholder Stabilization (T0)
 Goal:
-Use returned bootstrap data safely, starting with seed capability and early capability startup.
+Stabilize avatar lifecycle (seen/updated/stale/removed) through reconnect cycles.
+Ensure self placeholder persists when coarse ID blocks are absent.
+Keep label projection readable while camera moves.
 
-Why:
-- live login success is proven
-- post-login bootstrap is now the critical path
-- simulator/world integration should remain deferred until bootstrap is credible
-
-### Priority 2 - Event Queue Startup
+### Priority 2 - Narrower Bounded World/Object Refinement
 Goal:
-Implement minimal post-login event queue bootstrap after seed capability handling.
+Extend the bounded seam/object-state slice with one more tightly-scoped refinement
+  while focusing on architectural integrity.
 
-### Priority 3 - Simulator Connection Readiness
+### Priority 3 - Spatial Partitioning Phase 1
 Goal:
-Prepare simulator handshake work only after capability/bootstrap startup is documented and stable.
+Replace flat `Vec<RenderableInstance>` with an Octree + frustum culling system
+so the scene can scale beyond diagnostic markers without GPU performance loss.
+See `docs/RENDERING_PHASE_1.md` for the full action plan.
 
 ---
 
 ## Ordered Future Milestones
 
-### M3 - Seed Capability Bootstrap
-### M4 - Event Queue / Early Live State
-### M5 - Simulator Connection
-### M6 - First Connected World Slice
-### M7 - Asset and Appearance Foundations
-### M8 - Viewer Usability Layer
-### M9 - Parity Expansion
+### M6 - Avatar Stabilization + Bounded World Refinement
+### M7 - Spatial Partitioning (Phase 1 Rendering)
+### M8 - Asset and Appearance Foundations (LLVolume + textures)
+### M9 - Viewer Usability Layer (login UI, chat shell, map)
+### M10 - Parity Expansion
 
 ---
 
-## What Must Not Happen
+## Must-Nots
 
-- do not mix grid semantics into `viewer_net`
-- do not mix transport into `viewer_grid`
-- do not jump to simulator/world integration before bootstrap is credible
-- do not rely on chat memory over repository docs
+These are non-negotiable. If a task seems to require crossing one of these lines, stop and document why before proceeding.
+
+- **Do not mix grid semantics into `viewer_net`.**
+  `viewer_net` sends and receives bytes. What those bytes mean for the grid belongs in `viewer_grid`.
+  The `viewer_net` ↔ `viewer_grid` boundary is the most load-bearing architectural line in this project.
+
+- **Do not mix transport mechanics into `viewer_grid`.**
+  Retry policy, codec selection, LLUDP framing — these live in `viewer_net`.
+  `viewer_grid` shapes intent and interprets meaning, nothing else.
+
+- **Do not begin broad world/object decoding before dependencies are met.**
+  Ensure the ingestion seam and spatial partitioning are ready.
+  The active TASKS.md is the authoritative record of what is in scope.
+- **Do not rely on session memory over repository docs.**
+  Docs are the source of truth. A new agent with no prior context must be able to orient from docs alone.
+
+- **Do not create or remove seam-owned scene roles outside the seam apply path.**
+  Only `Scene::apply_world_object_ingestion_seam(...)` is allowed to create or remove seam-owned roles.
+
+- **Do not suppress `Unknown` traffic classifications without a live observation record.**
+  `Unknown` in post-AMC diagnostics is signal. Expanding typed classification requires live evidence
+  documented in `docs/RESEARCH/post_amc_bootstrap_boundary_map.md`.
 
 ---
 
-## Required Update Discipline
+## Firestorm Policy
 
-When meaningful progress is made, update:
-- `docs/CURRENT_STATE.md`
-- `docs/HANDOFF.md`
-- `docs/TASKS.md`
-- relevant `docs/RESEARCH/*` when protocol understanding changes
+Firestorm is used only as a behavior reference. It informs login flow, bootstrap sequencing,
+compatibility expectations, and protocol behavior. It must not dictate project structure,
+architecture, code reuse, or rendering design.
+
+All Firestorm-derived behavior must pass through clean Rust-typed interfaces in the correct owning crate.
+Use the `firestorm_research` skill (`/.agents/skills/firestorm_research/SKILL.md`) when researching Firestorm.
+Never let Firestorm-shaped logic live directly in `viewer_net` or collapse the crate boundary.
 
 ---
 
 ## Current Recommended Next Step
 
-Begin a narrower follow-on bounded world/object refinement slice on top of the completed coarse-neighborhood ingestion path.
+Stabilize the avatar placeholder lifecycle (T0) and extend the bounded seam/object-state slice
+with one small bounded refinement.
 
-Do not move to broad simulator/world object decoding until this bounded seam-owned ingestion step is documented and test-protected.
+See `docs/TASKS.md` for active task detail. See `docs/RENDERING_PHASE_1.md` for the spatial partitioning plan.

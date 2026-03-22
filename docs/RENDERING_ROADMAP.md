@@ -1,9 +1,30 @@
 # RENDERING_ROADMAP.md
 
-## Purpose
-This document outlines the phased roadmap for elevating the `Vulkan-Viewer` (`viewer_render`) from its current prototype state (Phase E, basic diagnostic cubes and markers) to full 3D rendering feature parity with standard Second Life/OpenSim viewers (e.g., Firestorm).
+This document outlines the phased rendering roadmap from the current diagnostic prototype state
+(Phase E: basic cubes and markers) to full 3D rendering feature parity with standard SL/OpenSim viewers.
+Renderer evolution is strictly paced: each phase unlocks the next. Do not skip spatial partitioning
+to reach avatar rigging.
 
-The plan is designed to respect the project's strict crate boundaries: `viewer_net` handles transport, `viewer_core` owns the scene and models, and `viewer_render` executes GPU operations.
+Crate policy: `viewer_net` handles transport; `viewer_core` owns scene and typed models;
+`viewer_render` executes GPU operations. Firestorm is a behavior reference only.
+
+---
+
+## Rendering Key Invariants
+
+- **Pipeline creation is a startup cost**: render pipelines are created once at startup and reused across all frames. Never create a pipeline per-frame or per-object.
+- **GPU resources stay in `viewer_render`**: `Buffer`, `Texture`, `BindGroup`, `RenderPipeline` handles never leave the renderer crate.
+- **Depth texture recreates on resize only**: the depth texture is recreated exactly when the window is resized, not every frame.
+- **MeshKind table must stay complete**: every defined `MeshKind` variant must have a corresponding draw path in `viewer_render`. Adding a new `MeshKind` without a draw path is a hard bug.
+- **Scene iteration drives the draw loop**: the renderer iterates `viewer_core::Scene` instances and dispatches by `MeshKind`. The renderer does not hold its own copy of scene state.
+- **No world/object decode in renderer**: the renderer must never trigger or depend on broad world/object decode. It draws what `viewer_core::Scene` contains.
+
+## Rendering Don'ts
+
+- **Don't jump to avatar rigging before spatial partitioning.** The scene does not scale beyond diagnostic markers without Octree + frustum culling. Rigged avatar meshes will choke the frame rate on a flat Vec.
+- **Don't generate LLVolume geometry before Phase 2 is formally unblocked.** Network-derived geometry requires the ObjectUpdate decode path which is explicitly deferred.
+- **Don't add per-frame uniform buffer allocations.** Per-object transforms should be batched via instance buffers or a single mapped uniform range, not individual `create_buffer` calls per frame.
+- **Don't add textures before the asset worker (`viewer_asset`) has a defined boundary.** The texture/mesh lifecycle boundary must be explicitly owned before the first GPU texture upload.
 
 ---
 
@@ -79,8 +100,10 @@ The plan is designed to respect the project's strict crate boundaries: `viewer_n
     *   *Visual Test:* Time-of-day progression in the sandbox, ensuring sky colors transition smoothly from noon to sunset.
 
 ## Implementation Sequencing (Immediate Next Steps)
-To avoid architectural collapse, we must not jump straight to Avatars or Shaders. The sequence must be:
 
-1.  **Completed:** Phase E (`viewer_app` orchestration, basic entry proxy, diagnostic stability).
-2.  **Next:** **Phase 1 (Spatial Partitioning)** -> Allows the scene to scale beyond a few diagnostic cubes without choking the frame rate.
-3.  **Then:** **Phase 2 (LLVolume / Primitives)** -> Allows the engine to generate physical grid shapes rather than debug cubes.
+To avoid architectural collapse, phases must be implemented in order:
+
+1. **Completed:** Phase E — `viewer_app` orchestration, basic entry proxy, diagnostic stability.
+2. **Next: Phase 1 (Spatial Partitioning)** — allows the scene to scale beyond a few diagnostic cubes without GPU performance collapse. See `RENDERING_PHASE_1.md` for full action plan.
+3. **Then: Phase 2 (LLVolume / Primitives)** — allows the engine to generate physical grid shapes from typed decoded data (requires ObjectUpdate decode to first be unblocked in `TASKS.md`).
+4. **Then: Phases 3–7 in order** — textures, draw pools, materials, avatar rigging, environment.

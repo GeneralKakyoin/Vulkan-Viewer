@@ -393,9 +393,16 @@ It is a boundary-preservation document.
 
 The next likely interface pressure points are:
 
-1. login auth-payload compatibility work
-2. live login/bootstrap field expansion
-3. seed capability bootstrap boundary
-4. event-queue startup interfaces
+1. **Spatial partitioning** — `viewer_core::Scene` interface will change when flat `Vec<RenderableInstance>`
+   is replaced with an Octree; `viewer_render` consumes the visibility result, not the tree itself.
+   See `docs/RENDERING_PHASE_1.md` for plan.
 
-These should be added without collapsing `viewer_net` and `viewer_grid` together.
+2. **RegionHandshake payload decode** — minimal typed block/field extraction will need
+   a bounded new lane in the seam without collapsing `viewer_net`/`viewer_grid` boundary.
+
+3. **Asset pipeline boundary** — when `viewer_asset` becomes active, the boundary between
+   it and `viewer_core` (texture/mesh lifecycle ownership) must be explicitly defined before
+   the first asset request crosses boundaries.
+
+These should be addressed without collapsing `viewer_net` and `viewer_grid` together,
+and without mixing asset lifecycle into renderer internals.
