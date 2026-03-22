@@ -79,6 +79,7 @@ struct AppState {
     last_frame_time: Instant,
     smoothed_fps: f32,
     smoothed_frame_ms: f32,
+    avg_scene_update_ms: f32,
 }
 
 #[derive(Default)]
@@ -2699,6 +2700,7 @@ impl ViewerApp {
             last_frame_time: Instant::now(),
             smoothed_fps: 0.0,
             smoothed_frame_ms: 0.0,
+            avg_scene_update_ms: 0.0,
         })
     }
 }
@@ -2949,6 +2951,7 @@ impl AppState {
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
         let next_world_ingestion_seam =
             WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref());
+        let scene_update_start = Instant::now();
         if should_apply_live_visual_snapshot(
             self.last_applied_live_visual_snapshot.as_ref(),
             next_live_visual_snapshot.as_ref(),
@@ -2971,6 +2974,9 @@ impl AppState {
             &self.world_avatars,
             self.renderer.avatar_render_mode(),
         );
+        let scene_update_dt = scene_update_start.elapsed().as_secs_f32() * 1000.0;
+        self.avg_scene_update_ms += (scene_update_dt - self.avg_scene_update_ms) * 0.15;
+
         self.world_ingestion_seam = next_world_ingestion_seam;
 
         let window = self.window.clone();
@@ -2992,9 +2998,15 @@ impl AppState {
         let mut pending_profile_refresh: Option<(String, Option<AvatarProfileTab>)> = None;
         let mut pending_open_external_url: Option<String> = None;
 
+        let aspect = self.renderer.aspect_ratio();
+        let frustum = self.camera.frustum(aspect);
+        let visibility_list = self.scene.query_frustum(&frustum);
+        let metrics = self.scene.metrics_with_visibility(&visibility_list);
+
         let render_result = self.renderer.render_frame(
             &camera,
             &self.scene,
+            &visibility_list,
             |device, queue, encoder, target_view, surface_size| {
                 let actions = ui.render(
                     &window,
@@ -3015,6 +3027,9 @@ impl AppState {
                     profile_image_bytes,
                     self.smoothed_fps,
                     self.smoothed_frame_ms,
+                    self.avg_scene_update_ms,
+                    metrics.total_instances,
+                    metrics.visible_proxies,
                 );
                 pending_chat_send = actions.nearby_chat_send;
                 pending_direct_im_send = actions.direct_im_send;

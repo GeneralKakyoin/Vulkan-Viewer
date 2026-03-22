@@ -390,6 +390,9 @@ impl UiSystem {
         profile_image_bytes: &BTreeMap<String, Vec<u8>>,
         fps: f32,
         frame_ms: f32,
+        avg_scene_update_ms: f32,
+        total_instances: usize,
+        visible_proxies: usize,
     ) -> UiActions {
         if surface_size.width == 0 || surface_size.height == 0 {
             return UiActions::default();
@@ -450,6 +453,10 @@ impl UiSystem {
                 .show(ctx, |ui| {
                     ui.label(format!("FPS: {:.1}", fps));
                     ui.label(format!("Frame: {:.2} ms", frame_ms));
+                    ui.separator();
+                    ui.label(format!("Scene Update: {:.2} ms", avg_scene_update_ms));
+                    ui.label(format!("Total Instances: {}", total_instances));
+                    ui.label(format!("Visible Proxies: {}", visible_proxies));
                 });
 
             egui::Window::new("Chat + IM")

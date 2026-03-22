@@ -1,11 +1,27 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod spatial;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     pub position: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+}
+
+impl Camera {
+    pub fn frustum(&self, aspect: f32) -> Frustum {
+        let forward = [
+            self.pitch.cos() * self.yaw.cos(),
+            self.pitch.sin(),
+            self.pitch.cos() * self.yaw.sin(),
+        ];
+        let view = look_to_rh(self.position, forward, [0.0, 1.0, 0.0]);
+        let projection = perspective_rh_zo(60.0f32.to_radians(), aspect, 0.1, 1000.0);
+        let view_projection = mat4_mul(projection, view);
+        Frustum::from_view_projection(view_projection)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,10 +74,145 @@ pub enum InstanceRole {
     WorldAvatarPlaceholderOther,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aabb {
+    pub center: [f32; 3],
+    pub size: [f32; 3], // Half-extents
+}
+
+impl Aabb {
+    pub fn new(center: [f32; 3], size: [f32; 3]) -> Self {
+        Self { center, size }
+    }
+
+    pub fn min(&self) -> [f32; 3] {
+        [
+            self.center[0] - self.size[0],
+            self.center[1] - self.size[1],
+            self.center[2] - self.size[2],
+        ]
+    }
+
+    pub fn max(&self) -> [f32; 3] {
+        [
+            self.center[0] + self.size[0],
+            self.center[1] + self.size[1],
+            self.center[2] + self.size[2],
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntersectionResult {
+    Inside,
+    Outside,
+    Intersecting,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Plane {
+    pub normal: [f32; 3],
+    pub distance: f32, // Distance from origin along normal
+}
+
+impl Plane {
+    pub fn new(normal: [f32; 3], distance: f32) -> Self {
+        Self { normal, distance }
+    }
+
+    pub fn dot_coord(&self, point: [f32; 3]) -> f32 {
+        self.normal[0] * point[0] + self.normal[1] * point[1] + self.normal[2] * point[2] + self.distance
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Frustum {
+    pub planes: [Plane; 6], // Left, Right, Bottom, Top, Near, Far
+}
+
+impl Frustum {
+    pub fn from_view_projection(m: [[f32; 4]; 4]) -> Self {
+        let mut planes = [Plane::default(); 6];
+
+        // Left plane
+        planes[0] = Plane::new(
+            [m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0]],
+            m[3][3] + m[3][0],
+        );
+        // Right plane
+        planes[1] = Plane::new(
+            [m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0]],
+            m[3][3] - m[3][0],
+        );
+        // Bottom plane
+        planes[2] = Plane::new(
+            [m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1]],
+            m[3][3] + m[3][1],
+        );
+        // Top plane
+        planes[3] = Plane::new(
+            [m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1]],
+            m[3][3] - m[3][1],
+        );
+        // Near plane
+        planes[4] = Plane::new(
+            [m[0][2], m[1][2], m[2][2]],
+            m[3][2],
+        );
+        // Far plane
+        planes[5] = Plane::new(
+            [m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2]],
+            m[3][3] - m[3][2],
+        );
+
+        // Normalize planes
+        for plane in &mut planes {
+            let length = (plane.normal[0].powi(2) + plane.normal[1].powi(2) + plane.normal[2].powi(2)).sqrt();
+            if length > 0.0 {
+                plane.normal[0] /= length;
+                plane.normal[1] /= length;
+                plane.normal[2] /= length;
+                plane.distance /= length;
+            }
+        }
+
+        Self { planes }
+    }
+
+    pub fn contains_aabb(&self, aabb: &Aabb) -> IntersectionResult {
+        let mut result = IntersectionResult::Inside;
+
+        for plane in &self.planes {
+            // Compute the effective radius of the AABB projected onto the plane normal
+            let r = aabb.size[0] * plane.normal[0].abs()
+                  + aabb.size[1] * plane.normal[1].abs()
+                  + aabb.size[2] * plane.normal[2].abs();
+
+            let d = plane.dot_coord(aabb.center);
+
+            if d < -r {
+                // Completely behind the plane
+                return IntersectionResult::Outside;
+            } else if d < r {
+                // Intersecting the plane
+                result = IntersectionResult::Intersecting;
+            }
+        }
+
+        result
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: [f32; 3],
     pub scale: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SceneInstanceMetrics {
+    pub total_instances: usize,
+    pub visible_proxies: usize,
 }
 
 impl Default for Transform {
@@ -81,9 +232,37 @@ pub struct RenderableInstance {
     pub color: [f32; 3],
 }
 
-#[derive(Debug, Clone, Default)]
+impl RenderableInstance {
+    pub fn aabb(&self) -> Aabb {
+        // Our basic primitives (Cube, GroundPlane) are bounded within [-0.5, 0.5] in local space
+        // so their half-extents are half of their scale magnitude.
+        let half_extents = [
+            (self.transform.scale[0] * 0.5).abs(),
+            (self.transform.scale[1] * 0.5).abs(),
+            (self.transform.scale[2] * 0.5).abs(),
+        ];
+        Aabb {
+            center: self.transform.position,
+            size: half_extents,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Scene {
-    pub instances: Vec<RenderableInstance>,
+    pub instances: BTreeMap<usize, RenderableInstance>,
+    pub octree: crate::spatial::Octree,
+    pub next_id: usize,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            instances: BTreeMap::new(),
+            octree: crate::spatial::Octree::new(1024.0), // Large enough for current diagnostics
+            next_id: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1308,66 +1487,129 @@ impl WorldObjectIngestionAdapter {
 }
 
 impl Scene {
+    pub fn metrics(&self) -> SceneInstanceMetrics {
+        SceneInstanceMetrics {
+            total_instances: self.instances.len(),
+            visible_proxies: self.instances.len(),
+        }
+    }
+
+    pub fn metrics_with_visibility(&self, visible_ids: &[usize]) -> SceneInstanceMetrics {
+        SceneInstanceMetrics {
+            total_instances: self.instances.len(),
+            visible_proxies: visible_ids.len(),
+        }
+    }
+
+    pub fn query_frustum(&self, frustum: &Frustum) -> Vec<usize> {
+        self.octree.query_frustum(frustum)
+    }
+
     pub fn prototype() -> Self {
-        Self {
-            instances: vec![
-                RenderableInstance {
-                    mesh: MeshKind::AxisMarker,
-                    role: InstanceRole::SceneStatic,
-                    transform: Transform::default(),
-                    color: [1.0, 1.0, 1.0],
-                },
-                RenderableInstance {
-                    mesh: MeshKind::GroundPlane,
-                    role: InstanceRole::SceneStatic,
-                    transform: Transform {
-                        position: [3.0, 0.0, 0.0],
-                        scale: [8.0, 1.0, 8.0],
-                    },
-                    color: [0.22, 0.24, 0.28],
-                },
-                RenderableInstance {
-                    mesh: MeshKind::Cube,
-                    role: InstanceRole::SceneStatic,
-                    transform: Transform {
-                        position: [3.0, 0.5, 0.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
-                    color: [0.85, 0.35, 0.25],
-                },
-            ],
+        let mut scene = Self::default();
+        scene.insert_instance(RenderableInstance {
+            mesh: MeshKind::AxisMarker,
+            role: InstanceRole::SceneStatic,
+            transform: Transform::default(),
+            color: [0.60, 0.65, 0.70],
+        });
+        scene.insert_instance(RenderableInstance {
+            mesh: MeshKind::GroundPlane,
+            role: InstanceRole::SceneStatic,
+            transform: Transform {
+                position: [0.0, -0.01, 0.0],
+                scale: [256.0, 1.0, 256.0],
+            },
+            color: [0.18, 0.20, 0.22],
+        });
+        scene.insert_instance(RenderableInstance {
+            mesh: MeshKind::Cube,
+            role: InstanceRole::SceneStatic,
+            transform: Transform {
+                position: [0.0, 0.5, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            color: [0.85, 0.35, 0.25],
+        });
+        scene
+    }
+
+    pub fn insert_instance(&mut self, instance: RenderableInstance) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        let aabb = instance.aabb();
+        self.instances.insert(id, instance);
+        self.octree.insert(id, aabb);
+        id
+    }
+
+    pub fn upsert_role(
+        &mut self,
+        role: InstanceRole,
+        mesh: MeshKind,
+        transform: Transform,
+        color: [f32; 3],
+    ) {
+        let existing_id = self
+            .instances
+            .iter()
+            .find(|(_, i)| i.role == role)
+            .map(|(id, _)| *id);
+
+        if let Some(id) = existing_id {
+            let instance = self.instances.get_mut(&id).unwrap();
+            instance.transform = transform;
+            instance.color = color;
+            let aabb = instance.aabb();
+            self.octree.remove(id);
+            self.octree.insert(id, aabb);
+        } else {
+            self.insert_instance(RenderableInstance {
+                mesh,
+                role,
+                transform,
+                color,
+            });
         }
     }
 
     pub fn apply_live_visual_snapshot(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
         let world_presence = FirstRegionPresence::from_live_snapshot(snapshot);
         let world_slice = WorldDiagnosticSlice::from_live_snapshot(snapshot);
-        let Some(cube) = self.instances.iter_mut().find(|instance| {
+        
+        // Find existing SceneStatic Cube by role and mesh
+        let cube_id = self.instances.iter().find(|(_, instance)| {
             instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
-        }) else {
+        }).map(|(id, _)| *id);
+
+        if let Some(id) = cube_id {
+            let cube = self.instances.get_mut(&id).unwrap();
+            cube.color = match snapshot {
+                Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
+                    [0.20, 0.82, 0.34]
+                }
+                Some(state) if state.logged_in => [0.94, 0.74, 0.20],
+                _ => [0.85, 0.35, 0.25],
+            };
+
+            cube.transform.scale = match snapshot {
+                Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
+                    [1.25, 1.25, 1.25]
+                }
+                Some(state) if state.logged_in => [1.10, 1.10, 1.10],
+                _ => [1.0, 1.0, 1.0],
+            };
+            let aabb = cube.aabb();
+            self.octree.remove(id);
+            self.octree.insert(id, aabb);
+        } else {
             return;
-        };
-
-        cube.color = match snapshot {
-            Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
-                [0.20, 0.82, 0.34]
-            }
-            Some(state) if state.logged_in => [0.94, 0.74, 0.20],
-            _ => [0.85, 0.35, 0.25],
-        };
-
-        cube.transform.scale = match snapshot {
-            Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
-                [1.25, 1.25, 1.25]
-            }
-            Some(state) if state.logged_in => [1.10, 1.10, 1.10],
-            _ => [1.0, 1.0, 1.0],
-        };
+        }
 
         let live_transform = live_placeholder_transform(snapshot);
         let live_color = live_placeholder_color(snapshot);
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::LivePlaceholder,
             MeshKind::AxisMarker,
             live_transform,
@@ -1375,7 +1617,7 @@ impl Scene {
         );
 
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::WorldRegionAnchor,
             MeshKind::Cube,
             world_region_anchor_transform(world_presence),
@@ -1383,7 +1625,7 @@ impl Scene {
         );
 
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::WorldEntryBeacon,
             MeshKind::AxisMarker,
             world_entry_beacon_transform(world_presence),
@@ -1391,7 +1633,7 @@ impl Scene {
         );
 
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::WorldSimTargetMarker,
             MeshKind::AxisMarker,
             world_sim_target_transform(snapshot, world_presence),
@@ -1399,21 +1641,21 @@ impl Scene {
         );
 
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::WorldTrafficBroaderPillar,
             MeshKind::Cube,
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::Broader),
             world_traffic_pillar_color(TrafficPillarKind::Broader),
         );
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::WorldTrafficUnknownPillar,
             MeshKind::Cube,
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::Unknown),
             world_traffic_pillar_color(TrafficPillarKind::Unknown),
         );
         upsert_instance(
-            &mut self.instances,
+            self,
             InstanceRole::WorldTrafficRegionControlPillar,
             MeshKind::Cube,
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::RegionControl),
@@ -1429,14 +1671,14 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy)
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionProxy,
                 MeshKind::Cube,
                 world_ingestion_proxy_transform(item),
                 world_ingestion_proxy_color(item),
             );
         } else {
-            remove_instance(&mut self.instances, InstanceRole::WorldIngestionProxy);
+            remove_instance(self, InstanceRole::WorldIngestionProxy);
         }
 
         if let Some(item) = seam
@@ -1446,7 +1688,7 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::TrafficSignalPayload)
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionTrafficPayload,
                 MeshKind::AxisMarker,
                 world_ingestion_traffic_payload_transform(item),
@@ -1454,7 +1696,7 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionTrafficPayload,
             );
         }
@@ -1466,7 +1708,7 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedSimulatorEndpointPayload)
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedEndpointPayload,
                 MeshKind::AxisMarker,
                 world_ingestion_decoded_endpoint_transform(item),
@@ -1474,7 +1716,7 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedEndpointPayload,
             );
         }
@@ -1486,7 +1728,7 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload)
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseLocationPayload,
                 MeshKind::AxisMarker,
                 world_ingestion_decoded_coarse_location_transform(item),
@@ -1494,7 +1736,7 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseLocationPayload,
             );
         }
@@ -1505,21 +1747,21 @@ impl Scene {
             })
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload,
                 MeshKind::Cube,
                 world_ingestion_decoded_coarse_neighborhood_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_color(item),
             );
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA,
                 MeshKind::AxisMarker,
                 world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_satellite_a_color(item),
             );
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB,
                 MeshKind::AxisMarker,
                 world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(item),
@@ -1527,15 +1769,15 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB,
             );
         }
@@ -1547,7 +1789,7 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedHealthPayload,
                 MeshKind::Cube,
                 world_ingestion_decoded_health_transform(item),
@@ -1555,7 +1797,7 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedHealthPayload,
             );
         }
@@ -1567,7 +1809,7 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedViewerTimePayload)
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedViewerTimePayload,
                 MeshKind::AxisMarker,
                 world_ingestion_decoded_viewer_time_transform(item),
@@ -1575,7 +1817,7 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedViewerTimePayload,
             );
         }
@@ -1592,7 +1834,7 @@ impl Scene {
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload);
         if let (Some(coarse), Some(health)) = (coarse_item, health_item) {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCompositeBeacon,
                 MeshKind::Cube,
                 world_ingestion_decoded_composite_transform(coarse, health),
@@ -1600,7 +1842,7 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldIngestionDecodedCompositeBeacon,
             );
         }
@@ -1613,14 +1855,14 @@ impl Scene {
         {
             let entity_count = world_object_state_entity_count(item);
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityBody,
                 MeshKind::Cube,
                 world_object_state_entity_body_transform(item, 0),
                 world_object_state_entity_body_color(item, 0),
             );
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityAura,
                 MeshKind::AxisMarker,
                 world_object_state_entity_aura_transform(item, 0),
@@ -1628,14 +1870,14 @@ impl Scene {
             );
             if entity_count >= 2 {
                 upsert_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityWingBody,
                     MeshKind::Cube,
                     world_object_state_entity_body_transform(item, 1),
                     world_object_state_entity_body_color(item, 1),
                 );
                 upsert_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityWingAura,
                     MeshKind::AxisMarker,
                     world_object_state_entity_aura_transform(item, 1),
@@ -1643,24 +1885,24 @@ impl Scene {
                 );
             } else {
                 remove_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityWingBody,
                 );
                 remove_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityWingAura,
                 );
             }
             if entity_count >= 3 {
                 upsert_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityGuardBody,
                     MeshKind::Cube,
                     world_object_state_entity_body_transform(item, 2),
                     world_object_state_entity_body_color(item, 2),
                 );
                 upsert_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityGuardAura,
                     MeshKind::AxisMarker,
                     world_object_state_entity_aura_transform(item, 2),
@@ -1668,16 +1910,16 @@ impl Scene {
                 );
             } else {
                 remove_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityGuardBody,
                 );
                 remove_instance(
-                    &mut self.instances,
+                    self,
                     InstanceRole::WorldObjectStateEntityGuardAura,
                 );
             }
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityClusterCore,
                 MeshKind::AxisMarker,
                 world_object_state_entity_cluster_core_transform(item, entity_count),
@@ -1685,31 +1927,31 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityBody,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityAura,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityWingBody,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityWingAura,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityGuardBody,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityGuardAura,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityClusterCore,
             );
         }
@@ -1720,14 +1962,14 @@ impl Scene {
             })
         {
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityPulse,
                 MeshKind::AxisMarker,
                 world_object_state_entity_pulse_transform(item),
                 world_object_state_entity_pulse_color(item),
             );
             upsert_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityStability,
                 MeshKind::Cube,
                 world_object_state_entity_stability_transform(item),
@@ -1735,11 +1977,11 @@ impl Scene {
             );
         } else {
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityPulse,
             );
             remove_instance(
-                &mut self.instances,
+                self,
                 InstanceRole::WorldObjectStateEntityStability,
             );
         }
@@ -1750,10 +1992,19 @@ impl Scene {
         avatars: &[WorldAvatarPlaceholder],
         mode: AvatarRenderMode,
     ) {
-        self.instances.retain(|instance| {
-            instance.role != InstanceRole::WorldAvatarPlaceholderSelf
-                && instance.role != InstanceRole::WorldAvatarPlaceholderOther
-        });
+        let to_remove: Vec<usize> = self.instances.iter()
+            .filter(|(_, instance)| {
+                instance.role == InstanceRole::WorldAvatarPlaceholderSelf
+                || instance.role == InstanceRole::WorldAvatarPlaceholderOther
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        
+        for id in to_remove {
+            self.instances.remove(&id);
+            self.octree.remove(id);
+        }
+
         for avatar in avatars {
             let (mesh, scale, color) = match (mode, avatar.is_self, avatar.stale) {
                 (AvatarRenderMode::Proxy, true, _) => {
@@ -1775,7 +2026,7 @@ impl Scene {
                     (MeshKind::Cube, [0.30, 1.10, 0.30], [0.30, 0.74, 0.98])
                 }
             };
-            self.instances.push(RenderableInstance {
+            self.insert_instance(RenderableInstance {
                 mesh,
                 role: if avatar.is_self {
                     InstanceRole::WorldAvatarPlaceholderSelf
@@ -1793,28 +2044,20 @@ impl Scene {
 }
 
 fn upsert_instance(
-    instances: &mut Vec<RenderableInstance>,
+    scene: &mut Scene,
     role: InstanceRole,
     mesh: MeshKind,
     transform: Transform,
     color: [f32; 3],
 ) {
-    if let Some(instance) = instances.iter_mut().find(|instance| instance.role == role) {
-        instance.transform = transform;
-        instance.color = color;
-    } else {
-        instances.push(RenderableInstance {
-            mesh,
-            role,
-            transform,
-            color,
-        });
-    }
+    scene.upsert_role(role, mesh, transform, color);
 }
 
-fn remove_instance(instances: &mut Vec<RenderableInstance>, role: InstanceRole) {
-    if let Some(index) = instances.iter().position(|instance| instance.role == role) {
-        instances.remove(index);
+fn remove_instance(scene: &mut Scene, role: InstanceRole) {
+    let id = scene.instances.iter().find(|(_, i)| i.role == role).map(|(id, _)| *id);
+    if let Some(id) = id {
+        scene.instances.remove(&id);
+        scene.octree.remove(id);
     }
 }
 
@@ -1840,7 +2083,7 @@ fn world_region_anchor_transform(presence: FirstRegionPresence) -> Transform {
     let [offset_x, offset_z] = world_presence_offset(presence.region_coords);
     Transform {
         position: [3.0 + offset_x, 0.25, offset_z],
-        scale: [0.35, 0.35, 0.35],
+        scale: [0.45, 0.45, 0.45],
     }
 }
 
@@ -1976,8 +2219,10 @@ fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform 
         WorldEntryStage::Connected => (0.28, [0.18, 0.18, 0.18]),
         WorldEntryStage::Offline => (0.22, [0.12, 0.12, 0.12]),
     };
+    let time_updates = item.decoded_viewer_time_updates.unwrap_or(0);
+    let hover = (((time_updates % 16) as f32 / 16.0) * core::f32::consts::TAU).cos() * 0.05;
     Transform {
-        position: [base_x, y, base_z + 0.22],
+        position: [base_x, y + hover, base_z + 0.22],
         scale,
     }
 }
@@ -1988,7 +2233,7 @@ fn world_ingestion_proxy_color(item: WorldObjectIngestionItem) -> [f32; 3] {
     }
     match item.stage {
         WorldEntryStage::EnteredFirstRegion => [0.20, 0.78, 0.96],
-        WorldEntryStage::Connected => [0.96, 0.74, 0.24],
+        WorldEntryStage::Connected => [0.82, 0.44, 0.95],
         WorldEntryStage::Offline => [0.42, 0.40, 0.36],
     }
 }
@@ -2259,7 +2504,9 @@ fn world_object_state_entity_body_transform(
     let x = center_x + orbit_radius * orbit_angle.cos();
     let z = center_z + orbit_radius * orbit_angle.sin();
     let y = center_y;
-    let scale = (0.22 + health * 0.18 + scale_bias).clamp(0.18, 0.44);
+    let time_updates = item.decoded_viewer_time_updates.unwrap_or(0);
+    let pulse = (((time_updates % 12) as f32 / 12.0) * core::f32::consts::TAU).sin() * 0.04;
+    let scale = (0.22 + health * 0.18 + scale_bias + pulse).clamp(0.14, 0.52);
     Transform {
         position: [x, y + y_bias, z],
         scale: [scale, scale * 1.25, scale],
@@ -2555,73 +2802,11 @@ impl Camera {
     }
 }
 
-fn perspective_rh_zo(fovy_radians: f32, aspect: f32, znear: f32, zfar: f32) -> [[f32; 4]; 4] {
-    let f = 1.0 / (0.5 * fovy_radians).tan();
-    [
-        [f / aspect, 0.0, 0.0, 0.0],
-        [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, zfar / (znear - zfar), -1.0],
-        [0.0, 0.0, (zfar * znear) / (znear - zfar), 0.0],
-    ]
-}
+// Matrix math moved to end of file as public items
 
-fn look_to_rh(eye: [f32; 3], direction: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
-    let forward = normalize(direction);
-    let side = normalize(cross(up, forward));
-    let camera_up = cross(forward, side);
-    [
-        [side[0], camera_up[0], -forward[0], 0.0],
-        [side[1], camera_up[1], -forward[1], 0.0],
-        [side[2], camera_up[2], -forward[2], 0.0],
-        [
-            -dot(side, eye),
-            -dot(camera_up, eye),
-            dot(forward, eye),
-            1.0,
-        ],
-    ]
-}
 
-fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut out = [[0.0; 4]; 4];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c][r] =
-                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
-        }
-    }
-    out
-}
+// Shared math functions moved to end of file as public items
 
-fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
-    [
-        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2] + m[3][0] * v[3],
-        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2] + m[3][1] * v[3],
-        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2] + m[3][2] * v[3],
-        m[0][3] * v[0] + m[1][3] * v[1] + m[2][3] * v[2] + m[3][3] * v[3],
-    ]
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let len = (dot(v, v)).sqrt();
-    if len > 0.0 {
-        [v[0] / len, v[1] / len, v[2] / len]
-    } else {
-        [0.0, 0.0, -1.0]
-    }
-}
 
 #[cfg(test)]
 mod social_tests {
@@ -2737,7 +2922,7 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, None);
         let cube = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
             })
@@ -2746,74 +2931,74 @@ mod tests {
         assert_eq!(cube.transform.scale, [1.0, 1.0, 1.0]);
         let live_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::LivePlaceholder)
             .expect("live placeholder should exist");
         assert_eq!(live_anchor.mesh, MeshKind::AxisMarker);
         assert_eq!(live_anchor.transform.position, [3.0, 0.9, 0.0]);
         let region_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
         assert_eq!(region_anchor.mesh, MeshKind::Cube);
         assert_eq!(region_anchor.color, [0.45, 0.37, 0.33]);
         let entry_beacon = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
         assert_eq!(entry_beacon.mesh, MeshKind::AxisMarker);
         assert_eq!(entry_beacon.transform.position[1], 1.0);
         let target = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
         assert_eq!(target.color, [0.48, 0.44, 0.38]);
         let broader = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldTrafficBroaderPillar)
             .expect("broader traffic pillar should exist");
         assert_eq!(broader.transform.scale, [0.20, 0.18, 0.20]);
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionProxy)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
     }
@@ -2825,7 +3010,7 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let cube = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
             })
@@ -2834,68 +3019,68 @@ mod tests {
         assert_eq!(cube.transform.scale, [1.10, 1.10, 1.10]);
         let live_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::LivePlaceholder)
             .expect("live placeholder should exist");
         assert_eq!(live_anchor.transform.position[1], 1.0);
         assert_eq!(live_anchor.transform.scale, [0.45, 0.45, 0.45]);
         let region_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
         assert_eq!(region_anchor.color, [0.98, 0.80, 0.32]);
         let entry_beacon = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
         assert_eq!(entry_beacon.color, [0.98, 0.83, 0.24]);
         assert_eq!(entry_beacon.transform.position[1], 1.4);
         let target = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
         assert_eq!(target.color, [0.48, 0.44, 0.38]);
         let seam_proxy = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
         assert_eq!(seam_proxy.mesh, MeshKind::Cube);
-        assert_eq!(seam_proxy.transform.position[1], 0.28);
+        assert_eq!(seam_proxy.transform.position[1], 0.33);
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
     }
@@ -2907,7 +3092,7 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let cube = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.mesh == MeshKind::Cube && instance.role == InstanceRole::SceneStatic
             })
@@ -2916,67 +3101,67 @@ mod tests {
         assert_eq!(cube.transform.scale, [1.25, 1.25, 1.25]);
         let live_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::LivePlaceholder)
             .expect("live placeholder should exist");
         assert_eq!(live_anchor.transform.position[1], 1.5);
         assert_eq!(live_anchor.transform.scale, [0.65, 0.65, 0.65]);
         let region_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
         assert_eq!(region_anchor.color, [0.26, 0.90, 0.64]);
         let entry_beacon = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
         assert_eq!(entry_beacon.color, [0.12, 0.86, 0.98]);
         assert_eq!(entry_beacon.transform.position[1], 2.0);
         let target = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
         assert_eq!(target.color, [0.48, 0.44, 0.38]);
         let seam_proxy = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
-        assert_eq!(seam_proxy.transform.position[1], 0.36);
+        assert!((seam_proxy.transform.position[1] - 0.41).abs() < 1e-5);
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
     }
@@ -3019,57 +3204,57 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let live_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::LivePlaceholder)
             .expect("live placeholder should exist");
         assert_ne!(live_anchor.transform.position, [3.0, 0.9, 0.0]);
         assert_eq!(live_anchor.color, [0.12, 0.86, 0.98]);
         let region_anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
         assert_ne!(region_anchor.transform.position, [3.0, 0.25, 0.0]);
         let entry_beacon = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
         assert_ne!(entry_beacon.transform.position, [3.0, 2.0, 0.0]);
         let target = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
         assert_ne!(target.transform.position, [3.0, 1.2, 0.0]);
         assert_eq!(target.color, [0.32, 0.86, 0.98]);
         let broader = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldTrafficBroaderPillar)
             .expect("broader traffic pillar should exist");
         let unknown = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldTrafficUnknownPillar)
             .expect("unknown traffic pillar should exist");
         let region_control = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldTrafficRegionControlPillar)
             .expect("region control traffic pillar should exist");
         assert!(broader.transform.scale[1] > unknown.transform.scale[1]);
         assert!(unknown.transform.scale[1] >= region_control.transform.scale[1]);
         let seam_proxy = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
         assert_ne!(seam_proxy.transform.position, [3.0, 0.32, -0.85]);
         assert_eq!(seam_proxy.color, [0.20, 0.78, 0.96]);
         let traffic_payload = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionTrafficPayload)
             .expect("ingestion traffic payload marker should exist");
         assert_eq!(traffic_payload.mesh, MeshKind::AxisMarker);
@@ -3077,7 +3262,7 @@ mod tests {
         assert_eq!(traffic_payload.color, [0.30, 0.72, 0.94]);
         let decoded_endpoint_payload = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedEndpointPayload)
             .expect("decoded endpoint payload marker should exist");
         assert_eq!(decoded_endpoint_payload.mesh, MeshKind::AxisMarker);
@@ -3085,14 +3270,14 @@ mod tests {
         assert_eq!(decoded_endpoint_payload.color, [0.30, 0.84, 0.96]);
         let decoded_health_payload = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedHealthPayload)
             .expect("decoded health payload marker should exist");
         assert_eq!(decoded_health_payload.mesh, MeshKind::Cube);
         assert!(decoded_health_payload.transform.position[1] > 0.25);
         let decoded_coarse_payload = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.role == InstanceRole::WorldIngestionDecodedCoarseLocationPayload
             })
@@ -3100,64 +3285,64 @@ mod tests {
         assert_eq!(decoded_coarse_payload.mesh, MeshKind::AxisMarker);
         let composite = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedCompositeBeacon)
             .expect("decoded composite beacon should exist");
         assert_eq!(composite.mesh, MeshKind::Cube);
         assert!(composite.transform.position[1] > 0.3);
         let entity_body = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
             .expect("object-state entity body should exist");
         assert_eq!(entity_body.mesh, MeshKind::Cube);
         let entity_aura = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityAura)
             .expect("object-state entity aura should exist");
         assert_eq!(entity_aura.mesh, MeshKind::AxisMarker);
         assert!(entity_aura.transform.position[1] > entity_body.transform.position[1]);
         let wing_body = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
             .expect("object-state wing body should exist");
         assert_eq!(wing_body.mesh, MeshKind::Cube);
         let wing_aura = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingAura)
             .expect("object-state wing aura should exist");
         assert_eq!(wing_aura.mesh, MeshKind::AxisMarker);
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
         );
         let cluster_core = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
             .expect("object-state cluster core should exist");
         assert_eq!(cluster_core.mesh, MeshKind::AxisMarker);
         assert!(cluster_core.transform.position[1] > entity_aura.transform.position[1]);
         let pulse = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("object-state pulse should exist");
         assert_eq!(pulse.mesh, MeshKind::AxisMarker);
         let stability = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
             .expect("object-state stability should exist");
         assert_eq!(stability.mesh, MeshKind::Cube);
@@ -3676,14 +3861,14 @@ mod tests {
         snapshot.decoded_viewer_time_body_len = Some(22);
         snapshot.decoded_viewer_time_signature = Some(0x01020304);
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(scene.instances.iter().any(|instance| {
+        assert!(scene.instances.values().any(|instance| {
             instance.role == InstanceRole::WorldIngestionDecodedViewerTimePayload
         }));
 
         snapshot.decoded_viewer_time_body_len = None;
         snapshot.decoded_viewer_time_signature = None;
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
         }));
     }
@@ -3703,13 +3888,13 @@ mod tests {
         snapshot.decoded_coarse_third_y = Some(60);
         snapshot.decoded_coarse_third_z = Some(22);
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(scene.instances.iter().any(|instance| {
+        assert!(scene.instances.values().any(|instance| {
             instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
         }));
-        assert!(scene.instances.iter().any(|instance| {
+        assert!(scene.instances.values().any(|instance| {
             instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
         }));
-        assert!(scene.instances.iter().any(|instance| {
+        assert!(scene.instances.values().any(|instance| {
             instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
         }));
 
@@ -3720,19 +3905,19 @@ mod tests {
         snapshot.decoded_coarse_third_y = None;
         snapshot.decoded_coarse_third_z = None;
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
         }));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
         }));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
         }));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
         }));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
         }));
     }
@@ -3757,21 +3942,21 @@ mod tests {
 
         let hub = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
             })
             .expect("coarse neighborhood hub should exist");
         let sat_a = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteA
             })
             .expect("coarse neighborhood satellite A should exist");
         let sat_b = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| {
                 instance.role == InstanceRole::WorldIngestionDecodedCoarseNeighborhoodSatelliteB
             })
@@ -3818,61 +4003,61 @@ mod tests {
             observed_at_unix_ms: 9,
         };
         apply_scene_from_snapshot(&mut scene, Some(&coarse_only));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
         );
 
@@ -3884,61 +4069,61 @@ mod tests {
         health_only.decoded_health_updates = 1;
         health_only.decoded_health_last_basis_points = Some(6200);
         apply_scene_from_snapshot(&mut scene, Some(&health_only));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCompositeBeacon
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
         );
     }
@@ -3957,37 +4142,37 @@ mod tests {
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
         );
 
@@ -3997,13 +4182,13 @@ mod tests {
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
         );
 
@@ -4013,13 +4198,13 @@ mod tests {
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldObjectStateEntityGuardBody)
         );
     }
@@ -4099,32 +4284,32 @@ mod tests {
 
         let anchor = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
         let body = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
             .expect("entity body should exist");
         let core = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityClusterCore)
             .expect("cluster core should exist");
         let pulse = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("pulse should exist");
         let stability = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityStability)
             .expect("stability should exist");
         let traffic = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionTrafficPayload)
             .expect("traffic payload should exist");
 
@@ -4153,17 +4338,17 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let dormant_pulse = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("dormant pulse should exist");
         let dormant_body = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
             .expect("dormant body should exist");
         let dormant_wing = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
             .expect("dormant wing should exist");
         let dormant_spacing =
@@ -4176,17 +4361,17 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let active_pulse = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("active pulse should exist");
         let active_body = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityBody)
             .expect("active body should exist");
         let active_wing = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityWingBody)
             .expect("active wing should exist");
         let active_spacing =
@@ -4217,7 +4402,7 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let dormant_pulse = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("dormant pulse should exist");
         let dormant_pulse_scale = dormant_pulse.transform.scale[0];
@@ -4228,12 +4413,12 @@ mod tests {
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         let active_pulse = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldObjectStateEntityPulse)
             .expect("active pulse should exist");
         let viewer_time_marker = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldIngestionDecodedViewerTimePayload)
             .expect("viewer-time payload marker should exist");
 
@@ -4302,7 +4487,7 @@ mod tests {
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .any(|instance| instance.role == InstanceRole::WorldIngestionProxy)
         );
 
@@ -4310,88 +4495,88 @@ mod tests {
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionProxy)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedEndpointPayload)
         );
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseLocationPayload
         }));
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedCoarseNeighborhoodPayload
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionDecodedHealthPayload)
         );
-        assert!(scene.instances.iter().all(|instance| {
+        assert!(scene.instances.values().all(|instance| {
             instance.role != InstanceRole::WorldIngestionDecodedViewerTimePayload
         }));
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityWingAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardBody)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityGuardAura)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityClusterCore)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityPulse)
         );
         assert!(
             scene
                 .instances
-                .iter()
+                .values()
                 .all(|instance| instance.role != InstanceRole::WorldObjectStateEntityStability)
         );
     }
@@ -4439,7 +4624,7 @@ mod tests {
                 display_name: String::from("Other"),
                 is_self: false,
                 last_update_unix_ms: 10,
-                stale: true,
+                stale: false,
             },
         ];
 
@@ -4447,7 +4632,7 @@ mod tests {
 
         let self_avatar = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderSelf)
             .expect("self avatar should be present");
         assert_eq!(self_avatar.mesh, MeshKind::AvatarProxy);
@@ -4456,12 +4641,12 @@ mod tests {
 
         let other_avatar = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
             .expect("other avatar should be present");
         assert_eq!(other_avatar.mesh, MeshKind::AvatarProxy);
-        assert_eq!(other_avatar.color, [0.66, 0.50, 0.38]);
-        assert_eq!(other_avatar.transform.scale, [0.34, 1.16, 0.34]);
+        assert_eq!(other_avatar.color, [0.30, 0.74, 0.98]);
+        assert_eq!(other_avatar.transform.scale, [0.36, 1.22, 0.36]);
     }
 
     #[test]
@@ -4482,7 +4667,7 @@ mod tests {
 
         let avatar = scene
             .instances
-            .iter()
+            .values()
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
             .expect("other avatar should be present");
         assert_eq!(avatar.mesh, MeshKind::Cube);
@@ -4544,6 +4729,93 @@ mod tests {
         assert!(entries[0].is_friend);
         assert_eq!(entries[1].agent_id, "nearby-b");
         assert!(entries[1].stale);
+    }
+
+    #[test]
+    fn scene_mapping_reflects_diagnostic_inputs() {
+        let mut scene = Scene::prototype();
+        
+        // Mock 3 avatars
+        let avatars = vec![
+            WorldAvatarPlaceholder {
+                agent_id: String::from("11111111-1111-1111-1111-111111111111"),
+                world_position: [10.0, 1.0, 10.0],
+                local_position: None,
+                sim_name: None,
+                display_name: String::from("Avatar 1"),
+                is_self: true,
+                last_update_unix_ms: 100,
+                stale: false,
+            },
+            WorldAvatarPlaceholder {
+                agent_id: String::from("22222222-2222-2222-2222-222222222222"),
+                world_position: [12.0, 1.0, 12.0],
+                local_position: None,
+                sim_name: None,
+                display_name: String::from("Avatar 2"),
+                is_self: false,
+                last_update_unix_ms: 100,
+                stale: false,
+            },
+            WorldAvatarPlaceholder {
+                agent_id: String::from("33333333-3333-3333-3333-333333333333"),
+                world_position: [14.0, 1.0, 14.0],
+                local_position: None,
+                sim_name: None,
+                display_name: String::from("Avatar 3"),
+                is_self: false,
+                last_update_unix_ms: 100,
+                stale: true,
+            },
+        ];
+
+        // Mock 5 traffic signals (distributed across types)
+        let snapshot = LiveVisualSnapshot {
+            source: String::from("test"),
+            logged_in: true,
+            first_sim_endpoint: Some(String::from("1.2.3.4:13009")),
+            first_sim_region_x: Some(1000),
+            first_sim_region_y: Some(2000),
+            handshake_agent_movement_complete: true,
+            traffic_summary_available: true,
+            likely_broader_traffic: 2,   // 2 broader
+            unknown: 2,                // 2 unknown
+            region_transition_control_observations: 1, // 1 control
+            post_boundary_observations: 0,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            decoded_coarse_updates: 0,
+            decoded_coarse_location_count: None,
+            decoded_coarse_first_x: None,
+            decoded_coarse_first_y: None,
+            decoded_coarse_first_z: None,
+            decoded_coarse_second_x: None,
+            decoded_coarse_second_y: None,
+            decoded_coarse_second_z: None,
+            decoded_coarse_third_x: None,
+            decoded_coarse_third_y: None,
+            decoded_coarse_third_z: None,
+            decoded_health_updates: 0,
+            decoded_health_last_basis_points: None,
+            decoded_viewer_time_updates: 0,
+            decoded_viewer_time_body_len: None,
+            decoded_viewer_time_signature: None,
+            observed_at_unix_ms: 100,
+        };
+
+        scene.apply_live_visual_snapshot(Some(&snapshot));
+        scene.apply_world_avatar_placeholders(&avatars, AvatarRenderMode::Proxy);
+
+        // Verify Avatars
+        let self_avatars = scene.instances.values().filter(|i| i.role == InstanceRole::WorldAvatarPlaceholderSelf).count();
+        let other_avatars = scene.instances.values().filter(|i| i.role == InstanceRole::WorldAvatarPlaceholderOther).count();
+        assert_eq!(self_avatars, 1);
+        assert_eq!(other_avatars, 2);
+
+        // Verify Traffic Pillars (one per role type if count > 0)
+        assert!(scene.instances.values().any(|i| i.role == InstanceRole::WorldTrafficBroaderPillar));
+        assert!(scene.instances.values().any(|i| i.role == InstanceRole::WorldTrafficUnknownPillar));
+        assert!(scene.instances.values().any(|i| i.role == InstanceRole::WorldTrafficRegionControlPillar));
     }
 
     #[test]
@@ -4625,4 +4897,104 @@ mod tests {
         let sorted = social.sorted_thread_participants_by_recent();
         assert_eq!(sorted, vec![String::from("friend-b"), String::from("friend-a")]);
     }
+    #[test]
+    fn frustum_contains_aabb_works() {
+        // A simple frustum that is basically a cube from -10 to +10
+        let planes = [
+            Plane::new([1.0, 0.0, 0.0], 10.0), // Left (normal points right)
+            Plane::new([-1.0, 0.0, 0.0], 10.0), // Right
+            Plane::new([0.0, 1.0, 0.0], 10.0), // Bottom
+            Plane::new([0.0, -1.0, 0.0], 10.0), // Top
+            Plane::new([0.0, 0.0, 1.0], 10.0), // Near
+            Plane::new([0.0, 0.0, -1.0], 10.0), // Far
+        ];
+        let frustum = Frustum { planes };
+
+        // Test 1: Completely inside
+        let aabb_inside = Aabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert_eq!(frustum.contains_aabb(&aabb_inside), IntersectionResult::Inside);
+
+        // Test 2: Completely outside (far away on X)
+        let aabb_outside = Aabb::new([20.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        assert_eq!(frustum.contains_aabb(&aabb_outside), IntersectionResult::Outside);
+
+        // Test 3: Intersecting (straddling the right plane at x=10)
+        let aabb_intersecting = Aabb::new([10.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        assert_eq!(frustum.contains_aabb(&aabb_intersecting), IntersectionResult::Intersecting);
+    }
+}
+
+pub fn perspective_rh_zo(fovy_radians: f32, aspect: f32, znear: f32, zfar: f32) -> [[f32; 4]; 4] {
+    let f = 1.0 / (0.5 * fovy_radians).tan();
+    [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, zfar / (znear - zfar), -1.0],
+        [0.0, 0.0, (zfar * znear) / (znear - zfar), 0.0],
+    ]
+}
+
+pub fn look_to_rh(eye: [f32; 3], direction: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
+    let forward = normalize(direction);
+    let side = normalize(cross(up, forward));
+    let camera_up = cross(forward, side);
+
+    [
+        [side[0], camera_up[0], -forward[0], 0.0],
+        [side[1], camera_up[1], -forward[1], 0.0],
+        [side[2], camera_up[2], -forward[2], 0.0],
+        [
+            -dot(side, eye),
+            -dot(camera_up, eye),
+            dot(forward, eye),
+            1.0,
+        ],
+    ]
+}
+
+pub fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0; 4]; 4];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c][r] = a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
+        }
+    }
+    out
+}
+
+pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+pub fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (dot(v, v)).sqrt();
+    if len > 0.0 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 0.0, -1.0]
+    }
+}
+
+pub fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2] + m[3][0] * v[3],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2] + m[3][1] * v[3],
+        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2] + m[3][2] * v[3],
+        m[0][3] * v[0] + m[1][3] * v[1] + m[2][3] * v[2] + m[3][3] * v[3],
+    ]
+}
+
+pub fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
+    [
+        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
+        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
+    ]
 }

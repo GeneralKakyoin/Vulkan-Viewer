@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use viewer_core::{AvatarRenderMode, Camera, MeshKind, Scene, Transform};
+use viewer_core::{
+    flatten_mat4, look_to_rh, mat4_mul, perspective_rh_zo, AvatarRenderMode, Camera, MeshKind,
+    Scene, Transform,
+};
 use wgpu::util::DeviceExt;
 use wgpu::{
     Buffer, BufferUsages, ColorTargetState, CommandEncoder, CommandEncoderDescriptor,
@@ -407,6 +410,10 @@ impl RenderBackend {
         PhysicalSize::new(self.config.width, self.config.height)
     }
 
+    pub fn aspect_ratio(&self) -> f32 {
+        self.config.width as f32 / self.config.height.max(1) as f32
+    }
+
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width == 0 || new_size.height == 0 {
             return;
@@ -420,7 +427,13 @@ impl RenderBackend {
         self.depth_view = depth_view;
     }
 
-    pub fn render_frame<F>(&mut self, camera: &Camera, scene: &Scene, draw_overlay: F) -> Result<()>
+    pub fn render_frame<F>(
+        &mut self,
+        camera: &Camera,
+        scene: &Scene,
+        visibility_list: &[usize],
+        draw_overlay: F,
+    ) -> Result<()>
     where
         F: FnOnce(
             &wgpu::Device,
@@ -446,7 +459,7 @@ impl RenderBackend {
             .create_view(&TextureViewDescriptor::default());
 
         self.update_camera_uniform(camera);
-        let object_offsets = self.upload_object_uniforms(scene);
+        let object_offsets = self.upload_object_uniforms(scene, visibility_list);
 
         let mut encoder = self
             .device
@@ -484,7 +497,10 @@ impl RenderBackend {
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             let mut object_offset_index = 0usize;
-            for instance in &scene.instances {
+            for &id in visibility_list {
+                let Some(instance) = scene.instances.get(&id) else {
+                    continue;
+                };
                 match instance.mesh {
                     MeshKind::AxisMarker => {
                         render_pass.set_pipeline(&self.axis_pipeline);
@@ -565,11 +581,15 @@ impl RenderBackend {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
     }
 
-    fn upload_object_uniforms(&self, scene: &Scene) -> Vec<u32> {
+    fn upload_object_uniforms(&self, scene: &Scene, visibility_list: &[usize]) -> Vec<u32> {
         let mut dynamic_offsets = Vec::new();
         let mut object_index = 0_usize;
 
-        for instance in &scene.instances {
+        for &id in visibility_list {
+            let Some(instance) = scene.instances.get(&id) else {
+                continue;
+            };
+
             if matches!(instance.mesh, MeshKind::AxisMarker) {
                 continue;
             }
@@ -657,72 +677,14 @@ fn model_matrix(transform: Transform) -> [[f32; 4]; 4] {
     ]
 }
 
-fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
-    [
-        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
-        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
-    ]
-}
+// Internal math helpers removed, using viewer_core instead
 
-fn perspective_rh_zo(fovy_radians: f32, aspect: f32, znear: f32, zfar: f32) -> [[f32; 4]; 4] {
-    let f = 1.0 / (0.5 * fovy_radians).tan();
-    [
-        [f / aspect, 0.0, 0.0, 0.0],
-        [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, zfar / (znear - zfar), -1.0],
-        [0.0, 0.0, (zfar * znear) / (znear - zfar), 0.0],
-    ]
-}
 
-fn look_to_rh(eye: [f32; 3], direction: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
-    let forward = normalize(direction);
-    let side = normalize(cross(up, forward));
-    let camera_up = cross(forward, side);
+// Vector math removed
 
-    [
-        [side[0], camera_up[0], -forward[0], 0.0],
-        [side[1], camera_up[1], -forward[1], 0.0],
-        [side[2], camera_up[2], -forward[2], 0.0],
-        [
-            -dot(side, eye),
-            -dot(camera_up, eye),
-            dot(forward, eye),
-            1.0,
-        ],
-    ]
-}
 
-fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut out = [[0.0; 4]; 4];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c][r] =
-                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
-        }
-    }
-    out
-}
+// Vector math removed
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let len = (dot(v, v)).sqrt();
-    if len > 0.0 {
-        [v[0] / len, v[1] / len, v[2] / len]
-    } else {
-        [0.0, 0.0, -1.0]
-    }
-}
 
 const SCENE_SHADER: &str = r#"
 struct CameraUniform {
