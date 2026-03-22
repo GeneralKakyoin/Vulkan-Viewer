@@ -3,8 +3,8 @@ use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, LiveVisualSnapshot, NearbyPersonEntry, ProfileLoadStatus,
-    RuntimeRelayLevel, SocialState, WorldAvatarPlaceholder, project_nearby_people,
+    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus,
+    RuntimeRelayLevel, SocialState, WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -196,7 +196,6 @@ pub struct UiSystem {
     egui_renderer: Renderer,
     active_chat_target: ChatTarget,
     thread_filter: ThreadFilter,
-    selected_nearby_agent_id: Option<String>,
     profile_texture_cache: HashMap<String, egui::TextureHandle>,
     profile_texture_failures: HashMap<String, String>,
 }
@@ -356,7 +355,6 @@ impl UiSystem {
             egui_renderer,
             active_chat_target: ChatTarget::Nearby,
             thread_filter: ThreadFilter::Recent,
-            selected_nearby_agent_id: None,
             profile_texture_cache: HashMap::new(),
             profile_texture_failures: HashMap::new(),
         }
@@ -484,13 +482,6 @@ impl UiSystem {
                     }
                     ui.separator();
 
-                    let nearby_people = project_nearby_people(world_avatars, social_state);
-                    if let Some(selected) = self.selected_nearby_agent_id.as_ref() {
-                        if nearby_people.iter().all(|entry| &entry.agent_id != selected) {
-                            self.selected_nearby_agent_id = None;
-                        }
-                    }
-
                     ui.columns(2, |cols| {
                         let total_width = cols[0].available_width() + cols[1].available_width();
                         cols[0].set_width(total_width * 0.34);
@@ -502,68 +493,7 @@ impl UiSystem {
                             }
                             ui.separator();
                             ui.horizontal(|ui| {
-                                ui.strong("Nearby People");
-                                ui.weak(format!("({})", nearby_people.len()));
-                            });
-                            egui::ScrollArea::vertical()
-                                .id_salt("nearby_people_sidebar")
-                                .max_height((ui.available_height() * 0.35).max(80.0))
-                                .show(ui, |ui| {
-                                    if nearby_people.is_empty() {
-                                        ui.weak("No nearby avatars");
-                                    }
-                                    for entry in &nearby_people {
-                                        let mut label =
-                                            format!("{} @ {}", entry.display_label, entry.sim_name);
-                                        if entry.stale {
-                                            label.push_str(" [stale]");
-                                        }
-                                        if entry.is_friend {
-                                            label.push_str(" [friend]");
-                                        }
-                                        let selected = self
-                                            .selected_nearby_agent_id
-                                            .as_ref()
-                                            .map(|id| id == &entry.agent_id)
-                                            .unwrap_or(false);
-                                        if ui.selectable_label(selected, label).clicked() {
-                                            self.selected_nearby_agent_id =
-                                                Some(entry.agent_id.clone());
-                                        }
-                                    }
-                                });
-                            if let Some(selected_id) = self.selected_nearby_agent_id.as_ref() {
-                                if let Some(selected) = nearby_people
-                                    .iter()
-                                    .find(|entry| &entry.agent_id == selected_id)
-                                {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.weak(format!(
-                                            "{} ({})",
-                                            selected.sim_name,
-                                            short_id(&selected.agent_id)
-                                        ));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Profile").clicked() {
-                                            actions.open_avatar_profile =
-                                                Some(selected.agent_id.clone());
-                                        }
-                                        if ui.button("Start IM").clicked() {
-                                            self.active_chat_target = ChatTarget::DirectIm;
-                                            social_state.selected_friend_id =
-                                                Some(selected.agent_id.clone());
-                                            social_state.mark_thread_read_by_participant(
-                                                &selected.agent_id,
-                                                0,
-                                            );
-                                        }
-                                    });
-                                }
-                            }
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.strong("Friends");
+                                ui.strong("Threads");
                                 ui.selectable_value(
                                     &mut self.thread_filter,
                                     ThreadFilter::Recent,
@@ -676,14 +606,6 @@ impl UiSystem {
                                         .iter()
                                         .find(|f| f.id == selected)
                                         .map(SocialState::friend_display_label)
-                                        .or_else(|| {
-                                            nearby_people
-                                                .iter()
-                                                .find(|entry: &&NearbyPersonEntry| {
-                                                    entry.agent_id == selected
-                                                })
-                                                .map(|entry| entry.display_label.clone())
-                                        })
                                         .unwrap_or_else(|| selected.clone());
                                     ui.horizontal(|ui| {
                                         ui.strong(format!("Direct IM: {label}"));
