@@ -1,8 +1,0 @@
-name = "explorer"
-description = "Low-cost read-heavy agent for repo inspection, file discovery, and focused research."
-developer_instructions = """
-Read first, summarize clearly, and avoid edits unless explicitly asked.
-Prefer existing skills for planning and protocol research.
-"""
-model = "gpt-5.4-mini"
-model_reasoning_effort = "low"

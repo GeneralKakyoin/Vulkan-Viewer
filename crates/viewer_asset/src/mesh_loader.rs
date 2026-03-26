@@ -1,20 +1,23 @@
-use viewer_core::Vertex;
 use crate::ProcessedMesh;
-use viewer_core::geometry::llvolume::SubMesh;
 use anyhow::{Context, Result};
+use viewer_core::Vertex;
+use viewer_core::geometry::llvolume::SubMesh;
 
 pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
     if data.is_empty() {
-        return Ok(ProcessedMesh { 
-            vertices: vec![], 
+        return Ok(ProcessedMesh {
+            vertices: vec![],
             submeshes: vec![],
-            aabb: viewer_core::Aabb::new([0.0, 0.0, 0.0], [0.1, 0.1, 0.1])
+            aabb: viewer_core::Aabb::new([0.0, 0.0, 0.0], [0.1, 0.1, 0.1]),
         });
     }
 
-    let (document, buffers, _images): (gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>) = gltf::import_slice(data)
-        .map_err(|e| anyhow::anyhow!("glTF import failed: {}", e))?;
-    
+    let (document, buffers, _images): (
+        gltf::Document,
+        Vec<gltf::buffer::Data>,
+        Vec<gltf::image::Data>,
+    ) = gltf::import_slice(data).map_err(|e| anyhow::anyhow!("glTF import failed: {}", e))?;
+
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut submeshes: Vec<SubMesh> = Vec::new();
 
@@ -28,14 +31,14 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
 
             let positions_iter = reader.read_positions().context("Mesh missing positions")?;
             let positions: Vec<[f32; 3]> = positions_iter.collect();
-                
+
             let mut normals_vec: Vec<[f32; 3]> = Vec::new();
             if let Some(normals_read) = reader.read_normals() {
                 for n in normals_read {
                     normals_vec.push(n);
                 }
             }
-            
+
             let mut tex_coords_vec: Vec<[f32; 2]> = Vec::new();
             if let Some(tex_read) = reader.read_tex_coords(0) {
                 match tex_read {
@@ -58,11 +61,11 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
             }
 
             let base_idx = vertices.len() as u32;
-            
+
             for (i, pos) in positions.into_iter().enumerate() {
                 let normal = normals_vec.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
                 let uv = tex_coords_vec.get(i).copied().unwrap_or([0.0, 0.0]);
-                
+
                 vertices.push(Vertex {
                     position: pos,
                     normal,
@@ -74,13 +77,19 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
             if let Some(indices_read) = reader.read_indices() {
                 match indices_read {
                     gltf::mesh::util::ReadIndices::U8(iter) => {
-                        for i in iter { indices.push(i as u32); }
+                        for i in iter {
+                            indices.push(i as u32);
+                        }
                     }
                     gltf::mesh::util::ReadIndices::U16(iter) => {
-                        for i in iter { indices.push(i as u32); }
+                        for i in iter {
+                            indices.push(i as u32);
+                        }
                     }
                     gltf::mesh::util::ReadIndices::U32(iter) => {
-                        for i in iter { indices.push(i); }
+                        for i in iter {
+                            indices.push(i);
+                        }
                     }
                 }
             } else {
@@ -88,7 +97,7 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
                     indices.push(i);
                 }
             }
-            
+
             let shifted_indices: Vec<u32> = indices.into_iter().map(|i| i + base_idx).collect();
 
             submeshes.push(SubMesh {
@@ -101,7 +110,7 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
     // Calculate overall AABB
     let mut min = [f32::MAX, f32::MAX, f32::MAX];
     let mut max = [f32::MIN, f32::MIN, f32::MIN];
-    
+
     if vertices.is_empty() {
         min = [-0.1, -0.1, -0.1];
         max = [0.1, 0.1, 0.1];
@@ -113,7 +122,7 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
             }
         }
     }
-    
+
     let center = [
         (min[0] + max[0]) * 0.5,
         (min[1] + max[1]) * 0.5,
@@ -125,5 +134,9 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
         (max[2] - min[2]) * 0.5,
     ];
 
-    Ok(ProcessedMesh { vertices, submeshes, aabb: viewer_core::Aabb::new(center, size) })
+    Ok(ProcessedMesh {
+        vertices,
+        submeshes,
+        aabb: viewer_core::Aabb::new(center, size),
+    })
 }

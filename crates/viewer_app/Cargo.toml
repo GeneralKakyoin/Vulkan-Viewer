@@ -16,6 +16,7 @@ tokio.workspace = true
 dotenvy.workspace = true
 rusqlite.workspace = true
 bytemuck.workspace = true
+image.workspace = true
 
 viewer_core = { path = "../viewer_core" }
 viewer_render = { path = "../viewer_render" }

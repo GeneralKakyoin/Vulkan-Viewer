@@ -1,0 +1,31 @@
+# Codex Setup Notes
+
+Codex is the default implementation-oriented writer for this repo.
+
+## Default Codex responsibilities
+
+- perform repo-aware implementation
+- follow approved plans
+- run required validation
+- write execution reports
+- update continuity docs when it made the final material change
+
+## Codex should not do by default
+
+- silently expand scope
+- perform broad refactors outside plan
+- perform destructive Git actions
+- push or merge without explicit approval
+
+## Codex startup behavior
+
+1. Read `AGENTS.md`
+2. Read required continuity docs based on task size
+3. Read relevant code and any referenced plan/review artifacts
+4. Use repo skills from `.agents/skills/`
+5. Prefer saved artifacts before rescanning the entire repo when enough context already exists
+
+## Recommended usage
+
+Use Codex as the default writer.
+Use it for bounded implementation, validation, reports, and continuity updates.

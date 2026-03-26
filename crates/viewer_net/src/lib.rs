@@ -2452,7 +2452,8 @@ impl Connection {
             let retryable = is_retryable_event_queue_http_failure(status, &body);
             let retry_class = classify_event_queue_http_retry(status, retryable);
             let retry_reason = event_queue_http_retry_reason(status, &body, retryable);
-            let scheduled_backoff_ms = event_queue_retry_backoff_ms(attempt, retryable, Some(status));
+            let scheduled_backoff_ms =
+                event_queue_retry_backoff_ms(attempt, retryable, Some(status));
             let terminal_reason = if scheduled_backoff_ms.is_none() {
                 Some(retry_reason.clone())
             } else {
@@ -5006,7 +5007,9 @@ fn looks_like_second_life_login_endpoint(endpoint: &str) -> bool {
     lowered.contains("login.agni.lindenlab.com") || lowered.contains("secondlife.com")
 }
 
-fn classify_event_queue_transport_retry(err: &reqwest::Error) -> (bool, EventQueueRetryClass, String) {
+fn classify_event_queue_transport_retry(
+    err: &reqwest::Error,
+) -> (bool, EventQueueRetryClass, String) {
     if err.is_timeout() {
         return (
             true,
@@ -7253,7 +7256,10 @@ mod tests {
                 assert_eq!(attempts.len(), 1);
                 assert_eq!(attempts[0].status, Some(400));
                 assert!(!attempts[0].retryable);
-                assert_eq!(attempts[0].retry_class, EventQueueRetryClass::NonRetryableHttp);
+                assert_eq!(
+                    attempts[0].retry_class,
+                    EventQueueRetryClass::NonRetryableHttp
+                );
                 assert!(attempts[0].scheduled_backoff_ms.is_none());
                 assert!(attempts[0].terminal_reason.is_some());
             }
@@ -7307,11 +7313,26 @@ mod tests {
 
     #[test]
     fn event_queue_retry_backoff_is_bounded_exponential() {
-        assert_eq!(event_queue_retry_backoff_ms(1, true, Some(StatusCode::BAD_GATEWAY)), Some(250));
-        assert_eq!(event_queue_retry_backoff_ms(2, true, Some(StatusCode::BAD_GATEWAY)), Some(500));
-        assert_eq!(event_queue_retry_backoff_ms(3, true, Some(StatusCode::BAD_GATEWAY)), None);
-        assert_eq!(event_queue_retry_backoff_ms(1, true, Some(StatusCode::BAD_REQUEST)), None);
-        assert_eq!(event_queue_retry_backoff_ms(1, false, Some(StatusCode::BAD_GATEWAY)), None);
+        assert_eq!(
+            event_queue_retry_backoff_ms(1, true, Some(StatusCode::BAD_GATEWAY)),
+            Some(250)
+        );
+        assert_eq!(
+            event_queue_retry_backoff_ms(2, true, Some(StatusCode::BAD_GATEWAY)),
+            Some(500)
+        );
+        assert_eq!(
+            event_queue_retry_backoff_ms(3, true, Some(StatusCode::BAD_GATEWAY)),
+            None
+        );
+        assert_eq!(
+            event_queue_retry_backoff_ms(1, true, Some(StatusCode::BAD_REQUEST)),
+            None
+        );
+        assert_eq!(
+            event_queue_retry_backoff_ms(1, false, Some(StatusCode::BAD_GATEWAY)),
+            None
+        );
     }
 
     #[tokio::test]

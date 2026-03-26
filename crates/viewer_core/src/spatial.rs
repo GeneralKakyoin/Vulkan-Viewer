@@ -8,7 +8,7 @@ const MIN_SIZE: f32 = 1.0;
 #[derive(Debug, Clone)]
 pub struct OctreeNode {
     pub center: [f32; 3],
-    pub size: [f32; 3], // half-extents
+    pub size: [f32; 3],            // half-extents
     pub items: Vec<(usize, Aabb)>, // (Instance ID, Aabb)
     pub children: Option<Box<[OctreeNode; 8]>>,
 }
@@ -29,9 +29,15 @@ impl OctreeNode {
     /// Bit 2: Z > centerZ
     pub fn get_octant(center: &[f32; 3], pos: &[f32; 3]) -> usize {
         let mut octant = 0;
-        if pos[0] > center[0] { octant |= 1; }
-        if pos[1] > center[1] { octant |= 2; }
-        if pos[2] > center[2] { octant |= 4; }
+        if pos[0] > center[0] {
+            octant |= 1;
+        }
+        if pos[1] > center[1] {
+            octant |= 2;
+        }
+        if pos[2] > center[2] {
+            octant |= 4;
+        }
         octant
     }
 
@@ -47,13 +53,16 @@ impl OctreeNode {
             child_center[1] + child_size[1],
             child_center[2] + child_size[2],
         ];
-        
+
         let a_min = aabb.min();
         let a_max = aabb.max();
 
-        a_min[0] >= c_min[0] && a_max[0] <= c_max[0] &&
-        a_min[1] >= c_min[1] && a_max[1] <= c_max[1] &&
-        a_min[2] >= c_min[2] && a_max[2] <= c_max[2]
+        a_min[0] >= c_min[0]
+            && a_max[0] <= c_max[0]
+            && a_min[1] >= c_min[1]
+            && a_max[1] <= c_max[1]
+            && a_min[2] >= c_min[2]
+            && a_max[2] <= c_max[2]
     }
 
     pub fn insert(&mut self, instance_id: usize, aabb: Aabb) {
@@ -71,7 +80,12 @@ impl OctreeNode {
         self.items.push((instance_id, aabb));
 
         // Should we split?
-        if self.children.is_none() && self.items.len() >= MAX_CAPACITY && self.size[0] > MIN_SIZE && self.size[1] > MIN_SIZE && self.size[2] > MIN_SIZE {
+        if self.children.is_none()
+            && self.items.len() >= MAX_CAPACITY
+            && self.size[0] > MIN_SIZE
+            && self.size[1] > MIN_SIZE
+            && self.size[2] > MIN_SIZE
+        {
             self.split();
         }
     }
@@ -79,15 +93,30 @@ impl OctreeNode {
     fn split(&mut self) {
         let half_size = [self.size[0] * 0.5, self.size[1] * 0.5, self.size[2] * 0.5];
         let mut children: [_; 8] = core::array::from_fn(|i| {
-            let offset_x = if (i & 1) != 0 { half_size[0] } else { -half_size[0] };
-            let offset_y = if (i & 2) != 0 { half_size[1] } else { -half_size[1] };
-            let offset_z = if (i & 4) != 0 { half_size[2] } else { -half_size[2] };
-            
-            OctreeNode::new([
-                self.center[0] + offset_x,
-                self.center[1] + offset_y,
-                self.center[2] + offset_z,
-            ], half_size)
+            let offset_x = if (i & 1) != 0 {
+                half_size[0]
+            } else {
+                -half_size[0]
+            };
+            let offset_y = if (i & 2) != 0 {
+                half_size[1]
+            } else {
+                -half_size[1]
+            };
+            let offset_z = if (i & 4) != 0 {
+                half_size[2]
+            } else {
+                -half_size[2]
+            };
+
+            OctreeNode::new(
+                [
+                    self.center[0] + offset_x,
+                    self.center[1] + offset_y,
+                    self.center[2] + offset_z,
+                ],
+                half_size,
+            )
         });
 
         // Redistribute existing items
@@ -109,7 +138,7 @@ impl OctreeNode {
     pub fn remove(&mut self, instance_id: usize, aabb: Aabb) -> bool {
         // Optimization: skip if node bounds don't contain item center (or could use full AABB check)
         // For Milestone 1, we keep it simple but check children only if they could contain the AABB.
-        
+
         // First check locally
         if let Some(idx) = self.items.iter().position(|&(id, _)| id == instance_id) {
             self.items.swap_remove(idx);
@@ -123,10 +152,12 @@ impl OctreeNode {
             if child.remove(instance_id, aabb) {
                 return true;
             }
-            
+
             // Fallback: search all children if it might have straddled
             for (i, c) in children.iter_mut().enumerate() {
-                if i == octant { continue; }
+                if i == octant {
+                    continue;
+                }
                 if c.remove(instance_id, aabb) {
                     return true;
                 }
@@ -135,7 +166,7 @@ impl OctreeNode {
 
         false
     }
-    
+
     pub fn collect_all(&self, items: &mut Vec<usize>) {
         for (id, _) in &self.items {
             items.push(*id);
@@ -198,7 +229,7 @@ impl Octree {
     pub fn remove(&mut self, instance_id: usize, aabb: Aabb) -> bool {
         self.root.remove(instance_id, aabb)
     }
-    
+
     pub fn update(&mut self, instance_id: usize, old_aabb: Aabb, new_aabb: Aabb) {
         // For Milestone 1, we just remove and re-insert.
         // A future optimization could check if they are in the same node.

@@ -1,11 +1,11 @@
-use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui::NumExt;
+use egui_wgpu::{Renderer, ScreenDescriptor};
 use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus,
-    RuntimeRelayLevel, SocialState, WorldAvatarPlaceholder,
+    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus, RuntimeRelayLevel,
+    SocialState, WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -435,7 +435,10 @@ impl UiSystem {
                                 "pos: x={:.2} y={:.2} z={:.2}",
                                 camera.position[0], camera.position[1], camera.position[2]
                             ));
-                            ui.label(format!("yaw/pitch: {:.2} / {:.2} rad", camera.yaw, camera.pitch));
+                            ui.label(format!(
+                                "yaw/pitch: {:.2} / {:.2} rad",
+                                camera.yaw, camera.pitch
+                            ));
                         });
                     egui::CollapsingHeader::new("Live Visual Snapshot")
                         .default_open(false)
@@ -458,14 +461,15 @@ impl UiSystem {
                     if !history.is_empty() {
                         let height = 30.0;
                         let width = ui.available_width().at_least(100.0);
-                        let (rect, _response) = ui.allocate_at_least(egui::vec2(width, height), egui::Sense::hover());
+                        let (rect, _response) =
+                            ui.allocate_at_least(egui::vec2(width, height), egui::Sense::hover());
                         let painter = ui.painter();
                         painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
-                        
+
                         let count = history.len();
                         let bar_width = width / (count as f32).max(1.0);
                         let max_ms = 33.3; // Scale to 30fps baseline, but allow overflow
-                        
+
                         for (i, &ms) in history.iter().enumerate() {
                             let h_frac = (ms / max_ms).at_most(1.0);
                             let h = h_frac * height;
@@ -479,10 +483,10 @@ impl UiSystem {
                             painter.rect_filled(
                                 egui::Rect::from_min_max(
                                     egui::pos2(x, y),
-                                    egui::pos2(x + bar_width.at_least(1.0), rect.max.y)
+                                    egui::pos2(x + bar_width.at_least(1.0), rect.max.y),
                                 ),
                                 0.0,
-                                color
+                                color,
                             );
                         }
                     }
@@ -506,10 +510,7 @@ impl UiSystem {
                             ui.colored_label(send_color, format!(" nearby: {send_text} "));
                         }
                         if !social_state.im_draft.trim().is_empty() {
-                            ui.colored_label(
-                                egui::Color32::LIGHT_BLUE,
-                                " im draft unsent ",
-                            );
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, " im draft unsent ");
                         }
                     });
                     if let ChatConnectionState::Failed(reason) = &chat_state.connection {
@@ -545,7 +546,8 @@ impl UiSystem {
                                     "All",
                                 );
                             });
-                            let friend_ids = sorted_friend_ids_for_filter(social_state, self.thread_filter);
+                            let friend_ids =
+                                sorted_friend_ids_for_filter(social_state, self.thread_filter);
                             egui::ScrollArea::vertical()
                                 .id_salt("chat_thread_sidebar")
                                 .show(ui, |ui| {
@@ -576,8 +578,10 @@ impl UiSystem {
                                             && self.active_chat_target == ChatTarget::DirectIm;
                                         if ui.selectable_label(selected, hinted).clicked() {
                                             self.active_chat_target = ChatTarget::DirectIm;
-                                            social_state.selected_friend_id = Some(friend_id.clone());
-                                            social_state.mark_thread_read_by_participant(&friend_id, 0);
+                                            social_state.selected_friend_id =
+                                                Some(friend_id.clone());
+                                            social_state
+                                                .mark_thread_read_by_participant(&friend_id, 0);
                                         }
                                     }
                                 });
@@ -631,8 +635,10 @@ impl UiSystem {
                             }
                             ChatTarget::DirectIm => {
                                 if social_state.selected_friend_id.is_none() {
-                                    social_state.selected_friend_id =
-                                        social_state.friends.first().map(|friend| friend.id.clone());
+                                    social_state.selected_friend_id = social_state
+                                        .friends
+                                        .first()
+                                        .map(|friend| friend.id.clone());
                                 }
                                 if let Some(selected) = social_state.selected_friend_id.clone() {
                                     social_state.mark_thread_read_by_participant(&selected, 0);
@@ -648,10 +654,13 @@ impl UiSystem {
                                             actions.open_avatar_profile = Some(selected.clone());
                                         }
                                         if ui.button("Mark read").clicked() {
-                                            social_state.mark_thread_read_by_participant(&selected, 0);
+                                            social_state
+                                                .mark_thread_read_by_participant(&selected, 0);
                                         }
                                     });
-                                    if let Some(thread) = social_state.thread_for_participant(&selected) {
+                                    if let Some(thread) =
+                                        social_state.thread_for_participant(&selected)
+                                    {
                                         egui::ScrollArea::vertical()
                                             .id_salt("direct_im_messages_compact")
                                             .stick_to_bottom(true)
@@ -694,8 +703,7 @@ impl UiSystem {
                                         });
                                     let click_send = ui
                                         .add_enabled(can_send, egui::Button::new("Send IM"))
-                                        .clicked()
-                                        ;
+                                        .clicked();
                                     if can_send && (enter_send || click_send) {
                                         actions.direct_im_send = Some((
                                             selected.clone(),

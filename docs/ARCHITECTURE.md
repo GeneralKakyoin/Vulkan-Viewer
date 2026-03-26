@@ -195,7 +195,7 @@ Three types form the structural language of the app — every subsystem speaks t
 1. **Startup mode check** — Read `VIEWER_APP_LIVE_STARTUP` env var (auto / on / off).
 2. **Worker spawn** (if live mode) — In-process tokio task runs `viewer_net` login → bootstrap → handshake.
 3. **Snapshot channel** — Worker emits `LiveVisualSnapshot` updates over an mpsc channel.
-4. **Event loop** — Each frame: receive latest snapshot (if available), adapt to seam (dirty-only),
+4. **Event loop** — Each frame: receive latest snaps hot (if available), adapt to seam (dirty-only),
    apply seam to scene (dirty-only), apply snapshot to scene (dirty-only), render, draw UI.
 5. **Fallback path** — If no live worker, loads `live_visual_snapshot.json` from disk (dev path).
 

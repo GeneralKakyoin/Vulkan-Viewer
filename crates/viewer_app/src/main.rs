@@ -15,20 +15,19 @@ use tracing_subscriber::FmtSubscriber;
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
     ChatMessage, ChatSendStatus, ChatState, DirectImMessage, FirstLifeProfile, FriendEntry,
-    LiveVisualSnapshot,
-    ProfileClassifiedDetails, ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes,
-    ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene,
-    SecondLifeProfile, SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter,
-    WorldObjectIngestionSeam, compute_p2p_session_id,
-    GeometrySource, VolumeParams,
+    GeometrySource, LiveVisualSnapshot, ProfileClassifiedDetails, ProfileClassifiedSummary,
+    ProfileLoadStatus, ProfileNotes, ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent,
+    RuntimeRelayLevel, Scene, SecondLifeProfile, SocialState, WorldAvatarPlaceholder,
+    WorldObjectIngestionAdapter, WorldObjectIngestionSeam, compute_p2p_session_id,
 };
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
 };
 use viewer_net::{
-    AgentProfileData, Connection, ConnectionConfig, ConnectionError, LoginFallbackClassifiedReason,
-    LoginFallbackOutcome, LoginTrace, LoginWireFormat, FirstSimulatorInboundTrafficScope,
-    NearbyChatMessage, SocialCircuit, SocialEvent, poll_event_queue_url_once,
+    AgentProfileData, Connection, ConnectionConfig, ConnectionError,
+    FirstSimulatorInboundTrafficScope, LoginFallbackClassifiedReason, LoginFallbackOutcome,
+    LoginTrace, LoginWireFormat, NearbyChatMessage, SocialCircuit, SocialEvent,
+    poll_event_queue_url_once,
 };
 use viewer_render::RenderBackend;
 use viewer_ui::UiSystem;
@@ -662,8 +661,9 @@ async fn run_in_process_live_feed(
             mfa_token: config.mfa_token.clone(),
         };
 
-        let Ok((result, trace, fallback)) =
-            connection.login_with_trace_with_fallback(&adapter, intent).await
+        let Ok((result, trace, fallback)) = connection
+            .login_with_trace_with_fallback(&adapter, intent)
+            .await
         else {
             let failure = LiveStartupFailure {
                 class: LiveStartupFailureClass::LoginRequestTransport,
@@ -692,7 +692,9 @@ async fn run_in_process_live_feed(
             let _ = tx.send(LiveFeedUpdate::ChatConnection(ChatConnectionState::Failed(
                 failure.message.clone(),
             )));
-            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(failure.clone())));
+            let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Failed(
+                failure.clone(),
+            )));
             reconnect_attempt = reconnect_attempt.saturating_add(1);
             emit_relay(
                 &tx,
@@ -1930,7 +1932,9 @@ fn emit_login_fallback_relay(tx: &mpsc::Sender<LiveFeedUpdate>, fallback: &Login
         return;
     }
     let reason = match fallback.classified_reason {
-        Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword) => "request_shape_missing_password",
+        Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword) => {
+            "request_shape_missing_password"
+        }
         None => "unknown",
     };
     emit_relay(
@@ -1949,7 +1953,8 @@ fn startup_failure_from_login_outcome(
     trace: &LoginTrace,
     fallback: &LoginFallbackOutcome,
 ) -> LiveStartupFailure {
-    if fallback.classified_reason == Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword)
+    if fallback.classified_reason
+        == Some(LoginFallbackClassifiedReason::RequestShapeMissingPassword)
     {
         return LiveStartupFailure {
             class: LiveStartupFailureClass::LoginRequestShape,
@@ -2719,15 +2724,25 @@ impl ViewerApp {
 
 impl AppState {
     fn spawn_geometry_torture_test(&mut self) {
-        use viewer_core::{GeometrySource, InstanceRole, VolumeParams, ProfileType, HoleType, PathType, Transform};
-        
+        use viewer_core::{
+            GeometrySource, HoleType, InstanceRole, PathType, ProfileType, Transform, VolumeParams,
+        };
+
         // Grid of diverse procedural prims
         for i in 0..5 {
             for j in 0..5 {
                 let mut params = VolumeParams {
-                    profile_type: if (i + j) % 2 == 0 { ProfileType::Square } else { ProfileType::Circle },
+                    profile_type: if (i + j) % 2 == 0 {
+                        ProfileType::Square
+                    } else {
+                        ProfileType::Circle
+                    },
                     hole_type: HoleType::Same,
-                    path_type: if i % 2 == 0 { PathType::Line } else { PathType::Circle },
+                    path_type: if i % 2 == 0 {
+                        PathType::Line
+                    } else {
+                        PathType::Circle
+                    },
                     begin_cut: 0.0,
                     end_cut: 1.0,
                     hollow: if j % 2 == 0 { 0.0 } else { 0.5 },
@@ -2741,13 +2756,15 @@ impl AppState {
                     shear_x: 0.0,
                     shear_y: 0.0,
                 };
-                
+
                 // Some specific variations
-                if i == 4 { params.end_cut = 0.5; } // Half prims
-                
+                if i == 4 {
+                    params.end_cut = 0.5;
+                } // Half prims
+
                 let mut transform = Transform::default();
                 transform.position = [i as f32 * 4.0 - 8.0, 5.0, j as f32 * 4.0 - 8.0];
-                
+
                 self.scene.insert_instance(
                     GeometrySource::Procedural(params, 1.0),
                     InstanceRole::SceneStatic,
@@ -2804,7 +2821,7 @@ impl AppState {
                 [1.0, 0.8, 0.1],
             );
         }
-        
+
         // Spawn a grid of "planets" with "moons"
         for x in -5..5 {
             for z in -5..5 {
@@ -2844,11 +2861,11 @@ impl AppState {
     fn update_stress_test(&mut self, time: f32) {
         // Rotate parents and their moons
         let (_sin_t, _cos_t) = (time.sin(), time.cos());
-        
+
         // We iterate through all instances. If they are stress test objects, we rotate them.
         // For Milestone 1, we just find all instances and apply some math if they have a parent or are a big cube.
         // A better way would be tag-based, but for M1 we'll just rotate everything that isn't a known role.
-        
+
         for inst in self.scene.instances_mut() {
             if inst.role == viewer_core::InstanceRole::WorldIngestionProxy {
                 if inst.parent_id.is_none() {
@@ -2901,7 +2918,10 @@ impl AppState {
         self.camera.add_look_delta(look_x, look_y);
         self.input.update_camera(&mut self.camera, dt_seconds);
 
-        if std::env::var("STRESS_TEST").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("STRESS_TEST")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             self.update_stress_test(now.elapsed().as_secs_f32());
         }
 
@@ -3170,31 +3190,40 @@ impl AppState {
         let mut pending_profile_refresh: Option<(String, Option<AvatarProfileTab>)> = None;
         let mut pending_open_external_url: Option<String> = None;
 
-        // self.scene.sync_spatial();
+        self.scene.sync_spatial();
 
         let aspect = self.renderer.aspect_ratio();
         let frustum = self.camera.frustum(aspect);
         let visibility_list = self.scene.query_frustum(&frustum);
-        
+
         // Prepare dynamic geometry
         for &id in &visibility_list {
             if let Some(instance) = self.scene.instances.get(&id) {
                 if !self.renderer.has_dynamic_geometry(&instance.geometry) {
                     let mesh = match &instance.geometry {
                         GeometrySource::Procedural(params, detail) => {
-                             Some(self.geometry_cache.get_procedural(params, *detail))
+                            Some(self.geometry_cache.get_procedural(params, *detail))
                         }
                         GeometrySource::Sculpt(uuid, sculpt_type) => {
-                             let dummy_pixels = vec![128u8; 32 * 32 * 3]; // Neutral gray sculpt
-                             Some(self.geometry_cache.get_sculpt(uuid, *sculpt_type, &dummy_pixels, 32, 32))
+                            let dummy_pixels = vec![128u8; 32 * 32 * 3]; // Neutral gray sculpt
+                            Some(self.geometry_cache.get_sculpt(
+                                uuid,
+                                *sculpt_type,
+                                &dummy_pixels,
+                                32,
+                                32,
+                            ))
                         }
                         GeometrySource::Mesh(uuid, lod) => {
-                             Some(self.geometry_cache.get_mesh(uuid, *lod, &[]))
+                            Some(self.geometry_cache.get_mesh(uuid, *lod, &[]))
                         }
                         _ => None,
                     };
 
                     if let Some(mesh) = mesh {
+                        if mesh.vertices.is_empty() || mesh.submeshes.is_empty() {
+                            continue;
+                        }
                         let mut submeshes = Vec::new();
                         let mut index_start = 0;
                         let mut all_indices = Vec::new();
@@ -3208,16 +3237,18 @@ impl AppState {
                             all_indices.extend_from_slice(&sm.indices);
                             index_start += count;
                         }
-                        /* self.renderer.upsert_geometry(
-                            instance.geometry.clone(),
-                            bytemuck::cast_slice(&mesh.vertices),
-                            bytemuck::cast_slice(&all_indices),
-                            submeshes,
-                        ); */
+                        if !all_indices.is_empty() {
+                            self.renderer.upsert_geometry(
+                                instance.geometry.clone(),
+                                bytemuck::cast_slice(&mesh.vertices),
+                                bytemuck::cast_slice(&all_indices),
+                                submeshes,
+                            );
+                        }
 
                         // Sync AABB to instance and mark for spatial update
                         if let Some(instance_mut) = self.scene.get_instance_mut(id) {
-                            instance_mut.world_aabb = mesh.aabb;
+                            instance_mut.local_aabb = mesh.aabb;
                             instance_mut.dirty_spatial = true;
                         }
                     }
@@ -3780,12 +3811,11 @@ mod tests {
 
         apply_avatar_render_mode(&mut scene, &mut social, &avatars, AvatarRenderMode::Proxy);
         assert_eq!(social.avatar_render_mode, AvatarRenderMode::Proxy);
-        assert!(
-            scene.instances.iter().any(|instance| {
-                instance.1.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
-                    && instance.1.geometry == viewer_core::GeometrySource::Diagnostic(viewer_core::MeshKind::AvatarProxy)
-            })
-        );
+        assert!(scene.instances.iter().any(|instance| {
+            instance.1.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
+                && instance.1.geometry
+                    == viewer_core::GeometrySource::Diagnostic(viewer_core::MeshKind::AvatarProxy)
+        }));
 
         apply_avatar_render_mode(
             &mut scene,
@@ -3794,12 +3824,11 @@ mod tests {
             AvatarRenderMode::FallbackBox,
         );
         assert_eq!(social.avatar_render_mode, AvatarRenderMode::FallbackBox);
-        assert!(
-            scene.instances.iter().any(|instance| {
-                instance.1.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
-                    && instance.1.geometry == viewer_core::GeometrySource::Diagnostic(viewer_core::MeshKind::Cube)
-            })
-        );
+        assert!(scene.instances.iter().any(|instance| {
+            instance.1.role == viewer_core::InstanceRole::WorldAvatarPlaceholderOther
+                && instance.1.geometry
+                    == viewer_core::GeometrySource::Diagnostic(viewer_core::MeshKind::Cube)
+        }));
     }
 
     #[test]

@@ -1,11 +1,33 @@
-model = "gpt-5.3-codex"
+# .codex/config.toml
 
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
+service_tier = "flex"
 
-[sandbox_workspace_write]
-network_access = true
+[project]
+name = "viewer"
 
-[agents]
-max_threads = 1
-max_depth = 1
+[behavior]
+read_agents_md = true
+use_repo_skills = true
+subagents_enabled = false
+
+[defaults]
+# Codex is the default implementation-oriented writer.
+# Tool-specific model selection is managed outside AGENTS.md.
+
+[git]
+require_status_check_before_write = true
+require_status_check_before_commit = true
+forbid_destructive_commands_without_approval = true
+require_prompt_before_remote_actions = true
+
+[validation]
+require_fmt = true
+require_check = true
+require_explicit_validation_reporting = true
+
+[continuity]
+require_report_for_material_changes = true
+require_handoff_update = true
+require_current_state_update_when_truth_changes = true
+require_tasks_update_when_active_priorities_change = true
+require_learnings_update_for_durable_lessons = true

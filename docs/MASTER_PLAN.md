@@ -1,208 +1,191 @@
 # MASTER_PLAN.md
 
-The durable operating map for the rewrite. Stable enough to orient a new agent from scratch
-when combined with `ARCHITECTURE.md`, `HANDOFF.md`, and `TASKS.md`.
-Update it only when the mission, scope, or core principles change materially.
+This file is the durable constitution for the viewer project.
+It defines long-lived project intent, operating principles, architectural ownership, and non-negotiable boundaries.
+
+It does **not** track current status, current priorities, recent progress, or milestone history.
+Those belong in:
+
+* `docs/CURRENT_STATE.md`
+* `docs/HANDOFF.md`
+* `docs/TASKS.md`
+* `docs/plans/`
+* `docs/reviews/`
+* `docs/reports/`
 
 ---
 
-## Project Mission
+## Project mission
 
-Build a modern, maintainable Rust viewer for Second Life / OpenSim with compatibility-first behavior, clean crate boundaries, and long-term parity with conventional viewers.
+Build a modern, maintainable Rust viewer that can connect to a real Second Life-compatible grid while preserving clean architecture, disciplined incremental progress, and long-term extensibility.
 
-This project is a networked virtual-world viewer, not a game engine.
-
----
-
-## Scope
-
-### Final Scope
-Long-term parity with conventional SL/OpenSim viewers, delivered in phases.
-
-### Delivery Phases
-
-1. **Phase 0: Project Setup** (Completed) — Workspace, crate layout, AGENTS.md.
-2. **Phase 1: Rendering Bootstrap** (Completed) — wGPU init, egui, frame clearing.
-3. **Phase 2: Core Runtime Slice** (Completed) — Camera, Scene, movement, depth buffer.
-4. **Phase 3: Networking and Grid Login** (Completed) — LLSD/XML-RPC, real SL login, binary LLUDP handshake.
-5. **Phase 4: First Connected World Slice** (Substantially Complete) — Bounded ingestion seam, coarse neighborhood, avatar proxies, chat UI.
-6. **Phase 5: Asset-Backed Rendering** (Planned) — viewer_asset, LLVolume geometry, textures.
-7. **Phase 6+: Parity expansion** — inventory, map, appearance, rigged mesh.
+The project should evolve in bounded, reviewable steps.
+Compatibility matters, but it must not come at the cost of architectural collapse.
 
 ---
 
-## Core Principles
+## Project identity
 
-1. Compatibility first
-2. Stability second
-3. Maintainability third
-4. Performance fourth
-5. Feature breadth last
+This project is:
 
----
+* a compatibility-oriented virtual world viewer
+* a real client with live-grid ambitions
+* a long-term maintainable Rust codebase
+* a system that should remain understandable by future agents and contributors
 
-## Crate Responsibilities
+This project is **not**:
 
-- `viewer_app`: orchestration only
-- `viewer_core`: shared domain state
-- `viewer_render`: GPU/rendering internals
-- `viewer_ui`: display/debug UI only
-- `viewer_net`: transport/session/codec selection/diagnostics
-- `viewer_grid`: request shaping/response interpretation/policy
-- `viewer_asset`: reserved for asset lifecycle
-- `viewer_platform`: reserved for platform integration
+* a throwaway prototype
+* a game engine experiment
+* a direct architectural clone of Firestorm or any legacy viewer
+* a place for broad uncontrolled refactors in pursuit of short-term convenience
 
 ---
 
-## Completed Milestones (Detailed)
+## Long-term scope
 
-- **Milestone A: Project Foundation (Phase 0-1)**
-  - Rust workspace and crate layout
-  - Baseline build/check workflow
-  - Window + event loop (winit)
-  - `wgpu` device/surface/depth init
-  - `egui` overlay integration
+The long-term direction of the project is:
 
-- **Milestone B-D: Runtime & Spatial Sandbox (Phase 2)**
-  - Camera data model and input wiring (mouselook + keyboard)
-  - Minimal scene model with typed renderable instances
-  - Spatial debug scene (ground plane, cube, axis marker)
-  - Scene instance roles and MeshKind distinctions
+1. maintain a stable application and rendering runtime foundation
+2. support real login, session, and simulator connectivity
+3. maintain a bounded but real connected-world slice
+4. expand from diagnostic and bounded world rendering toward full asset-backed world rendering
+5. later extend toward broader viewer capability and parity-oriented features
 
-- **Milestone E-F: Network & Login (Phase 3)**
-  - `viewer_net` async connection/session skeleton
-  - `viewer_grid` login adapter boundary
-  - HTTP login transport with redirect/wire-fallback handling
-  - Successful real live SL login (JSON/LLSD/XML-RPC)
-  - Seed capability fetch + EventQueueGet with retry
-  - First-simulator LLUDP handshake live-validated (AMC confirmed)
-  - Post-AMC early traffic typing (Health, CoarseLoc, etc.)
-
-- **Milestone 5: First Connected World Slice (Phase 4)**
-  - In-process live-state worker + startup orchestration
-  - Bounded ingestion seam with multi-lane typed payload paths
-  - Bounded coarse neighborhood decode → seam → scene mapping
-  - Avatar placeholder V1 (coarse + self + proxy mesh)
-  - Chat/IM/nearby-people/profile UI
-  - Pre-world object/state composition with lifecycle
-  - Verified 2026-03-21
+This phase map is intentionally high level.
+Detailed sequencing, milestone planning, and current focus belong elsewhere.
 
 ---
 
-## What Is Proven
+## Core principles
 
-- runtime foundation is stable (wgpu/winit/egui stack)
-- renderer architecture is viable
-- crate boundaries are holding
-- real SL login transport and diagnostics are viable (LLSD, XML-RPC, legacy credential shape)
-- live SL login succeeds
-- post-login bootstrap is viable: seed capability, EventQueueGet, SimulatorFeatures
-- first-simulator LLUDP handshake succeeds in live runs (UseCircuitCode → AgentMovementComplete)
-- early post-AMC traffic is typed and classified without broad decode
-- bounded ingestion seam is viable: multi-lane decode → snapshot → seam → scene mapping
-- pre-world object/state composition is viable with multi-entity family + lifecycle
-- bounded coarse neighborhood ingestion is viable
-- avatar placeholder presence (coarse + self + proxy mesh) is viable
+When tradeoffs appear, prefer them in this order:
 
----
+1. **Compatibility first**
+   The viewer should preserve real viewer behavior where practical and avoid breaking protocol or world expectations through guesswork.
 
-## Current Known Gaps
+2. **Stability second**
+   A smaller stable capability is better than a broader unstable one.
 
-### Networking / Protocol
-Not implemented yet:
-- broad world/object decode (planned)
-- region/world state streaming beyond current bounded diagnostic slice
-- `RegionHandshake` payload decode beyond message classification
-- `SimName` extraction from RegionHandshake
-- Crossed-region / EnableSimulator handoff flow
+3. **Maintainability third**
+   New work should keep the codebase modular, understandable, and fit for later expansion.
 
-### Rendering
-Not started yet:
-- Phase 1: Spatial partitioning (Octree + frustum culling) — see `RENDERING_PHASE_1.md`
-- Phase 2: LLVolume primitive geometry generation
-- Phase 3+: Textures, materials, avatar rigging
+4. **Performance fourth**
+   Performance matters, but it should not justify premature architectural shortcuts that damage long-term structure.
 
-### UI / Workflows
-Not implemented yet:
-- real login UI integration
-- inventory/map shell
-- keyboard navigation improvements in nearby/friends UI
+5. **Feature breadth last**
+   Do not chase surface area before the underlying architecture can support it cleanly.
 
 ---
 
-## Current Highest Priorities
+## Architectural ownership
 
-### Priority 1 - Avatar Placeholder Stabilization (T0)
-Goal:
-Stabilize avatar lifecycle (seen/updated/stale/removed) through reconnect cycles.
-Ensure self placeholder persists when coarse ID blocks are absent.
-Keep label projection readable while camera moves.
+Each crate should preserve a clear responsibility boundary.
+The exact interface details may evolve, but the ownership model should remain stable.
 
-### Priority 2 - Narrower Bounded World/Object Refinement
-Goal:
-Extend the bounded seam/object-state slice with one more tightly-scoped refinement
-  while focusing on architectural integrity.
+### `viewer_app`
 
-### Priority 3 - Spatial Partitioning Phase 1
-Goal:
-Replace flat `Vec<RenderableInstance>` with an Octree + frustum culling system
-so the scene can scale beyond diagnostic markers without GPU performance loss.
-See `docs/RENDERING_PHASE_1.md` for the full action plan.
+Owns application orchestration, top-level runtime flow, and wiring between subsystems.
+It should coordinate systems, not absorb renderer, protocol, or asset internals.
 
----
+### `viewer_core`
 
-## Ordered Future Milestones
+Owns shared domain state, scene-facing world structures, common data types, and core viewer logic that should not depend on a specific transport or rendering backend.
 
-### M6 - Avatar Stabilization + Bounded World Refinement
-### M7 - Spatial Partitioning (Phase 1 Rendering)
-### M8 - Asset and Appearance Foundations (LLVolume + textures)
-### M9 - Viewer Usability Layer (login UI, chat shell, map)
-### M10 - Parity Expansion
+### `viewer_render`
 
----
+Owns GPU-facing rendering internals, pipelines, buffers, materials, draw preparation, and render execution.
+It should not become the owner of high-level app policy.
 
-## Must-Nots
+### `viewer_net`
 
-These are non-negotiable. If a task seems to require crossing one of these lines, stop and document why before proceeding.
+Owns low-level transport, session wiring, packet/capability mechanics, and protocol-adjacent plumbing.
+It should not own high-level grid semantics or viewer policy.
 
-- **Do not mix grid semantics into `viewer_net`.**
-  `viewer_net` sends and receives bytes. What those bytes mean for the grid belongs in `viewer_grid`.
-  The `viewer_net` ↔ `viewer_grid` boundary is the most load-bearing architectural line in this project.
+### `viewer_grid`
 
-- **Do not mix transport mechanics into `viewer_grid`.**
-  Retry policy, codec selection, LLUDP framing — these live in `viewer_net`.
-  `viewer_grid` shapes intent and interprets meaning, nothing else.
+Owns grid-meaningful interpretation, policy, and user-facing semantics derived from lower-level network behavior.
+It should not become a transport crate.
 
-- **Do not begin broad world/object decoding before dependencies are met.**
-  Ensure the ingestion seam and spatial partitioning are ready.
-  The active TASKS.md is the authoritative record of what is in scope.
-- **Do not rely on session memory over repository docs.**
-  Docs are the source of truth. A new agent with no prior context must be able to orient from docs alone.
+### `viewer_asset`
 
-- **Do not create or remove seam-owned scene roles outside the seam apply path.**
-  Only `Scene::apply_world_object_ingestion_seam(...)` is allowed to create or remove seam-owned roles.
+Owns asset loading, decoding, caching, and asset-backed content preparation.
+It should not become an orchestration or scene-policy crate.
 
-- **Do not suppress `Unknown` traffic classifications without a live observation record.**
-  `Unknown` in post-AMC diagnostics is signal. Expanding typed classification requires live evidence
-  documented in `docs/RESEARCH/post_amc_bootstrap_boundary_map.md`.
+### `viewer_platform`
+
+Owns platform integration concerns and should remain isolated from higher-level viewer policy where possible.
 
 ---
 
-## Firestorm Policy
+## Non-negotiable boundaries
 
-Firestorm is used only as a behavior reference. It informs login flow, bootstrap sequencing,
-compatibility expectations, and protocol behavior. It must not dictate project structure,
-architecture, code reuse, or rendering design.
+The following rules are repository law unless deliberately revised by explicit architectural decision:
 
-All Firestorm-derived behavior must pass through clean Rust-typed interfaces in the correct owning crate.
-Use the `firestorm_research` skill (`/.agents/skills/firestorm_research/SKILL.md`) when researching Firestorm.
-Never let Firestorm-shaped logic live directly in `viewer_net` or collapse the crate boundary.
+* Do not mix grid semantics into `viewer_net`.
+* Do not mix transport mechanics into `viewer_grid`.
+* Do not turn `viewer_app` into a dumping ground for subsystem internals.
+* Do not move renderer policy upward just because it is convenient for a local change.
+* Do not collapse crate boundaries to chase a short-term fix.
+* Do not change repo structure broadly unless the change is explicitly planned and justified.
+* Do not rely on chat memory instead of repository documentation for continuity.
+* Do not treat temporary implementation convenience as architectural permission.
 
 ---
 
-## Current Recommended Next Step
+## Firestorm usage policy
 
-Stabilize the avatar placeholder lifecycle (T0) and extend the bounded seam/object-state slice
-with one small bounded refinement.
+Firestorm is a **behavioral and protocol reference**, not an architecture template.
 
-See `docs/TASKS.md` for active task detail. See `docs/RENDERING_PHASE_1.md` for the spatial partitioning plan.
+Use Firestorm to:
+
+* understand viewer behavior
+* confirm protocol expectations
+* study legacy handling where behavior matters
+
+Do not use Firestorm to:
+
+* copy architecture wholesale
+* import its layering assumptions into this repo
+* justify breaking current crate ownership
+
+When translating behavior from Firestorm, preserve this repo’s boundaries and architecture.
+
+---
+
+## Documentation philosophy
+
+The repository must remain usable by a new agent or contributor without depending on hidden session memory.
+
+That means:
+
+* durable project law belongs in stable docs
+* current truth belongs in `CURRENT_STATE.md`
+* exact next step belongs in `HANDOFF.md`
+* active priorities belong in `TASKS.md`
+* durable lessons belong in `LEARNINGS.md`
+the entire project roadmap is layed out in `docs/PLAN.md`
+* task-specific planning, review, and execution evidence belong in saved artifacts under `docs/plans/`, `docs/reviews/`, and `docs/reports/`
+
+Documentation should reduce drift, not duplicate it.
+
+---
+
+## Success definition
+
+Progress is successful when it does all of the following at the same time:
+
+* improves real viewer capability or confidence in that capability
+* preserves architectural cleanliness
+* keeps crate ownership understandable
+* leaves enough written continuity for future work to resume safely
+* avoids destructive shortcuts that create more rework later
+
+A larger feature is **not** a success if it damages maintainability, boundaries, or repository continuity.
+
+---
+
+## Continuity rule for this file
+
+`MASTER_PLAN.md` should stay durable.
+If a section starts depending on words like **current**, **latest**, **next**, or **recently completed**, it probably belongs in another document.

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use viewer_core::{
-    flatten_mat4, look_to_rh, mat4_mul, perspective_rh_zo, AvatarRenderMode, Camera, GeometrySource, MeshKind,
-    Scene,
+    AvatarRenderMode, Camera, GeometrySource, MeshKind, Scene, Vertex, flatten_mat4, look_to_rh,
+    mat4_mul, perspective_rh_zo,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -197,7 +197,7 @@ impl RenderBackend {
                 entry_point: Some("vs_main"),
                 compilation_options: PipelineCompilationOptions::default(),
                 buffers: &[VertexBufferLayout {
-                    array_stride: 12,
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
@@ -291,11 +291,17 @@ impl RenderBackend {
             usage: BufferUsages::VERTEX,
         });
 
-        let ground_verts: [[f32; 3]; 4] = [
-            [-100.0, 0.0, -100.0],
-            [100.0, 0.0, -100.0],
-            [100.0, 0.0, 100.0],
-            [-100.0, 0.0, 100.0],
+        let make_vertex = |position: [f32; 3]| Vertex {
+            position,
+            normal: [0.0, 1.0, 0.0],
+            tex_coord: [0.0, 0.0],
+        };
+
+        let ground_verts: [Vertex; 4] = [
+            make_vertex([-100.0, 0.0, -100.0]),
+            make_vertex([100.0, 0.0, -100.0]),
+            make_vertex([100.0, 0.0, 100.0]),
+            make_vertex([-100.0, 0.0, 100.0]),
         ];
         let ground_indices: [u32; 6] = [0, 1, 2, 2, 3, 0];
         let ground_mesh = create_mesh_buffers(
@@ -303,18 +309,22 @@ impl RenderBackend {
             "ground",
             bytemuck::cast_slice(&ground_verts),
             bytemuck::cast_slice(&ground_indices),
-            vec![SubMeshRange { face_id: 0, index_start: 0, index_count: 6 }],
+            vec![SubMeshRange {
+                face_id: 0,
+                index_start: 0,
+                index_count: 6,
+            }],
         );
 
-        let cube_verts: [[f32; 3]; 8] = [
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
-            [-0.5, 0.5, 0.5],
+        let cube_verts: [Vertex; 8] = [
+            make_vertex([-0.5, -0.5, -0.5]),
+            make_vertex([0.5, -0.5, -0.5]),
+            make_vertex([0.5, 0.5, -0.5]),
+            make_vertex([-0.5, 0.5, -0.5]),
+            make_vertex([-0.5, -0.5, 0.5]),
+            make_vertex([0.5, -0.5, 0.5]),
+            make_vertex([0.5, 0.5, 0.5]),
+            make_vertex([-0.5, 0.5, 0.5]),
         ];
         let cube_indices: [u32; 36] = [
             0, 1, 2, 2, 3, 0, // top
@@ -329,45 +339,53 @@ impl RenderBackend {
             "cube",
             bytemuck::cast_slice(&cube_verts),
             bytemuck::cast_slice(&cube_indices),
-            vec![SubMeshRange { face_id: 0, index_start: 0, index_count: 36 }],
+            vec![SubMeshRange {
+                face_id: 0,
+                index_start: 0,
+                index_count: 36,
+            }],
         );
 
         let avatar_proxy_mesh = if avatar_proxy_fallback_forced() {
             None
         } else {
-            let avatar_vertices: [[f32; 3]; 16] = [
+            let avatar_vertices: [Vertex; 16] = [
                 // torso
-                [-0.20, 0.00, -0.12],
-                [0.20, 0.00, -0.12],
-                [0.20, 0.70, -0.12],
-                [-0.20, 0.70, -0.12],
-                [-0.20, 0.00, 0.12],
-                [0.20, 0.00, 0.12],
-                [0.20, 0.70, 0.12],
-                [-0.20, 0.70, 0.12],
+                make_vertex([-0.20, 0.00, -0.12]),
+                make_vertex([0.20, 0.00, -0.12]),
+                make_vertex([0.20, 0.70, -0.12]),
+                make_vertex([-0.20, 0.70, -0.12]),
+                make_vertex([-0.20, 0.00, 0.12]),
+                make_vertex([0.20, 0.00, 0.12]),
+                make_vertex([0.20, 0.70, 0.12]),
+                make_vertex([-0.20, 0.70, 0.12]),
                 // head
-                [-0.14, 0.72, -0.14],
-                [0.14, 0.72, -0.14],
-                [0.14, 1.00, -0.14],
-                [-0.14, 1.00, -0.14],
-                [-0.14, 0.72, 0.14],
-                [0.14, 0.72, 0.14],
-                [0.14, 1.00, 0.14],
-                [-0.14, 1.00, 0.14],
+                make_vertex([-0.14, 0.72, -0.14]),
+                make_vertex([0.14, 0.72, -0.14]),
+                make_vertex([0.14, 1.00, -0.14]),
+                make_vertex([-0.14, 1.00, -0.14]),
+                make_vertex([-0.14, 0.72, 0.14]),
+                make_vertex([0.14, 0.72, 0.14]),
+                make_vertex([0.14, 1.00, 0.14]),
+                make_vertex([-0.14, 1.00, 0.14]),
             ];
             let avatar_indices: [u32; 72] = [
                 // torso
-                0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 4, 0, 3, 4, 3, 7, 1, 5, 6, 1, 6, 2, 3, 2,
-                6, 3, 6, 7, 4, 5, 1, 4, 1, 0, // head
-                8, 9, 10, 8, 10, 11, 12, 14, 13, 12, 15, 14, 12, 8, 11, 12, 11, 15, 9, 13, 14,
-                9, 14, 10, 11, 10, 14, 11, 14, 15, 12, 13, 9, 12, 9, 8,
+                0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 4, 0, 3, 4, 3, 7, 1, 5, 6, 1, 6, 2, 3, 2, 6, 3,
+                6, 7, 4, 5, 1, 4, 1, 0, // head
+                8, 9, 10, 8, 10, 11, 12, 14, 13, 12, 15, 14, 12, 8, 11, 12, 11, 15, 9, 13, 14, 9,
+                14, 10, 11, 10, 14, 11, 14, 15, 12, 13, 9, 12, 9, 8,
             ];
             Some(create_mesh_buffers(
                 &device,
                 "avatar_proxy",
                 bytemuck::cast_slice(&avatar_vertices),
                 bytemuck::cast_slice(&avatar_indices),
-                vec![SubMeshRange { face_id: 0, index_start: 0, index_count: 72 }],
+                vec![SubMeshRange {
+                    face_id: 0,
+                    index_start: 0,
+                    index_count: 72,
+                }],
             ))
         };
 
@@ -436,7 +454,13 @@ impl RenderBackend {
         self.depth_view = depth_view;
     }
 
-    pub fn upsert_geometry(&mut self, id: GeometrySource, vertices: &[u8], indices: &[u8], submeshes: Vec<SubMeshRange>) {
+    pub fn upsert_geometry(
+        &mut self,
+        id: GeometrySource,
+        vertices: &[u8],
+        indices: &[u8],
+        submeshes: Vec<SubMeshRange>,
+    ) {
         self.dynamic_geometries.insert(
             id,
             create_mesh_buffers(&self.device, "dynamic_mesh", vertices, indices, submeshes),
@@ -517,7 +541,7 @@ impl RenderBackend {
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             let mut object_offset_index = 0usize;
-            
+
             for &id in visibility_list {
                 let Some(instance) = scene.instances.get(&id) else {
                     continue;
@@ -536,14 +560,14 @@ impl RenderBackend {
                         }
 
                         let mesh_buffers = match &instance.geometry {
-                            GeometrySource::Diagnostic(kind) => {
-                                match kind {
-                                    MeshKind::GroundPlane => &self.ground_mesh,
-                                    MeshKind::Cube => &self.cube_mesh,
-                                    MeshKind::AvatarProxy => self.avatar_proxy_mesh.as_ref().unwrap_or(&self.cube_mesh),
-                                    MeshKind::AxisMarker => unreachable!(),
+                            GeometrySource::Diagnostic(kind) => match kind {
+                                MeshKind::GroundPlane => &self.ground_mesh,
+                                MeshKind::Cube => &self.cube_mesh,
+                                MeshKind::AvatarProxy => {
+                                    self.avatar_proxy_mesh.as_ref().unwrap_or(&self.cube_mesh)
                                 }
-                            }
+                                MeshKind::AxisMarker => unreachable!(),
+                            },
                             source => {
                                 if let Some(buffers) = self.dynamic_geometries.get(source) {
                                     buffers
@@ -564,7 +588,7 @@ impl RenderBackend {
                             &self.object_bind_group,
                             &[object_offsets[object_offset_index]],
                         );
-                        
+
                         // Draw all submeshes for now
                         for submesh in &mesh_buffers.submeshes {
                             render_pass.draw_indexed(
@@ -573,7 +597,7 @@ impl RenderBackend {
                                 0..1,
                             );
                         }
-                        
+
                         object_offset_index += 1;
                     }
                 }
@@ -628,7 +652,10 @@ impl RenderBackend {
                 continue;
             };
 
-            if matches!(instance.geometry, GeometrySource::Diagnostic(MeshKind::AxisMarker)) {
+            if matches!(
+                instance.geometry,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker)
+            ) {
                 continue;
             }
 
@@ -704,12 +731,9 @@ fn create_depth_resources(
 
 // Internal math helpers removed, using viewer_core instead
 
-
 // Vector math removed
 
-
 // Vector math removed
-
 
 const SCENE_SHADER: &str = r#"
 struct CameraUniform {
