@@ -15,7 +15,9 @@ Make the existing debug/social/profile/diagnostic UI feel like one coherent “d
 
 ## In scope
 - **Session status UX**
-  - Define a shared, UI-friendly session status type in `viewer_core` (or equivalent shared contract) representing: `disabled`, `starting`, `connected`, `reconnecting`, `failed` (with optional concise reason).
+  - Define a shared, UI-friendly session status type in `viewer_core` representing: `disabled`, `starting`, `connected`, `reconnecting`, `failed` (with optional concise reason).
+    - Concrete contract: add `SessionUxStatus` (and if needed `SessionUxFailureReason`) in `viewer_core` so `viewer_ui` never depends on `viewer_app` internals.
+    - Reason is bounded and sanitized (no credentials/endpoints; no long error chains). Prefer a short stable “reason key” enum plus an optional short message when needed.
   - Update `viewer_app` to map its existing in-process live worker states (including reconnect loop) into the shared session status value.
   - Update `viewer_ui` to render session status as a consistent “chip” (label + color) and make it visible in the primary workflow surface.
 - **Workflow panel grouping (UI information architecture)**
@@ -37,7 +39,14 @@ Make the existing debug/social/profile/diagnostic UI feel like one coherent “d
     - existing `VIEWER_APP_PROFILE_CACHE_TTL_SECS` policy used by `viewer_app`
   - Render per-tab freshness chips and replace raw “updated: <unix_ms>” presentation with:
     - freshness label
-    - concise “age” readout (still deterministic; avoid locale/timezone formatting)
+    - concise deterministic “age” readout (no locale/timezone formatting)
+      - Compute `age_ms = now_unix_ms - last_updated_unix_ms` when `last_updated_unix_ms` is present and non-zero.
+      - Format by truncation (floor), not rounding:
+        - `0s..59s` as `<Ns>`
+        - `1m..59m` as `<Nm>`
+        - `1h..23h` as `<Nh>`
+        - `1d..99d` as `<Nd>`
+        - `>=100d` as `99d+`
     - visible error reason on failed loads
   - Keep data ownership unchanged: `AvatarProfileState` remains the source of truth; UI computes indicators.
 - **Diagnostics usability**
