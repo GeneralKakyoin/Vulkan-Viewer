@@ -60,12 +60,13 @@ Meaningful implementation must follow this sequence:
 
 1. Understand the current repo state
 2. Create or update a written plan in `docs/plans/`
-3. Review the plan before implementation
-4. Implement only the approved plan
-5. Validate the result with required checks
-6. Write a completion report in `docs/reports/`
-7. Update continuity docs
-8. Leave a precise handoff in `docs/HANDOFF.md`
+3. Capture any "valid but too early" feature candidates in `docs/plans/DEFERRED_FEATURES.md`
+4. Review the plan before implementation
+5. Implement only the approved plan
+6. Validate the result with required checks
+7. Write a completion report in `docs/reports/`
+8. Update continuity docs
+9. Leave a precise handoff in `docs/HANDOFF.md`
 
 Planning and implementation are separate phases.
 Do not skip planning for meaningful work.
@@ -232,7 +233,7 @@ Keep this focused on process guidance and active priorities.
 Avoid long historical logs.
 
 ### `docs/plans/`
-Store approved task plans.
+Store approved task plans and the canonical deferred-feature list (`DEFERRED_FEATURES.md`).
 
 ### `docs/reviews/`
 Store plan reviews and implementation reviews.
@@ -259,6 +260,7 @@ A plan should include:
 - step sequence
 - validation plan
 - risks and open questions
+- deferred-too-early candidates captured (and synced to `docs/plans/DEFERRED_FEATURES.md` when present)
 - exact completion criteria
 
 ### Required for reviews

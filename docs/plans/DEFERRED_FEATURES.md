@@ -1,0 +1,25 @@
+# DEFERRED_FEATURES.md
+
+Canonical list of features that were considered during milestone planning but deferred because they were too early.
+
+Use this file to avoid losing useful scope that should be revisited later.
+
+## Rules
+
+1. Add an entry any time planning defers a feature as "too early."
+2. Link the exact plan/review where the deferral happened.
+3. Keep entries after promotion; set status to `promoted` and link the plan that adopted it.
+4. Use `dropped` only when the user or an approved plan/review explicitly cancels the feature.
+
+## Deferred feature list
+
+| Candidate feature | Considered in | Why deferred as too early | Earliest reconsideration milestone | Dependency or trigger | Status | Notes/links |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline image-diff harness for screenshot captures | `docs/plans/PLAN_test_automation_flags.md` | Current scope adds capture only; diffing needs fixture baselines, tolerances, and flaky-platform strategy | Next `U` testing-automation milestone | Stable deterministic scene presets and baseline management policy | open | Capture foundation first, compare later |
+| Waypoint/script file camera paths for automated verification | `docs/plans/PLAN_test_automation_flags.md` | Current scope keeps camera path env-configured and deterministic; file-driven scripts add format/design surface | Next `U` testing-automation milestone | Need agreed script format and ownership (`viewer_app` vs tooling) | open | Orbit-path config is sufficient for now |
+| Full per-face material/texture decode from object update payloads | `docs/plans/PLAN_N03.md` | N03 is bounded decode/lifecycle expansion only; full material payload parity would over-expand scope and overlap with material milestones | `A06` | Stable bounded object-feed path from N03 plus active material descriptor pipeline ownership | open | Keep N03 focused on feed and lifecycle, not full material parity |
+| Deep object-cache miss/retry parity for `ObjectUpdateCached` | `docs/plans/PLAN_N03.md` | Requires broader cache protocol behavior and recovery policy beyond N03 bounded ingest goals | `N07` | Confirmed object-feed baseline from N03 and agreed cache-miss policy/ownership | open | N03 should only include bounded cached-update handling sufficient for lifecycle continuity |
+| Multi-region object continuity/handoff semantics from region-transition control traffic | `docs/plans/PLAN_N03.md` | N03 targets first-region bounded object feed; multi-region continuity belongs to dedicated continuity milestone | `N07` | Repeated live observation and typed transition-state model for `CrossedRegion`/`ConfirmEnableSimulator` | open | Track with region-transition continuity work, not N03 |
+| In-app login/credential UI (username/password/mfa entry) | `docs/plans/PLAN_U04.md` | U04 focuses on shell alignment and status clarity; credential entry adds security/UX surface area and broader workflow decisions | `U09` | Stable U04 shell + explicit security and UX decisions for credential storage/entry | open | Keep U04 as display/feedback only |
+| Persistent egui layout save/restore or docking adoption | `docs/plans/PLAN_U04.md` | Adds complexity and long-term UX surface; U04 can regroup with simple panels/tabs first | `U09` | Stable window/panel grouping and agreed persistence strategy | open | Reconsider after U04 proves daily use |
+| Export/copy diagnostics bundles from UI (logs/snapshot/relay) | `docs/plans/PLAN_U04.md` | Needs format, redaction, and ownership decisions; not required for U04 workflow alignment | `U09` | Agreed diagnostics bundle format and redaction policy | open | Could become tooling task instead of UI task |

@@ -1,8 +1,31 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 pub mod geometry;
 pub mod spatial;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssetID(String);
+
+impl AssetID {
+    pub fn new(value: impl AsRef<str>) -> Self {
+        Self(value.as_ref().trim().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+}
+
+impl std::fmt::Display for AssetID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -177,6 +200,7 @@ pub enum InstanceRole {
     WorldIngestionDecodedHealthPayload,
     WorldIngestionDecodedViewerTimePayload,
     WorldIngestionDecodedCompositeBeacon,
+    WorldObjectFeedProxy,
     WorldObjectStateEntityBody,
     WorldObjectStateEntityAura,
     WorldObjectStateEntityWingBody,
@@ -445,6 +469,7 @@ pub struct Scene {
     pub octree: crate::spatial::Octree,
     pub next_id: usize,
     pub instance_map: BTreeMap<String, usize>, // agent_id -> instance_id
+    pub world_object_feed_map: BTreeMap<u32, usize>, // local_id -> instance_id
 }
 
 impl Default for Scene {
@@ -454,8 +479,15 @@ impl Default for Scene {
             octree: crate::spatial::Octree::new(1024.0), // Large enough for current diagnostics
             next_id: 0,
             instance_map: BTreeMap::new(),
+            world_object_feed_map: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedWorldObjectFeedObject {
+    pub local_id: u32,
+    pub scale_centi: Option<[u16; 3]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,6 +537,22 @@ pub struct LiveVisualSnapshot {
     pub decoded_viewer_time_body_len: Option<u16>,
     #[serde(default)]
     pub decoded_viewer_time_signature: Option<u32>,
+    #[serde(default)]
+    pub decoded_object_feed_update_messages: u32,
+    #[serde(default)]
+    pub decoded_object_feed_kill_messages: u32,
+    #[serde(default)]
+    pub decoded_object_feed_decode_dropped: u32,
+    #[serde(default)]
+    pub decoded_object_feed_evicted: u32,
+    #[serde(default)]
+    pub decoded_object_feed_total_objects: u32,
+    #[serde(default)]
+    pub decoded_object_feed_export_truncated: bool,
+    #[serde(default)]
+    pub decoded_object_feed_objects: Vec<DecodedWorldObjectFeedObject>,
+    #[serde(default)]
+    pub decoded_object_feed_recent_kills: Vec<u32>,
     pub observed_at_unix_ms: u64,
 }
 
@@ -1279,6 +1327,9 @@ pub enum WorldObjectIngestionLane {
     DecodedCoarseNeighborhoodPayload,
     DecodedHealthPayload,
     DecodedViewerTimePayload,
+    DecodedObjectFeedSummaryPayload,
+    DecodedObjectFeedObjectPayload,
+    DecodedObjectFeedKillPayload,
     ObjectStateEntitySeedPayload,
     ObjectStateEntityLifecyclePayload,
 }
@@ -1304,6 +1355,10 @@ pub struct WorldObjectIngestionItem {
     pub decoded_viewer_time_updates: Option<u32>,
     pub decoded_viewer_time_body_len: Option<u16>,
     pub decoded_viewer_time_signature: Option<u32>,
+    pub decoded_object_feed_total_objects: Option<u32>,
+    pub decoded_object_feed_export_truncated: bool,
+    pub decoded_object_local_id: Option<u32>,
+    pub decoded_object_scale_centi: Option<[u16; 3]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1336,6 +1391,10 @@ impl WorldObjectIngestionSeam {
             decoded_viewer_time_updates: None,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_total_objects: None,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_local_id: None,
+            decoded_object_scale_centi: None,
         }];
         if slice.traffic.available {
             items.push(WorldObjectIngestionItem {
@@ -1358,6 +1417,10 @@ impl WorldObjectIngestionSeam {
                 decoded_viewer_time_updates: None,
                 decoded_viewer_time_body_len: None,
                 decoded_viewer_time_signature: None,
+                decoded_object_feed_total_objects: None,
+                decoded_object_feed_export_truncated: false,
+                decoded_object_local_id: None,
+                decoded_object_scale_centi: None,
             });
         }
         Self { items }
@@ -1406,6 +1469,10 @@ impl WorldObjectIngestionSeam {
                 decoded_viewer_time_updates: None,
                 decoded_viewer_time_body_len: None,
                 decoded_viewer_time_signature: None,
+                decoded_object_feed_total_objects: None,
+                decoded_object_feed_export_truncated: false,
+                decoded_object_local_id: None,
+                decoded_object_scale_centi: None,
             });
         }
         if let Some(location_count) = snapshot.and_then(|s| s.decoded_coarse_location_count) {
@@ -1467,6 +1534,10 @@ impl WorldObjectIngestionSeam {
                 decoded_viewer_time_updates: None,
                 decoded_viewer_time_body_len: None,
                 decoded_viewer_time_signature: None,
+                decoded_object_feed_total_objects: None,
+                decoded_object_feed_export_truncated: false,
+                decoded_object_local_id: None,
+                decoded_object_scale_centi: None,
             });
             if let Some(coarse_second_xyz) = second_xyz {
                 seam.items.push(WorldObjectIngestionItem {
@@ -1489,6 +1560,10 @@ impl WorldObjectIngestionSeam {
                     decoded_viewer_time_updates: None,
                     decoded_viewer_time_body_len: None,
                     decoded_viewer_time_signature: None,
+                    decoded_object_feed_total_objects: None,
+                    decoded_object_feed_export_truncated: false,
+                    decoded_object_local_id: None,
+                    decoded_object_scale_centi: None,
                 });
             }
         }
@@ -1531,6 +1606,10 @@ impl WorldObjectIngestionSeam {
                 decoded_viewer_time_updates: None,
                 decoded_viewer_time_body_len: None,
                 decoded_viewer_time_signature: None,
+                decoded_object_feed_total_objects: None,
+                decoded_object_feed_export_truncated: false,
+                decoded_object_local_id: None,
+                decoded_object_scale_centi: None,
             });
         }
         if let Some(body_len) = snapshot.and_then(|s| s.decoded_viewer_time_body_len) {
@@ -1572,9 +1651,117 @@ impl WorldObjectIngestionSeam {
                 decoded_viewer_time_body_len: Some(body_len),
                 decoded_viewer_time_signature: snapshot
                     .and_then(|s| s.decoded_viewer_time_signature),
+                decoded_object_feed_total_objects: None,
+                decoded_object_feed_export_truncated: false,
+                decoded_object_local_id: None,
+                decoded_object_scale_centi: None,
             });
         }
         if let Some(state) = snapshot {
+            let stage = if state.logged_in && state.handshake_agent_movement_complete {
+                WorldEntryStage::EnteredFirstRegion
+            } else if state.logged_in {
+                WorldEntryStage::Connected
+            } else {
+                WorldEntryStage::Offline
+            };
+            let region_coords = match (state.first_sim_region_x, state.first_sim_region_y) {
+                (Some(x), Some(y)) => Some([x, y]),
+                _ => None,
+            };
+
+            if state.decoded_object_feed_total_objects > 0
+                || !state.decoded_object_feed_objects.is_empty()
+                || !state.decoded_object_feed_recent_kills.is_empty()
+            {
+                seam.items.push(WorldObjectIngestionItem {
+                    lane: WorldObjectIngestionLane::DecodedObjectFeedSummaryPayload,
+                    stage,
+                    region_coords,
+                    simulator_target_present: state.first_sim_endpoint.is_some(),
+                    traffic_broader_count: 0,
+                    traffic_unknown_count: 0,
+                    traffic_region_control_count: 0,
+                    decoded_endpoint_port: None,
+                    decoded_endpoint_host_tail: None,
+                    decoded_coarse_location_count: None,
+                    decoded_coarse_first_xyz: None,
+                    decoded_coarse_second_xyz: None,
+                    decoded_coarse_third_xyz: None,
+                    decoded_coarse_updates: None,
+                    decoded_health_updates: None,
+                    decoded_health_basis_points: None,
+                    decoded_viewer_time_updates: None,
+                    decoded_viewer_time_body_len: None,
+                    decoded_viewer_time_signature: None,
+                    decoded_object_feed_total_objects: Some(
+                        state.decoded_object_feed_total_objects,
+                    ),
+                    decoded_object_feed_export_truncated: state
+                        .decoded_object_feed_export_truncated,
+                    decoded_object_local_id: None,
+                    decoded_object_scale_centi: None,
+                });
+
+                for obj in &state.decoded_object_feed_objects {
+                    seam.items.push(WorldObjectIngestionItem {
+                        lane: WorldObjectIngestionLane::DecodedObjectFeedObjectPayload,
+                        stage,
+                        region_coords,
+                        simulator_target_present: state.first_sim_endpoint.is_some(),
+                        traffic_broader_count: 0,
+                        traffic_unknown_count: 0,
+                        traffic_region_control_count: 0,
+                        decoded_endpoint_port: None,
+                        decoded_endpoint_host_tail: None,
+                        decoded_coarse_location_count: None,
+                        decoded_coarse_first_xyz: None,
+                        decoded_coarse_second_xyz: None,
+                        decoded_coarse_third_xyz: None,
+                        decoded_coarse_updates: None,
+                        decoded_health_updates: None,
+                        decoded_health_basis_points: None,
+                        decoded_viewer_time_updates: None,
+                        decoded_viewer_time_body_len: None,
+                        decoded_viewer_time_signature: None,
+                        decoded_object_feed_total_objects: None,
+                        decoded_object_feed_export_truncated: state
+                            .decoded_object_feed_export_truncated,
+                        decoded_object_local_id: Some(obj.local_id),
+                        decoded_object_scale_centi: obj.scale_centi,
+                    });
+                }
+
+                for local_id in &state.decoded_object_feed_recent_kills {
+                    seam.items.push(WorldObjectIngestionItem {
+                        lane: WorldObjectIngestionLane::DecodedObjectFeedKillPayload,
+                        stage,
+                        region_coords,
+                        simulator_target_present: state.first_sim_endpoint.is_some(),
+                        traffic_broader_count: 0,
+                        traffic_unknown_count: 0,
+                        traffic_region_control_count: 0,
+                        decoded_endpoint_port: None,
+                        decoded_endpoint_host_tail: None,
+                        decoded_coarse_location_count: None,
+                        decoded_coarse_first_xyz: None,
+                        decoded_coarse_second_xyz: None,
+                        decoded_coarse_third_xyz: None,
+                        decoded_coarse_updates: None,
+                        decoded_health_updates: None,
+                        decoded_health_basis_points: None,
+                        decoded_viewer_time_updates: None,
+                        decoded_viewer_time_body_len: None,
+                        decoded_viewer_time_signature: None,
+                        decoded_object_feed_total_objects: None,
+                        decoded_object_feed_export_truncated: state
+                            .decoded_object_feed_export_truncated,
+                        decoded_object_local_id: Some(*local_id),
+                        decoded_object_scale_centi: None,
+                    });
+                }
+            }
+
             let coarse_xyz = match (
                 state.decoded_coarse_first_x,
                 state.decoded_coarse_first_y,
@@ -1633,6 +1820,10 @@ impl WorldObjectIngestionSeam {
                     decoded_viewer_time_updates: Some(state.decoded_viewer_time_updates),
                     decoded_viewer_time_body_len: state.decoded_viewer_time_body_len,
                     decoded_viewer_time_signature: state.decoded_viewer_time_signature,
+                    decoded_object_feed_total_objects: None,
+                    decoded_object_feed_export_truncated: false,
+                    decoded_object_local_id: None,
+                    decoded_object_scale_centi: None,
                 });
                 seam.items.push(WorldObjectIngestionItem {
                     lane: WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload,
@@ -1668,6 +1859,10 @@ impl WorldObjectIngestionSeam {
                     decoded_viewer_time_updates: Some(state.decoded_viewer_time_updates),
                     decoded_viewer_time_body_len: state.decoded_viewer_time_body_len,
                     decoded_viewer_time_signature: state.decoded_viewer_time_signature,
+                    decoded_object_feed_total_objects: None,
+                    decoded_object_feed_export_truncated: false,
+                    decoded_object_local_id: None,
+                    decoded_object_scale_centi: None,
                 });
             }
         }
@@ -1785,6 +1980,77 @@ impl Scene {
             }
         } else {
             self.insert_instance(mesh, role, transform, color);
+        }
+    }
+
+    fn upsert_world_object_feed(
+        &mut self,
+        local_id: u32,
+        item: WorldObjectIngestionItem,
+        coarse_anchor_pos: Option<[f32; 3]>,
+    ) {
+        if local_id == 0 {
+            return;
+        }
+
+        let transform = world_object_feed_proxy_transform(item, coarse_anchor_pos);
+        let color = world_object_feed_proxy_color(local_id);
+
+        if let Some(&instance_id) = self.world_object_feed_map.get(&local_id) {
+            if let Some(instance) = self.instances.get_mut(&instance_id) {
+                if instance.transform != transform || instance.color != color {
+                    instance.transform = transform;
+                    instance.color = color;
+                    instance.dirty_spatial = true;
+                }
+                return;
+            }
+        }
+
+        let id = self.insert_instance(
+            GeometrySource::Diagnostic(MeshKind::Cube),
+            InstanceRole::WorldObjectFeedProxy,
+            transform,
+            color,
+        );
+        self.world_object_feed_map.insert(local_id, id);
+    }
+
+    fn remove_world_object_feed(&mut self, local_id: u32) {
+        let Some(id) = self.world_object_feed_map.remove(&local_id) else {
+            return;
+        };
+        if let Some(inst) = self.instances.remove(&id) {
+            self.octree.remove(id, inst.world_aabb);
+        }
+    }
+
+    fn retain_world_object_feed(&mut self, keep: &BTreeSet<u32>) {
+        let mut to_remove = Vec::new();
+        for (&local_id, &id) in &self.world_object_feed_map {
+            if !keep.contains(&local_id) {
+                to_remove.push((local_id, id));
+            }
+        }
+        for (local_id, id) in to_remove {
+            self.world_object_feed_map.remove(&local_id);
+            if let Some(inst) = self.instances.remove(&id) {
+                self.octree.remove(id, inst.world_aabb);
+            }
+        }
+    }
+
+    fn clear_world_object_feed(&mut self) {
+        let ids: Vec<(u32, usize)> = self
+            .world_object_feed_map
+            .iter()
+            .map(|(local_id, id)| (*local_id, *id))
+            .collect();
+        self.world_object_feed_map.clear();
+        for (_local_id, id) in ids {
+            if let Some(inst) = self.instances.remove(&id) {
+                self.octree.remove(id, inst.world_aabb);
+            }
         }
     }
 
@@ -2075,6 +2341,51 @@ impl Scene {
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionDecodedViewerTimePayload);
+        }
+
+        let object_feed_summary =
+            seam.items.iter().copied().find(|item| {
+                item.lane == WorldObjectIngestionLane::DecodedObjectFeedSummaryPayload
+            });
+
+        if object_feed_summary.is_none() {
+            self.clear_world_object_feed();
+        } else {
+            let coarse_anchor_pos = seam
+                .items
+                .iter()
+                .copied()
+                .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload)
+                .map(world_ingestion_decoded_coarse_location_transform)
+                .map(|t| t.position);
+
+            let mut present_ids = BTreeSet::new();
+            for item in seam.items.iter().copied().filter(|item| {
+                item.lane == WorldObjectIngestionLane::DecodedObjectFeedObjectPayload
+            }) {
+                if let Some(local_id) = item.decoded_object_local_id {
+                    present_ids.insert(local_id);
+                    self.upsert_world_object_feed(local_id, item, coarse_anchor_pos);
+                }
+            }
+
+            for item in
+                seam.items.iter().copied().filter(|item| {
+                    item.lane == WorldObjectIngestionLane::DecodedObjectFeedKillPayload
+                })
+            {
+                if let Some(local_id) = item.decoded_object_local_id {
+                    self.remove_world_object_feed(local_id);
+                    present_ids.remove(&local_id);
+                }
+            }
+
+            let truncated = object_feed_summary
+                .map(|summary| summary.decoded_object_feed_export_truncated)
+                .unwrap_or(false);
+            if !truncated {
+                self.retain_world_object_feed(&present_ids);
+            }
         }
 
         let coarse_item = seam
@@ -2700,6 +3011,49 @@ fn world_ingestion_decoded_viewer_time_color(item: WorldObjectIngestionItem) -> 
     [0.36 + len_norm * 0.44, 0.34 + intensity * 0.48, 0.92]
 }
 
+fn world_object_feed_proxy_transform(
+    item: WorldObjectIngestionItem,
+    coarse_anchor_pos: Option<[f32; 3]>,
+) -> Transform {
+    let local_id = item.decoded_object_local_id.unwrap_or(0);
+    let [base_x, base_z] = world_cluster_base(item.region_coords);
+    let anchor = coarse_anchor_pos.unwrap_or([base_x + 0.25, 0.22, base_z - 0.15]);
+
+    let bucket = (local_id % 64) as f32;
+    let ring = ((local_id / 64) % 8) as f32;
+    let heading = (bucket / 64.0) * core::f32::consts::TAU + ring * 0.17;
+    let radius = 0.55 + ring * 0.22;
+
+    let px = anchor[0] + heading.cos() * radius;
+    let pz = anchor[2] + heading.sin() * radius;
+    let py = (anchor[1] + 0.08 + ring * 0.03).clamp(0.05, 3.0);
+
+    let scale = item
+        .decoded_object_scale_centi
+        .map(|[x, y, z]| {
+            [
+                (x as f32 / 100.0).clamp(0.05, 8.0),
+                (y as f32 / 100.0).clamp(0.05, 8.0),
+                (z as f32 / 100.0).clamp(0.05, 8.0),
+            ]
+        })
+        .unwrap_or([0.18, 0.18, 0.18]);
+
+    Transform {
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        position: [px, py, pz],
+        scale,
+    }
+}
+
+fn world_object_feed_proxy_color(local_id: u32) -> [f32; 3] {
+    let hash = local_id.wrapping_mul(2_654_435_761);
+    let r = ((hash & 0xFF) as f32) / 255.0;
+    let g = (((hash >> 8) & 0xFF) as f32) / 255.0;
+    let b = (((hash >> 16) & 0xFF) as f32) / 255.0;
+    [0.30 + r * 0.55, 0.30 + g * 0.55, 0.30 + b * 0.55]
+}
+
 fn world_ingestion_decoded_composite_transform(
     coarse: WorldObjectIngestionItem,
     health: WorldObjectIngestionItem,
@@ -3180,6 +3534,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 0,
         }
     }
@@ -3482,6 +3844,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 1,
         };
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
@@ -3716,6 +4086,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 0,
         };
         let presence = FirstRegionPresence::from_live_snapshot(Some(&snapshot));
@@ -3756,6 +4134,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 7,
         };
         let slice = WorldDiagnosticSlice::from_live_snapshot(Some(&snapshot));
@@ -3825,6 +4211,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -3875,6 +4269,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -3919,6 +4321,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -3961,6 +4371,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4006,6 +4424,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4071,6 +4497,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4131,6 +4565,14 @@ mod tests {
             decoded_viewer_time_updates: 5,
             decoded_viewer_time_body_len: Some(28),
             decoded_viewer_time_signature: Some(0xDDCCBBAA),
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4319,6 +4761,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         apply_scene_from_snapshot(&mut scene, Some(&coarse_only));
@@ -4448,6 +4898,70 @@ mod tests {
     }
 
     #[test]
+    fn scene_world_object_feed_proxies_create_and_remove_deterministically() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 2;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![
+            DecodedWorldObjectFeedObject {
+                local_id: 42,
+                scale_centi: Some([20, 30, 40]),
+            },
+            DecodedWorldObjectFeedObject {
+                local_id: 99,
+                scale_centi: None,
+            },
+        ];
+        snapshot.decoded_object_feed_recent_kills = Vec::new();
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert_eq!(
+            scene
+                .instances
+                .values()
+                .filter(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+                .count(),
+            2
+        );
+
+        let mut truncated = snapshot.clone();
+        truncated.decoded_object_feed_total_objects = 2;
+        truncated.decoded_object_feed_export_truncated = true;
+        truncated.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 42,
+            scale_centi: Some([20, 30, 40]),
+        }];
+        truncated.decoded_object_feed_recent_kills = Vec::new();
+        apply_scene_from_snapshot(&mut scene, Some(&truncated));
+        assert_eq!(
+            scene
+                .instances
+                .values()
+                .filter(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+                .count(),
+            2
+        );
+
+        let mut remove_one = snapshot;
+        remove_one.decoded_object_feed_total_objects = 1;
+        remove_one.decoded_object_feed_export_truncated = false;
+        remove_one.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 42,
+            scale_centi: Some([20, 30, 40]),
+        }];
+        remove_one.decoded_object_feed_recent_kills = vec![99];
+        apply_scene_from_snapshot(&mut scene, Some(&remove_one));
+        assert_eq!(
+            scene
+                .instances
+                .values()
+                .filter(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn scene_object_state_entity_family_count_is_gated_by_coarse_count() {
         let mut scene = Scene::prototype();
         let mut snapshot = sample_snapshot(true, true);
@@ -4550,6 +5064,10 @@ mod tests {
             decoded_viewer_time_updates: Some(0),
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_total_objects: None,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_local_id: None,
+            decoded_object_scale_centi: None,
         };
         assert_eq!(
             object_state_lifecycle_phase(base),
@@ -4777,6 +5295,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -5125,6 +5651,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 100,
         };
 

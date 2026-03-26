@@ -48,8 +48,9 @@ Durable repository law belongs in `MASTER_PLAN.md` and `AGENTS.md`.
 5. Read prior relevant plan/review/report artifacts.
 6. Research protocol-sensitive behavior before planning.
 7. Write a decision-complete milestone plan in `docs/plans/PLAN_<ID>.md`.
-8. Write plan review in `docs/reviews/`.
-9. Obtain user sign-off before implementation.
+8. Record any "valid but too early" scope in `docs/plans/DEFERRED_FEATURES.md`.
+9. Write plan review in `docs/reviews/`.
+10. Obtain user sign-off before implementation.
 
 ### If you are executing a milestone
 
@@ -285,51 +286,199 @@ A materially richer bounded world-object set reaches scene/render preparation th
 
 ---
 
-## U04 — Core usability and workflow shell alignment (concise)
+## U04 — Core usability and workflow shell alignment
 
-### Dependency notes
+### Goal
 
-Depends on stable outcomes from `R01`, `A02`, and `N03`.
+Make startup, session status, social/profile workflow, and diagnostics operable as a coherent daily-use shell without changing architecture boundaries.
 
-### Non-goals
+### Why now
 
-Not full parity UX breadth; no invasive architecture changes.
+After `R01`, `A02`, and `N03`, usability and workflow clarity become the main bottleneck for validating richer world behavior safely.
+
+### In scope
+
+* consolidate UI information architecture into clearer runtime/workflow panel grouping
+* add explicit startup/session UX states (`disabled`, `starting`, `connected`, `failed`, `reconnecting`)
+* tighten chat/IM/profile interaction flow and failure/status messaging
+* standardize persisted social/profile cache indicators (fresh/stale/unknown) in workflow-facing UI
+
+### Out of scope
+
+* full parity UX breadth
+* new transport/protocol semantics
+* broad visual redesign unrelated to workflow clarity
+
+### Boundary check
+
+* `viewer_ui` owns status/workflow rendering and action emission
+* `viewer_app` owns orchestration and action dispatch to existing worker/session controls
+* `viewer_core` remains source-of-truth owner for social/profile domain state
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_U04.md`
+* review artifact `docs/reviews/REVIEW_plan_u04.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests in touched UI/app/core modules
+* `cargo test` if behavior changes materially
+* `cargo run -p viewer_app` workflow smoke covering startup-state transitions and chat/IM/profile interaction loop
+
+### Exit criteria
+
+A deterministic startup-to-social/profile workflow loop is usable in bounded mode, with explicit and stable status/failure presentation.
 
 ---
 
-## R05 — Draw submission efficiency and transparency reliability (concise)
+## R05 — Draw submission efficiency and transparency reliability
 
-### Dependency notes
+### Goal
 
-Depends on feed maturity from `N03` and asset discipline from `A02`.
+Make renderer submission predictable under growing scene load and ensure transparent content renders in stable, repeatable order.
 
-### Non-goals
+### Why now
 
-Not cinematic post-FX overhaul; not full environment rendering.
+`U04` improves operator workflow; next risk is frame-time instability and visual correctness drift as object/feed richness increases.
+
+### In scope
+
+* split draw submission into explicit pass buckets (`opaque`, `alpha-tested`, `transparent`)
+* deterministic transparent ordering (camera-distance back-to-front sort)
+* reduce per-frame submission churn via stable batching keys and resource reuse policy
+* preserve deterministic fallback behavior for missing/incomplete geometry or material inputs
+
+### Out of scope
+
+* cinematic post-processing overhaul
+* full environment/EEP rendering
+* broad shader-model redesign
+
+### Boundary check
+
+* `viewer_render` owns pass building, ordering, and GPU submission
+* `viewer_app` remains orchestration-only
+* `viewer_asset` and `viewer_core` provide inputs/contracts, not render-policy ownership
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_R05.md`
+* review artifact `docs/reviews/REVIEW_plan_r05.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted renderer tests (pass bucketing, stable ordering, fallback determinism)
+* `cargo test` when rendering behavior changes materially across crate boundaries
+* `cargo run -p viewer_app` stress smoke with repeated camera sweeps for transparent-order stability
+
+### Exit criteria
+
+Transparent content ordering is stable across repeated camera movement and bounded stress runs, and submission behavior remains deterministic.
 
 ---
 
-## A06 — Material/texture depth expansion (concise)
+## A06 — Material/texture depth expansion
 
-### Dependency notes
+### Goal
 
-Depends on `R05` submission patterns and validated cache behavior from `A02`.
+Promote existing material scaffolding into an active, bounded multi-texture pipeline supporting legacy and early PBR inputs through typed contracts.
 
-### Non-goals
+### Why now
 
-Not broad avatar baking or full parity material feature set.
+`R05` establishes reliable submission lanes needed to scale material complexity safely.
+
+### In scope
+
+* activate `MaterialDescriptor` flow from scene-facing data into renderer binding
+* support bounded texture set: base color, normal, metallic/roughness, emissive (where available)
+* integrate texture transform/animation matrix path already present in `viewer_core::material::animation`
+* extend asset/cache/provider contracts for material-driven texture requests and deterministic `Loading`/`Missing` fallback handling
+
+### Out of scope
+
+* full parity material surface
+* avatar baking/system-layer composition
+* unbounded live asset streaming
+
+### Boundary check
+
+* `viewer_asset` owns acquisition/cache policy
+* `viewer_render` owns bind groups, material uniforms, and GPU-side fallback behavior
+* `viewer_core` owns material descriptor semantics and shared typed contracts
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_A06.md`
+* review artifact `docs/reviews/REVIEW_plan_a06.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests for material descriptor mapping and texture-ready/missing transitions
+* `cargo test` when material behavior changes materially
+* `cargo run -p viewer_app` mixed-material fixture smoke verifying deterministic legacy/PBR fallback paths
+
+### Exit criteria
+
+Bounded mixed legacy/PBR materials render through typed contracts with deterministic loading/missing fallback behavior.
 
 ---
 
-## N07 — Region continuity and world scaling (concise)
+## N07 — Region continuity and world scaling
 
-### Dependency notes
+### Goal
 
-Depends on stable bounded decode discipline from `N03`.
+Expand from first-region bounded slice to bounded multi-region continuity with explicit typed transition and handoff semantics.
 
-### Non-goals
+### Why now
 
-Not protocol-everything milestone; no boundary collapse.
+After render/material stabilization (`R05` + `A06`), the next safe growth step is continuity breadth without collapsing network/grid boundaries.
+
+### In scope
+
+* type and propagate region-transition control signals (`CrossedRegion`, `ConfirmEnableSimulator`) into bounded continuity state
+* add bounded multi-region presence model (active region, neighbor summaries, handoff phase)
+* extend ingestion seam with continuity lanes that preserve seam ownership rules
+* maintain bounded decode strategy with explicit allowlist and diagnostics-first handling for unknown traffic
+
+### Out of scope
+
+* protocol-everything expansion
+* unlimited region streaming
+* `viewer_net`/`viewer_grid` boundary collapse
+
+### Boundary check
+
+* `viewer_net` owns transport/decode mechanics and diagnostics
+* `viewer_grid` owns semantic interpretation/policy
+* `viewer_core::Scene` seam path remains the only create/remove authority for seam-owned roles
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_N07.md`
+* review artifact `docs/reviews/REVIEW_plan_n07.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted decode + continuity-lane + seam-ownership tests
+* `cargo test` when continuity behavior changes materially
+* `cargo run -p viewer_app` bounded transition-control observation runs verifying continuity state and scene behavior
+
+### Exit criteria
+
+Bounded region-transition continuity is visible in diagnostics and scene behavior without boundary violations.
 
 ---
 
@@ -396,6 +545,48 @@ Each milestone must first be broken into an approved plan document:
 
 ---
 
+## How to plan future concise milestones (`R08+`)
+
+Milestones still listed as "(concise)" are roadmap placeholders, not implementation-ready plans.
+
+Before planning or implementing one of these milestones, the planner must:
+
+1. confirm predecessor dependencies are complete (or explicitly document any accepted partial dependency risk)
+2. expand the milestone in this file to the full milestone shape:
+   * `Goal`
+   * `Why now`
+   * `In scope`
+   * `Out of scope`
+   * `Boundary check`
+   * `Deliverables`
+   * `Validation expectations`
+   * `Exit criteria`
+3. split the milestone into additional prefixed IDs if the scope is too broad for one bounded plan
+4. update ordering constraints if dependency order changes
+5. create `docs/plans/PLAN_<ID>.md` and a review artifact in `docs/reviews/`
+6. obtain user sign-off before implementation starts
+
+If this conversion is not done, the milestone is not ready for implementation work.
+
+---
+
+## Deferred-too-early feature capture (mandatory)
+
+When planning identifies a feature that is useful but too early for the current milestone, it must not be lost.
+
+Record each deferred item in `docs/plans/DEFERRED_FEATURES.md` with:
+
+* candidate feature
+* source milestone/plan where it was considered
+* exact reason it was deferred as "too early"
+* earliest milestone where it may be reconsidered
+* dependency/trigger needed before reconsideration
+* status (`open`, `promoted`, `dropped`)
+
+Do not delete deferred items when promoted. Mark them `promoted` and reference the milestone plan that picked them up.
+
+---
+
 ## Standard milestone plan template
 
 Use this structure for each `docs/plans/PLAN_<ID>.md`:
@@ -414,6 +605,7 @@ Use this structure for each `docs/plans/PLAN_<ID>.md`:
 ## Step sequence
 ## Validation plan
 ## Risks and open questions
+## Deferred-too-early candidates captured
 ## Completion criteria
 ```
 
@@ -439,8 +631,9 @@ Do not update this file for routine implementation churn.
 
 The next planning sequence is:
 
-1. `R01`
-2. `A02`
-3. `N03`
+1. `U04`
+2. `R05`
+3. `A06`
+4. `N07`
 
 Each requires its own approved `docs/plans/PLAN_<ID>.md` before implementation.

@@ -263,6 +263,14 @@ fn build_base_live_visual_snapshot(result: &GridLoginResult) -> LiveVisualSnapsh
         decoded_viewer_time_updates: 0,
         decoded_viewer_time_body_len: None,
         decoded_viewer_time_signature: None,
+        decoded_object_feed_update_messages: 0,
+        decoded_object_feed_kill_messages: 0,
+        decoded_object_feed_decode_dropped: 0,
+        decoded_object_feed_evicted: 0,
+        decoded_object_feed_total_objects: 0,
+        decoded_object_feed_export_truncated: false,
+        decoded_object_feed_objects: Vec::new(),
+        decoded_object_feed_recent_kills: Vec::new(),
         observed_at_unix_ms: now_unix_ms(),
     };
 

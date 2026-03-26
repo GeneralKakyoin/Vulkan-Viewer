@@ -2,66 +2,34 @@
 
 ## What changed
 
-- Replaced `docs/plans/PLAN.md` with a new canonical prefixed-milestone roadmap.
-- The roadmap now uses `<Stream><NN>` milestone IDs with stream legend `R/A/N/U` and a dependency-led sequence.
-- Legacy completion baseline remains explicit (`M0` through `M5` complete) and now has a legacy-to-new crosswalk table for traceability.
-- The next three implementation-ready roadmap milestones are now `R01 -> A02 -> N03`, each with measurable validation expectations and explicit boundary checks.
-- Deprecated `docs/plans/RENDERING_ROADMAP_V2.md` and added a redirect to `docs/plans/PLAN.md` plus per-milestone plan files (`PLAN_<ID>.md`).
-- Updated continuity docs to reflect the roadmap transition.
+- Executed `N03` bounded world/object decode expansion for a richer render feed:
+  - `viewer_net` now classifies and minimally decodes object update family LLUDP traffic (`ObjectUpdate*`, `ImprovedTerseObjectUpdate`, `KillObject`) into a bounded object feed.
+  - `viewer_app` bridges the bounded object feed into `LiveVisualSnapshot`.
+  - `viewer_core` maps the feed into new ingestion seam lanes and applies seam-owned lifecycle to scene instances (`WorldObjectFeedProxy`) with truncation-safe removal behavior.
+- Wrote execution report: `docs/reports/REPORT_n03_bounded_object_feed.md`.
 
 ## Validation run
 
-- `cargo fmt --all -- --check` (pass)
-- `cargo check` (pass)
-- consistency checks on `docs/plans/PLAN.md` for:
-  - legacy completion statement (`M0` to `M5`)
-  - ID format and first three milestones (`R01`, `A02`, `N03`)
-  - crosswalk table presence
-  - Firestorm reference-only policy language
-  - command-level validation expectations (`cargo fmt`, `cargo check`, `cargo test`, `cargo run -p viewer_app`)
+- `cargo fmt` (pass)
+- `cargo check` (pass; warnings only for existing deprecated `wgpu` copy type aliases)
+- `cargo test -p viewer_net` (pass)
+- `cargo test -p viewer_core` (pass)
+- `cargo test -p viewer_app` (pass)
+- `cargo test` (pass)
+- Runtime smoke (time-bounded; process was stopped by timeout):
+  - `VIEWER_APP_LIVE_STARTUP=off`
+  - `cargo run -p viewer_app`
 
 ## Exact current state
 
-The current repository state should be treated as:
-
-- core runtime, renderer baseline, and crate boundaries are proven
-- live Second Life login/bootstrap compatibility is proven
-- first-simulator LLUDP handshake is proven
-- bounded decode -> snapshot -> seam -> scene mapping is proven
-- bounded coarse neighborhood ingestion is viable
-- avatar placeholder world presence is viable
-- the rendering track is complete through **M2**
-- full asset-backed textured/material world rendering is **not yet complete**
-- the master roadmap is now prefixed and canonical at `docs/plans/PLAN.md`
-
-More specifically, the rendering side should currently be understood as:
-
-- **M1 complete**: spatial foundation and scene-management groundwork exist
-- **M2 complete**: geometry-engine groundwork exists for SL primitives, mesh loading, sculpt support, geometry caching, and early LOD groundwork
+- `R01`, `A02`, and `N03` are complete.
+- The runtime exposes a bounded object feed that drives scene proxy instances via seam-owned lifecycle.
 
 ## Exact next step
 
-Plan and review `R01` as the first prefixed milestone:
-
-1. author `docs/plans/PLAN_R01.md` as a decision-complete implementation plan
-2. write plan review artifact in `docs/reviews/`
-3. execute only after user sign-off on `PLAN_R01.md`
-
-Then continue the same flow for `A02`, then `N03`.
+Plan `U04` (`docs/plans/PLAN_U04.md`) and write a plan review (`docs/reviews/REVIEW_plan_u04.md`), then execute it.
 
 ## Blockers or risks
 
-- `docs/plans/` currently appears as untracked in this working tree; roadmap docs are updated there but may not show up in tracked diffs until added in normal Git flow.
-- If older references to legacy `M6+` sequencing remain in other docs, future agents may still need a final alignment sweep.
-- Do not start implementation from roadmap text alone; each milestone still requires its own approved `PLAN_<ID>.md`.
-
-## Constraints
-
-Keep the current architectural boundaries intact:
-
-- `viewer_app` = orchestration only
-- `viewer_core` = shared domain state and scene/world mapping
-- `viewer_render` = rendering internals and GPU submission
-- `viewer_ui` = display/debug UI only
-- `viewer_net` = transport/session/codec/diagnostics
-- Firestorm is a behavior/protocol reference only, not an architecture template
+- `viewer_render` still emits non-blocking deprecation warnings for `wgpu` copy type aliases (`ImageCopyTexture`, `ImageCopyBuffer`, `ImageDataLayout`).
+- Local workspace remains dirty with pre-existing unrelated files; isolate any next milestone diff carefully.

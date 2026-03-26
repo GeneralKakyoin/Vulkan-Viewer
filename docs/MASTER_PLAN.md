@@ -164,7 +164,7 @@ That means:
 * exact next step belongs in `HANDOFF.md`
 * active priorities belong in `TASKS.md`
 * durable lessons belong in `LEARNINGS.md`
-the entire project roadmap is layed out in `docs/PLAN.md`
+the entire project roadmap is layed out in `docs/plans/PLAN.md`
 * task-specific planning, review, and execution evidence belong in saved artifacts under `docs/plans/`, `docs/reviews/`, and `docs/reports/`
 
 Documentation should reduce drift, not duplicate it.

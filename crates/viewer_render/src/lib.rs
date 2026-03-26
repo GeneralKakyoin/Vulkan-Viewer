@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use viewer_core::{
-    AvatarRenderMode, Camera, GeometrySource, MeshKind, Scene, Vertex, flatten_mat4, look_to_rh,
-    mat4_mul, perspective_rh_zo,
+    AssetID, AvatarRenderMode, Camera, GeometrySource, MeshKind, Scene, Vertex, flatten_mat4,
+    look_to_rh, mat4_mul, perspective_rh_zo,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -16,6 +17,11 @@ use wgpu::{
     TextureViewDescriptor, VertexBufferLayout, VertexState, VertexStepMode,
 };
 use winit::{dpi::PhysicalSize, window::Window};
+
+mod texture_provider;
+pub use texture_provider::{
+    DefaultTextureProvider, PendingTexture, StreamingTextureProvider, TextureProvider,
+};
 
 pub struct RenderBackend {
     surface: Surface<'static>,
@@ -38,6 +44,17 @@ pub struct RenderBackend {
     cube_mesh: MeshBuffers,
     avatar_proxy_mesh: Option<MeshBuffers>,
     dynamic_geometries: std::collections::HashMap<GeometrySource, MeshBuffers>,
+    texture_provider: StreamingTextureProvider,
+    textures: std::collections::HashMap<AssetID, wgpu::Texture>,
+}
+
+struct FrameCaptureJob {
+    path: PathBuf,
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+    unpadded_bytes_per_row: u32,
 }
 
 struct MeshBuffers {
@@ -95,7 +112,7 @@ impl RenderBackend {
         };
 
         let config = SurfaceConfiguration {
-            usage: TextureUsages::RENDER_ATTACHMENT,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -410,6 +427,8 @@ impl RenderBackend {
             cube_mesh,
             avatar_proxy_mesh,
             dynamic_geometries: Default::default(),
+            texture_provider: StreamingTextureProvider::new(texture_budget_mb_from_env()),
+            textures: Default::default(),
         })
     }
 
@@ -471,11 +490,87 @@ impl RenderBackend {
         self.dynamic_geometries.contains_key(source)
     }
 
+    pub fn has_texture(&self, id: &AssetID) -> bool {
+        self.texture_provider.contains(id)
+    }
+
+    pub fn texture_vram_usage_mb(&self) -> f32 {
+        self.texture_provider.vram_usage_mb()
+    }
+
+    pub fn upsert_texture_rgba8(
+        &mut self,
+        id: AssetID,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<()> {
+        if id.is_empty() {
+            return Ok(());
+        }
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let expected_len = width as usize * height as usize * 4;
+        if rgba.len() != expected_len {
+            anyhow::bail!("rgba buffer length mismatch");
+        }
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("asset_texture_rgba8"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let bytes_per_row = 4 * width;
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let size_bytes = rgba.len() as u64;
+        let evicted = self
+            .texture_provider
+            .insert(id.clone(), Arc::clone(&view), size_bytes);
+        for evict in evicted {
+            self.textures.remove(&evict);
+        }
+
+        self.textures.insert(id, texture);
+        Ok(())
+    }
+
     pub fn render_frame<F>(
         &mut self,
         camera: &Camera,
         scene: &Scene,
         visibility_list: &[usize],
+        capture_path: Option<&Path>,
         draw_overlay: F,
     ) -> Result<()>
     where
@@ -612,8 +707,120 @@ impl RenderBackend {
             self.surface_size(),
         );
 
+        let frame_capture = if let Some(path) = capture_path {
+            Some(self.schedule_frame_capture(&mut encoder, &output.texture, path)?)
+        } else {
+            None
+        };
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+
+        if let Some(job) = frame_capture {
+            self.complete_frame_capture(job)?;
+        }
+
+        Ok(())
+    }
+
+    fn schedule_frame_capture(
+        &self,
+        encoder: &mut CommandEncoder,
+        surface_texture: &wgpu::Texture,
+        path: &Path,
+    ) -> Result<FrameCaptureJob> {
+        let width = self.config.width.max(1);
+        let height = self.config.height.max(1);
+        let unpadded_bytes_per_row = width * 4;
+        let padded_bytes_per_row = align_up(
+            unpadded_bytes_per_row as u64,
+            wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
+        ) as u32;
+        let buffer_size = padded_bytes_per_row as u64 * height as u64;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame_capture_buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: surface_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        Ok(FrameCaptureJob {
+            path: path.to_path_buf(),
+            buffer,
+            width,
+            height,
+            padded_bytes_per_row,
+            unpadded_bytes_per_row,
+        })
+    }
+
+    fn complete_frame_capture(&self, job: FrameCaptureJob) -> Result<()> {
+        let slice = job.buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        let _ = self.device.poll(wgpu::MaintainBase::Wait);
+
+        receiver
+            .recv()
+            .context("frame capture map channel closed")?
+            .context("failed to map frame capture buffer")?;
+
+        let mapped = slice.get_mapped_range();
+        let mut rgba = vec![0_u8; (job.unpadded_bytes_per_row * job.height) as usize];
+        for row in 0..job.height as usize {
+            let src_offset = row * job.padded_bytes_per_row as usize;
+            let dst_offset = row * job.unpadded_bytes_per_row as usize;
+            let src = &mapped[src_offset..src_offset + job.unpadded_bytes_per_row as usize];
+            let dst = &mut rgba[dst_offset..dst_offset + job.unpadded_bytes_per_row as usize];
+            dst.copy_from_slice(src);
+        }
+        drop(mapped);
+        job.buffer.unmap();
+
+        if let Some(parent) = job.path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create frame capture directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        image::save_buffer_with_format(
+            &job.path,
+            &rgba,
+            job.width,
+            job.height,
+            image::ColorType::Rgba8,
+            image::ImageFormat::Png,
+        )
+        .with_context(|| format!("failed to write screenshot: {}", job.path.display()))?;
+
         Ok(())
     }
 
@@ -703,6 +910,14 @@ fn avatar_proxy_fallback_forced() -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     )
+}
+
+fn texture_budget_mb_from_env() -> u64 {
+    std::env::var("VIEWER_RENDER_VRAM_BUDGET_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(512)
+        .clamp(16, 4096)
 }
 
 fn create_depth_resources(

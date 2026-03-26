@@ -5,11 +5,7 @@ use viewer_core::geometry::llvolume::SubMesh;
 
 pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
     if data.is_empty() {
-        return Ok(ProcessedMesh {
-            vertices: vec![],
-            submeshes: vec![],
-            aabb: viewer_core::Aabb::new([0.0, 0.0, 0.0], [0.1, 0.1, 0.1]),
-        });
+        anyhow::bail!("glTF data is empty");
     }
 
     let (document, buffers, _images): (
@@ -139,4 +135,15 @@ pub fn load_gltf_mesh(data: &[u8]) -> Result<ProcessedMesh> {
         submeshes,
         aabb: viewer_core::Aabb::new(center, size),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_gltf_is_error() {
+        let result = load_gltf_mesh(&[]);
+        assert!(result.is_err());
+    }
 }

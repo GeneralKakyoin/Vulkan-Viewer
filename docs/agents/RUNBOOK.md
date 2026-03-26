@@ -7,12 +7,13 @@ It complements `AGENTS.md`.
 
 1. Repo scan / context collection
 2. Planner writes a plan in `docs/plans/`
-3. Plan reviewer writes a review in `docs/reviews/`
-4. Implementer executes the approved plan
-5. Implementation reviewer writes a review in `docs/reviews/`
-6. Implementer or integrator writes `docs/reports/REPORT_<slug>.md`
-7. Final actor updates continuity docs and `docs/HANDOFF.md`
-8. use FIELD_GUIDE.md when locating non-obvious ownership points, hidden boundaries, or hard-to-grep logic
+3. Planner captures any "too early" scoped-out features in `docs/plans/DEFERRED_FEATURES.md`
+4. Plan reviewer writes a review in `docs/reviews/`
+5. Implementer executes the approved plan
+6. Implementation reviewer writes a review in `docs/reviews/`
+7. Implementer or integrator writes `docs/reports/REPORT_<slug>.md`
+8. Final actor updates continuity docs and `docs/HANDOFF.md`
+9. use FIELD_GUIDE.md when locating non-obvious ownership points, hidden boundaries, or hard-to-grep logic
 
 
 ## Default role mapping
@@ -32,6 +33,7 @@ It complements `AGENTS.md`.
 ## Artifact locations
 
 - Plans: `docs/plans/`
+- Deferred features: `docs/plans/DEFERRED_FEATURES.md`
 - Reviews: `docs/reviews/`
 - Reports: `docs/reports/`
 - Tool setup: `docs/agents/`

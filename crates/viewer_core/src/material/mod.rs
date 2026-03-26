@@ -22,7 +22,9 @@ impl Eq for TextureEntry {}
 impl std::hash::Hash for TextureEntry {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.texture_id.hash(state);
-        for f in self.rgba { f.to_bits().hash(state); }
+        for f in self.rgba {
+            f.to_bits().hash(state);
+        }
         self.offset_s.to_bits().hash(state);
         self.offset_t.to_bits().hash(state);
         self.scale_s.to_bits().hash(state);
@@ -72,7 +74,9 @@ impl std::hash::Hash for PbrDescriptor {
         self.normal_id.hash(state);
         self.metallic_roughness_id.hash(state);
         self.emissive_id.hash(state);
-        for f in self.base_color_tint { f.to_bits().hash(state); }
+        for f in self.base_color_tint {
+            f.to_bits().hash(state);
+        }
         self.metallic_factor.to_bits().hash(state);
         self.roughness_factor.to_bits().hash(state);
     }

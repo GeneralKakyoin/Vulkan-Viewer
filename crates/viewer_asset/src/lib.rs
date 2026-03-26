@@ -5,7 +5,16 @@ use viewer_core::geometry::sculpt::generate_sculpt_mesh;
 use viewer_core::{SculptType, Vertex, VolumeParams};
 
 pub mod mesh_loader;
+pub mod texture_fixture;
 use mesh_loader::load_gltf_mesh;
+pub use texture_fixture::{DecodedRgbaImage, FixtureTextureCache};
+
+#[derive(Debug, Clone)]
+pub enum AssetStatus<T> {
+    Loading,
+    Ready(T),
+    Missing,
+}
 
 pub struct ProcessedMesh {
     pub vertices: Vec<Vertex>,
@@ -18,6 +27,7 @@ pub struct GeometryCache {
     pub procedural: HashMap<VolumeParams, Arc<ProcessedMesh>>,
     pub sculpts: HashMap<(String, SculptType), Arc<ProcessedMesh>>,
     pub meshes: HashMap<(String, u32), Arc<ProcessedMesh>>, // UUID, LOD
+    pub mesh_attempted_hash: HashMap<(String, u32), u64>, // prevents per-frame reload of same bytes
 }
 
 impl GeometryCache {
@@ -66,23 +76,44 @@ impl GeometryCache {
 
     pub fn get_mesh(&mut self, uuid: &str, lod: u32, data: &[u8]) -> Arc<ProcessedMesh> {
         let key = (uuid.to_string(), lod);
-        if let Some(mesh) = self.meshes.get(&key) {
-            return Arc::clone(mesh);
-        }
 
-        // If not in cache, load it.
-        // In M2, we expect the data to be provided or empty if not yet fetched.
-        if let Ok(mesh) = load_gltf_mesh(data) {
-            let mesh_arc = Arc::new(mesh);
-            self.meshes.insert(key, Arc::clone(&mesh_arc));
-            mesh_arc
-        } else {
-            // Fallback to a tiny cube if loading fails
+        // Ensure we always have a stable cached entry for determinism (even when missing).
+        // This avoids per-frame work and also prevents "poisoning" the cache permanently:
+        // if real bytes arrive later, we can retry when the input hash changes.
+        let cached = self.meshes.entry(key.clone()).or_insert_with(|| {
             Arc::new(ProcessedMesh {
                 vertices: vec![],
                 submeshes: vec![],
                 aabb: viewer_core::Aabb::new([0.0, 0.0, 0.0], [0.1, 0.1, 0.1]),
             })
+        });
+
+        let is_ready = !cached.vertices.is_empty() && !cached.submeshes.is_empty();
+        if is_ready {
+            return Arc::clone(cached);
+        }
+
+        if data.is_empty() {
+            self.mesh_attempted_hash.insert(key, 0);
+            return Arc::clone(cached);
+        }
+
+        let new_hash = hash_bytes(data);
+        if self.mesh_attempted_hash.get(&key).copied() == Some(new_hash) {
+            return Arc::clone(cached);
+        }
+
+        match load_gltf_mesh(data) {
+            Ok(mesh) => {
+                let mesh_arc = Arc::new(mesh);
+                self.meshes.insert(key.clone(), Arc::clone(&mesh_arc));
+                self.mesh_attempted_hash.remove(&key);
+                mesh_arc
+            }
+            Err(_) => {
+                self.mesh_attempted_hash.insert(key, new_hash);
+                Arc::clone(cached)
+            }
         }
     }
 }
@@ -103,4 +134,36 @@ pub fn get_lod_level(distance: f32) -> u32 {
     else {
         3
     } // Tiny
+}
+
+fn hash_bytes(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_mesh_caches_missing_entry_on_empty_data() {
+        let mut cache = GeometryCache::new();
+        let a = cache.get_mesh("dummy", 0, &[]);
+        let b = cache.get_mesh("dummy", 0, &[]);
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(a.vertices.is_empty());
+        assert!(a.submeshes.is_empty());
+    }
+
+    #[test]
+    fn get_mesh_does_not_reparse_same_invalid_bytes_every_call() {
+        let mut cache = GeometryCache::new();
+        let a = cache.get_mesh("dummy", 0, b"not-a-gltf");
+        let b = cache.get_mesh("dummy", 0, b"not-a-gltf");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(a.vertices.is_empty());
+        assert!(a.submeshes.is_empty());
+    }
 }

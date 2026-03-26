@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use dotenvy::dotenv;
 mod social_cache;
 use social_cache::{SocialCache, SocialCacheConfig};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -59,6 +59,9 @@ struct AppState {
     window: Arc<Window>,
     renderer: RenderBackend,
     geometry_cache: viewer_asset::GeometryCache,
+    fixture_texture_cache: viewer_asset::FixtureTextureCache,
+    fixture_texture_ids: Vec<viewer_core::AssetID>,
+    fixture_texture_missing_logged: HashSet<viewer_core::AssetID>,
     ui: UiSystem,
     camera: Camera,
     scene: Scene,
@@ -78,9 +81,110 @@ struct AppState {
     profile_image_bytes: BTreeMap<String, Vec<u8>>,
     social_cache: Option<SocialCache>,
     last_frame_time: Instant,
+    app_start_time: Instant,
     smoothed_fps: f32,
     smoothed_frame_ms: f32,
     avg_scene_update_ms: f32,
+    stress_test_mode: StressTestMode,
+    auto_camera_config: AutoCameraConfig,
+    screenshot_config: Option<ScreenshotConfig>,
+    frame_counter: u64,
+    captured_screenshots: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StressTestMode {
+    None,
+    SceneStress,
+    GeometryTorture,
+    AutoCamera,
+    Screenshot,
+}
+
+impl StressTestMode {
+    fn from_value(value: Option<&str>) -> Self {
+        let Some(value) = value else {
+            return Self::None;
+        };
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" => Self::SceneStress,
+            "2" => Self::GeometryTorture,
+            "camera" | "auto_camera" | "auto-camera" | "5" => Self::AutoCamera,
+            "screenshot" | "screenshots" | "capture" | "6" => Self::Screenshot,
+            _ => Self::None,
+        }
+    }
+
+    fn from_env() -> Self {
+        Self::from_value(std::env::var("STRESS_TEST").ok().as_deref())
+    }
+
+    fn uses_auto_camera(self) -> bool {
+        matches!(self, Self::AutoCamera | Self::Screenshot)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AutoCameraConfig {
+    center: [f32; 3],
+    radius: f32,
+    orbit_height: f32,
+    look_height: f32,
+    angular_speed_radians: f32,
+    phase_radians: f32,
+}
+
+impl Default for AutoCameraConfig {
+    fn default() -> Self {
+        Self {
+            center: [0.0, 0.0, 0.0],
+            radius: 22.0,
+            orbit_height: 10.0,
+            look_height: 2.0,
+            angular_speed_radians: 0.5,
+            phase_radians: 0.0,
+        }
+    }
+}
+
+impl AutoCameraConfig {
+    fn from_env() -> Self {
+        auto_camera_config_from_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn apply_to_camera(self, camera: &mut Camera, elapsed_seconds: f32) {
+        let angle = elapsed_seconds * self.angular_speed_radians + self.phase_radians;
+        let target = [
+            self.center[0],
+            self.center[1] + self.look_height,
+            self.center[2],
+        ];
+        let position = [
+            self.center[0] + self.radius * angle.cos(),
+            self.center[1] + self.orbit_height,
+            self.center[2] + self.radius * angle.sin(),
+        ];
+
+        let to_target = [
+            target[0] - position[0],
+            target[1] - position[1],
+            target[2] - position[2],
+        ];
+        let horizontal = (to_target[0] * to_target[0] + to_target[2] * to_target[2]).sqrt();
+        let yaw = to_target[2].atan2(to_target[0]);
+        let pitch = to_target[1].atan2(horizontal).clamp(-1.553343, 1.553343);
+
+        camera.position = position;
+        camera.yaw = yaw;
+        camera.pitch = pitch;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScreenshotConfig {
+    output_dir: PathBuf,
+    every_n_frames: u64,
+    max_frames: u32,
 }
 
 #[derive(Default)]
@@ -1627,6 +1731,14 @@ fn offline_snapshot() -> LiveVisualSnapshot {
         decoded_viewer_time_updates: 0,
         decoded_viewer_time_body_len: None,
         decoded_viewer_time_signature: None,
+        decoded_object_feed_update_messages: 0,
+        decoded_object_feed_kill_messages: 0,
+        decoded_object_feed_decode_dropped: 0,
+        decoded_object_feed_evicted: 0,
+        decoded_object_feed_total_objects: 0,
+        decoded_object_feed_export_truncated: false,
+        decoded_object_feed_objects: Vec::new(),
+        decoded_object_feed_recent_kills: Vec::new(),
         observed_at_unix_ms: now_unix_ms(),
     }
 }
@@ -1845,6 +1957,14 @@ fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisua
         decoded_viewer_time_updates: 0,
         decoded_viewer_time_body_len: None,
         decoded_viewer_time_signature: None,
+        decoded_object_feed_update_messages: 0,
+        decoded_object_feed_kill_messages: 0,
+        decoded_object_feed_decode_dropped: 0,
+        decoded_object_feed_evicted: 0,
+        decoded_object_feed_total_objects: 0,
+        decoded_object_feed_export_truncated: false,
+        decoded_object_feed_objects: Vec::new(),
+        decoded_object_feed_recent_kills: Vec::new(),
         observed_at_unix_ms: now_unix_ms(),
     };
 
@@ -1902,6 +2022,22 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
     snapshot.decoded_viewer_time_updates = decoded.simulator_viewer_time_updates as u32;
     snapshot.decoded_viewer_time_body_len = decoded.simulator_viewer_time_last_body_len;
     snapshot.decoded_viewer_time_signature = decoded.simulator_viewer_time_last_signature;
+
+    snapshot.decoded_object_feed_update_messages = decoded.object_feed_update_messages as u32;
+    snapshot.decoded_object_feed_kill_messages = decoded.object_feed_kill_messages as u32;
+    snapshot.decoded_object_feed_decode_dropped = decoded.object_feed_decode_dropped as u32;
+    snapshot.decoded_object_feed_evicted = decoded.object_feed_evicted as u32;
+    snapshot.decoded_object_feed_total_objects = decoded.object_feed_total_objects as u32;
+    snapshot.decoded_object_feed_export_truncated = decoded.object_feed_export_truncated;
+    snapshot.decoded_object_feed_objects = decoded
+        .object_feed_objects
+        .iter()
+        .map(|obj| viewer_core::DecodedWorldObjectFeedObject {
+            local_id: obj.local_id,
+            scale_centi: obj.scale_centi,
+        })
+        .collect();
+    snapshot.decoded_object_feed_recent_kills = decoded.object_feed_recent_kills.clone();
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -2683,6 +2819,12 @@ impl ViewerApp {
             })
             .collect::<BTreeMap<_, _>>();
 
+        let fixture_texture_ids = fixture_texture_ids_from_env();
+        let stress_test_mode = StressTestMode::from_env();
+        let auto_camera_config = AutoCameraConfig::from_env();
+        let screenshot_config =
+            screenshot_config_from_lookup(|key| std::env::var(key).ok(), stress_test_mode);
+
         let mut state = AppState {
             window,
             renderer,
@@ -2705,17 +2847,27 @@ impl ViewerApp {
             profile_image_bytes: BTreeMap::new(),
             social_cache: social_cache.take(),
             geometry_cache: viewer_asset::GeometryCache::new(),
+            fixture_texture_cache: viewer_asset::FixtureTextureCache::new(),
+            fixture_texture_ids,
+            fixture_texture_missing_logged: HashSet::new(),
             last_frame_time: Instant::now(),
+            app_start_time: Instant::now(),
             smoothed_fps: 0.0,
             smoothed_frame_ms: 0.0,
             avg_scene_update_ms: 0.0,
+            stress_test_mode,
+            auto_camera_config,
+            screenshot_config,
+            frame_counter: 0,
+            captured_screenshots: 0,
         };
 
-        let stress_test = std::env::var("STRESS_TEST").ok();
-        if stress_test.as_deref() == Some("1") {
-            state.spawn_stress_test();
-        } else if stress_test.as_deref() == Some("2") {
-            state.spawn_geometry_torture_test();
+        match state.stress_test_mode {
+            StressTestMode::SceneStress => state.spawn_stress_test(),
+            StressTestMode::GeometryTorture
+            | StressTestMode::AutoCamera
+            | StressTestMode::Screenshot => state.spawn_geometry_torture_test(),
+            StressTestMode::None => {}
         }
 
         Ok(state)
@@ -2915,14 +3067,17 @@ impl AppState {
         }
 
         let [look_x, look_y] = self.input.take_look_delta();
-        self.camera.add_look_delta(look_x, look_y);
-        self.input.update_camera(&mut self.camera, dt_seconds);
+        let elapsed_seconds = self.app_start_time.elapsed().as_secs_f32();
+        if self.stress_test_mode.uses_auto_camera() {
+            self.auto_camera_config
+                .apply_to_camera(&mut self.camera, elapsed_seconds);
+        } else {
+            self.camera.add_look_delta(look_x, look_y);
+            self.input.update_camera(&mut self.camera, dt_seconds);
+        }
 
-        if std::env::var("STRESS_TEST")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            self.update_stress_test(now.elapsed().as_secs_f32());
+        if self.stress_test_mode == StressTestMode::SceneStress {
+            self.update_stress_test(elapsed_seconds);
         }
 
         for update in self.live_visual_state.drain_worker_updates() {
@@ -3140,6 +3295,7 @@ impl AppState {
             }
         }
         self.live_visual_state.refresh();
+        self.tick_fixture_textures()?;
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
         let next_world_ingestion_seam =
             WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref());
@@ -3170,6 +3326,7 @@ impl AppState {
         self.avg_scene_update_ms += (scene_update_dt - self.avg_scene_update_ms) * 0.15;
 
         self.world_ingestion_seam = next_world_ingestion_seam;
+        let screenshot_path = self.next_screenshot_path()?;
 
         let window = self.window.clone();
         let ui = &mut self.ui;
@@ -3228,6 +3385,9 @@ impl AppState {
                         let mut index_start = 0;
                         let mut all_indices = Vec::new();
                         for sm in &mesh.submeshes {
+                            if sm.indices.is_empty() {
+                                continue;
+                            }
                             let count = sm.indices.len() as u32;
                             submeshes.push(viewer_render::SubMeshRange {
                                 face_id: sm.face_id,
@@ -3237,19 +3397,19 @@ impl AppState {
                             all_indices.extend_from_slice(&sm.indices);
                             index_start += count;
                         }
-                        if !all_indices.is_empty() {
+                        if !all_indices.is_empty() && !submeshes.is_empty() {
                             self.renderer.upsert_geometry(
                                 instance.geometry.clone(),
                                 bytemuck::cast_slice(&mesh.vertices),
                                 bytemuck::cast_slice(&all_indices),
                                 submeshes,
                             );
-                        }
 
-                        // Sync AABB to instance and mark for spatial update
-                        if let Some(instance_mut) = self.scene.get_instance_mut(id) {
-                            instance_mut.local_aabb = mesh.aabb;
-                            instance_mut.dirty_spatial = true;
+                            // Sync AABB to instance and mark for spatial update
+                            if let Some(instance_mut) = self.scene.get_instance_mut(id) {
+                                instance_mut.local_aabb = mesh.aabb;
+                                instance_mut.dirty_spatial = true;
+                            }
                         }
                     }
                 }
@@ -3262,6 +3422,7 @@ impl AppState {
             &camera,
             &self.scene,
             &visibility_list,
+            screenshot_path.as_deref(),
             |device, queue, encoder, target_view, surface_size| {
                 let actions = ui.render(
                     &window,
@@ -3285,6 +3446,7 @@ impl AppState {
                     self.avg_scene_update_ms,
                     metrics.total_instances,
                     metrics.visible_proxies,
+                    self.stress_test_mode != StressTestMode::Screenshot,
                 );
                 pending_chat_send = actions.nearby_chat_send;
                 pending_direct_im_send = actions.direct_im_send;
@@ -3336,7 +3498,67 @@ impl AppState {
             open_external_url(&url);
         }
 
+        if let Some(path) = screenshot_path {
+            tracing::info!("captured test screenshot: {}", path.display());
+        }
+
         render_result
+    }
+
+    fn next_screenshot_path(&mut self) -> Result<Option<PathBuf>> {
+        self.frame_counter = self.frame_counter.saturating_add(1);
+        let Some(config) = &self.screenshot_config else {
+            return Ok(None);
+        };
+        if self.captured_screenshots >= config.max_frames {
+            return Ok(None);
+        }
+        if !self.frame_counter.is_multiple_of(config.every_n_frames) {
+            return Ok(None);
+        }
+
+        fs::create_dir_all(&config.output_dir).with_context(|| {
+            format!(
+                "failed to create screenshot output directory: {}",
+                config.output_dir.display()
+            )
+        })?;
+        self.captured_screenshots = self.captured_screenshots.saturating_add(1);
+        let filename = format!("viewer_test_{:04}.png", self.captured_screenshots);
+        Ok(Some(config.output_dir.join(filename)))
+    }
+
+    fn tick_fixture_textures(&mut self) -> Result<()> {
+        if self.fixture_texture_ids.is_empty() {
+            return Ok(());
+        }
+
+        let _attempted = self.fixture_texture_cache.poll_png_rgba8(2)?;
+
+        for id in &self.fixture_texture_ids {
+            if self.renderer.has_texture(id) {
+                continue;
+            }
+
+            match self.fixture_texture_cache.request_png_rgba8(id)? {
+                viewer_asset::AssetStatus::Loading => {}
+                viewer_asset::AssetStatus::Missing => {
+                    if self.fixture_texture_missing_logged.insert(id.clone()) {
+                        tracing::warn!("fixture texture missing or invalid: {id}");
+                    }
+                }
+                viewer_asset::AssetStatus::Ready(img) => {
+                    self.renderer.upsert_texture_rgba8(
+                        id.clone(),
+                        img.width,
+                        img.height,
+                        &img.rgba,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn handle_input_event(&mut self, event: &WindowEvent) {
@@ -3500,6 +3722,107 @@ impl ApplicationHandler for ViewerApp {
     }
 }
 
+fn auto_camera_config_from_lookup<F>(lookup: F) -> AutoCameraConfig
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut config = AutoCameraConfig::default();
+    if let Some(center) = lookup("VIEWER_TEST_CAMERA_CENTER")
+        .as_deref()
+        .and_then(parse_vec3_csv)
+    {
+        config.center = center;
+    }
+    if let Some(value) = lookup("VIEWER_TEST_CAMERA_RADIUS").as_deref() {
+        config.radius = parse_positive_f32(value, config.radius);
+    }
+    if let Some(value) = lookup("VIEWER_TEST_CAMERA_HEIGHT").as_deref() {
+        config.orbit_height = value.parse::<f32>().ok().unwrap_or(config.orbit_height);
+    }
+    if let Some(value) = lookup("VIEWER_TEST_CAMERA_LOOK_HEIGHT").as_deref() {
+        config.look_height = value.parse::<f32>().ok().unwrap_or(config.look_height);
+    }
+    if let Some(value) = lookup("VIEWER_TEST_CAMERA_SPEED").as_deref() {
+        config.angular_speed_radians =
+            parse_positive_f32(value, config.angular_speed_radians).clamp(0.01, 6.0);
+    }
+    if let Some(value) = lookup("VIEWER_TEST_CAMERA_PHASE").as_deref() {
+        config.phase_radians = value.parse::<f32>().ok().unwrap_or(config.phase_radians);
+    }
+    config
+}
+
+fn screenshot_config_from_lookup<F>(lookup: F, mode: StressTestMode) -> Option<ScreenshotConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if mode != StressTestMode::Screenshot {
+        return None;
+    }
+
+    let output_dir = lookup("VIEWER_TEST_SCREENSHOT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("artifacts/screenshots"));
+    let every_n_frames = lookup("VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES")
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30)
+        .max(1);
+    let max_frames = lookup("VIEWER_TEST_SCREENSHOT_MAX_FRAMES")
+        .as_deref()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(12)
+        .max(1);
+
+    Some(ScreenshotConfig {
+        output_dir,
+        every_n_frames,
+        max_frames,
+    })
+}
+
+fn parse_positive_f32(value: &str, fallback: f32) -> f32 {
+    let parsed = value.parse::<f32>().ok().unwrap_or(fallback);
+    if parsed.is_finite() && parsed > 0.0 {
+        parsed
+    } else {
+        fallback
+    }
+}
+
+fn parse_vec3_csv(value: &str) -> Option<[f32; 3]> {
+    let mut parts = value.split(',').map(|part| part.trim().parse::<f32>().ok());
+    let x = parts.next().flatten()?;
+    let y = parts.next().flatten()?;
+    let z = parts.next().flatten()?;
+    Some([x, y, z])
+}
+
+fn fixture_texture_ids_from_env() -> Vec<viewer_core::AssetID> {
+    let raw = std::env::var("VIEWER_FIXTURE_TEXTURES").ok();
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "0" {
+        return Vec::new();
+    }
+
+    if matches!(raw, "1" | "true" | "yes" | "on") {
+        return vec![
+            viewer_core::AssetID::new("water_diffuse"),
+            viewer_core::AssetID::new("stone_diffuse"),
+            viewer_core::AssetID::new("stone_normal"),
+        ];
+    }
+
+    raw.split(',')
+        .map(|s| viewer_core::AssetID::new(s.trim()))
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3586,6 +3909,96 @@ mod tests {
         assert!(parse_bool_like("YES"));
         assert!(!parse_bool_like("false"));
         assert!(!parse_bool_like("0"));
+    }
+
+    #[test]
+    fn stress_test_mode_parses_legacy_and_new_aliases() {
+        assert_eq!(
+            StressTestMode::from_value(Some("1")),
+            StressTestMode::SceneStress
+        );
+        assert_eq!(
+            StressTestMode::from_value(Some("2")),
+            StressTestMode::GeometryTorture
+        );
+        assert_eq!(
+            StressTestMode::from_value(Some("camera")),
+            StressTestMode::AutoCamera
+        );
+        assert_eq!(
+            StressTestMode::from_value(Some("screenshots")),
+            StressTestMode::Screenshot
+        );
+        assert_eq!(
+            StressTestMode::from_value(Some("unknown")),
+            StressTestMode::None
+        );
+    }
+
+    #[test]
+    fn auto_camera_config_parses_env_overrides() {
+        let vars = HashMap::<String, String>::from([
+            (
+                String::from("VIEWER_TEST_CAMERA_CENTER"),
+                String::from("1.0,2.0,3.0"),
+            ),
+            (
+                String::from("VIEWER_TEST_CAMERA_RADIUS"),
+                String::from("18.5"),
+            ),
+            (
+                String::from("VIEWER_TEST_CAMERA_HEIGHT"),
+                String::from("12.0"),
+            ),
+            (
+                String::from("VIEWER_TEST_CAMERA_LOOK_HEIGHT"),
+                String::from("4.5"),
+            ),
+            (
+                String::from("VIEWER_TEST_CAMERA_SPEED"),
+                String::from("0.8"),
+            ),
+            (
+                String::from("VIEWER_TEST_CAMERA_PHASE"),
+                String::from("1.57"),
+            ),
+        ]);
+        let config = auto_camera_config_from_lookup(|k| vars.get(k).cloned());
+        assert_eq!(config.center, [1.0, 2.0, 3.0]);
+        assert_eq!(config.radius, 18.5);
+        assert_eq!(config.orbit_height, 12.0);
+        assert_eq!(config.look_height, 4.5);
+        assert_eq!(config.angular_speed_radians, 0.8);
+        assert_eq!(config.phase_radians, 1.57);
+    }
+
+    #[test]
+    fn screenshot_config_is_enabled_only_for_screenshot_mode() {
+        let vars = HashMap::<String, String>::from([
+            (
+                String::from("VIEWER_TEST_SCREENSHOT_DIR"),
+                String::from("tmp/shots"),
+            ),
+            (
+                String::from("VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES"),
+                String::from("8"),
+            ),
+            (
+                String::from("VIEWER_TEST_SCREENSHOT_MAX_FRAMES"),
+                String::from("3"),
+            ),
+        ]);
+
+        let disabled =
+            screenshot_config_from_lookup(|k| vars.get(k).cloned(), StressTestMode::AutoCamera);
+        assert!(disabled.is_none());
+
+        let enabled =
+            screenshot_config_from_lookup(|k| vars.get(k).cloned(), StressTestMode::Screenshot)
+                .expect("screenshot config should be present");
+        assert_eq!(enabled.output_dir, PathBuf::from("tmp/shots"));
+        assert_eq!(enabled.every_n_frames, 8);
+        assert_eq!(enabled.max_frames, 3);
     }
 
     #[test]
@@ -3737,6 +4150,14 @@ mod tests {
             decoded_viewer_time_updates: 1,
             decoded_viewer_time_body_len: Some(5),
             decoded_viewer_time_signature: Some(0xDDCCBBAA),
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 1,
         }));
         assert!(should_apply_world_ingestion_seam(Some(&empty), &changed));
@@ -3771,6 +4192,14 @@ mod tests {
             decoded_viewer_time_updates: 1,
             decoded_viewer_time_body_len: Some(5),
             decoded_viewer_time_signature: Some(0xDDCCBBAA),
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 1,
         };
         let viewer_time_first =
@@ -3904,6 +4333,14 @@ mod tests {
             decoded_viewer_time_updates: 1,
             decoded_viewer_time_body_len: Some(5),
             decoded_viewer_time_signature: Some(0xDDCCBBAA),
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 1,
         };
         assert!(should_apply_live_visual_snapshot(None, Some(&first)));

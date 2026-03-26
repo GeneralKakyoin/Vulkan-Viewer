@@ -59,11 +59,20 @@ const LLUDP_AVATAR_NOTES_REPLY_LOW_ID: u16 = 176;
 const LLUDP_AVATAR_PICKS_REPLY_LOW_ID: u16 = 178;
 const LLUDP_PICK_INFO_REPLY_LOW_ID: u16 = 184;
 const LLUDP_GENERIC_MESSAGE_LOW_ID: u16 = 261;
+const LLUDP_OBJECT_UPDATE_HIGH_ID: u8 = 12;
+const LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID: u8 = 13;
+const LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID: u8 = 14;
+const LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID: u8 = 15;
+const LLUDP_KILL_OBJECT_HIGH_ID: u8 = 16;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
 const LLUDP_CROSSED_REGION_MEDIUM_ID: u8 = 7;
 const LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID: u8 = 8;
+const MAX_OBJECT_FEED_OBJECTS: usize = 1024;
+const MAX_OBJECT_FEED_EXPORT_OBJECTS: usize = 128;
+const MAX_OBJECT_FEED_RECENT_KILLS: usize = 128;
+const MAX_ZEROCODED_BODY_BYTES: usize = 256 * 1024;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "AgentProfile",
@@ -884,6 +893,11 @@ pub enum FirstSimulatorInboundMessageKind {
     AttachedSound,
     CrossedRegion,
     ConfirmEnableSimulator,
+    ObjectUpdate,
+    ObjectUpdateCompressed,
+    ObjectUpdateCached,
+    ImprovedTerseObjectUpdate,
+    KillObject,
     Irrelevant,
 }
 
@@ -1039,6 +1053,12 @@ pub struct DecodedSimulatorViewerTimeMessage {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedObjectFeedObject {
+    pub local_id: u32,
+    pub scale_centi: Option<[u16; 3]>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulatorPayloadDecodeSummary {
     pub coarse_location_updates: usize,
     pub coarse_location_last_count: Option<u8>,
@@ -1057,6 +1077,14 @@ pub struct SimulatorPayloadDecodeSummary {
     pub simulator_viewer_time_updates: usize,
     pub simulator_viewer_time_last_body_len: Option<u16>,
     pub simulator_viewer_time_last_signature: Option<u32>,
+    pub object_feed_update_messages: usize,
+    pub object_feed_kill_messages: usize,
+    pub object_feed_decode_dropped: usize,
+    pub object_feed_evicted: usize,
+    pub object_feed_total_objects: usize,
+    pub object_feed_export_truncated: bool,
+    pub object_feed_objects: Vec<DecodedObjectFeedObject>,
+    pub object_feed_recent_kills: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1324,7 +1352,16 @@ pub struct Connection {
     early_simulator_traffic_observations: Vec<EarlySimulatorTrafficObservation>,
     region_transition_control_observations: Vec<RegionTransitionControlObservation>,
     simulator_payload_decode_summary: SimulatorPayloadDecodeSummary,
+    object_feed_objects: BTreeMap<u32, ObjectFeedObjectState>,
+    object_feed_recent_kills: Vec<u32>,
+    object_feed_tick: u64,
     next_first_simulator_packet_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ObjectFeedObjectState {
+    last_seen_tick: u64,
+    scale_centi: Option<[u16; 3]>,
 }
 
 impl Connection {
@@ -1340,6 +1377,9 @@ impl Connection {
             early_simulator_traffic_observations: Vec::new(),
             region_transition_control_observations: Vec::new(),
             simulator_payload_decode_summary: SimulatorPayloadDecodeSummary::default(),
+            object_feed_objects: BTreeMap::new(),
+            object_feed_recent_kills: Vec::new(),
+            object_feed_tick: 0,
             next_first_simulator_packet_id: 1,
         }
     }
@@ -1382,6 +1422,76 @@ impl Connection {
 
     pub fn simulator_payload_decode_summary(&self) -> &SimulatorPayloadDecodeSummary {
         &self.simulator_payload_decode_summary
+    }
+
+    fn object_feed_upsert(&mut self, local_id: u32, scale_centi: Option<[u16; 3]>) {
+        if local_id == 0 {
+            return;
+        }
+        self.object_feed_tick = self.object_feed_tick.saturating_add(1);
+        let entry = self
+            .object_feed_objects
+            .entry(local_id)
+            .or_insert_with(ObjectFeedObjectState::default);
+        entry.last_seen_tick = self.object_feed_tick;
+        if scale_centi.is_some() {
+            entry.scale_centi = scale_centi;
+        }
+
+        if self.object_feed_objects.len() > MAX_OBJECT_FEED_OBJECTS {
+            if let Some((evict_id, _)) = self
+                .object_feed_objects
+                .iter()
+                .map(|(id, state)| (*id, state.last_seen_tick))
+                .min_by_key(|(id, tick)| (*tick, *id))
+            {
+                self.object_feed_objects.remove(&evict_id);
+                self.simulator_payload_decode_summary.object_feed_evicted += 1;
+            }
+        }
+    }
+
+    fn object_feed_kill(&mut self, local_id: u32) {
+        if local_id == 0 {
+            return;
+        }
+        self.object_feed_objects.remove(&local_id);
+        self.object_feed_recent_kills.push(local_id);
+        if self.object_feed_recent_kills.len() > MAX_OBJECT_FEED_RECENT_KILLS {
+            let trim_from = self.object_feed_recent_kills.len() - MAX_OBJECT_FEED_RECENT_KILLS;
+            self.object_feed_recent_kills.drain(0..trim_from);
+        }
+    }
+
+    fn refresh_object_feed_summary_export(&mut self) {
+        self.simulator_payload_decode_summary
+            .object_feed_total_objects = self.object_feed_objects.len();
+        self.simulator_payload_decode_summary
+            .object_feed_export_truncated =
+            self.object_feed_objects.len() > MAX_OBJECT_FEED_EXPORT_OBJECTS;
+
+        let mut entries: Vec<(u32, ObjectFeedObjectState)> = self
+            .object_feed_objects
+            .iter()
+            .map(|(id, state)| (*id, *state))
+            .collect();
+        entries.sort_by(|a, b| {
+            b.1.last_seen_tick
+                .cmp(&a.1.last_seen_tick)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        entries.truncate(MAX_OBJECT_FEED_EXPORT_OBJECTS);
+        let mut export: Vec<DecodedObjectFeedObject> = entries
+            .into_iter()
+            .map(|(local_id, state)| DecodedObjectFeedObject {
+                local_id,
+                scale_centi: state.scale_centi,
+            })
+            .collect();
+        export.sort_by_key(|obj| obj.local_id);
+        self.simulator_payload_decode_summary.object_feed_objects = export;
+        self.simulator_payload_decode_summary
+            .object_feed_recent_kills = self.object_feed_recent_kills.clone();
     }
 
     pub fn summarize_early_simulator_traffic(&self) -> EarlySimulatorTrafficSummary {
@@ -1454,6 +1564,9 @@ impl Connection {
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
         self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
+        self.object_feed_objects.clear();
+        self.object_feed_recent_kills.clear();
+        self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -1619,6 +1732,9 @@ impl Connection {
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
         self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
+        self.object_feed_objects.clear();
+        self.object_feed_recent_kills.clear();
+        self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
         self.state = ConnectionState::Disconnected;
         Ok(())
@@ -1914,6 +2030,77 @@ impl Connection {
                     .simulator_viewer_time_last_body_len = Some(decoded.body_len);
                 self.simulator_payload_decode_summary
                     .simulator_viewer_time_last_signature = decoded.signature;
+            }
+        }
+
+        if classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber {
+            match classification.kind {
+                FirstSimulatorInboundMessageKind::ObjectUpdate => {
+                    self.simulator_payload_decode_summary
+                        .object_feed_update_messages += 1;
+                    if let Some(objects) = decode_object_update_ids_and_scales(payload) {
+                        for (local_id, scale_centi) in objects {
+                            self.object_feed_upsert(local_id, scale_centi);
+                        }
+                    } else {
+                        self.simulator_payload_decode_summary
+                            .object_feed_decode_dropped += 1;
+                    }
+                    self.refresh_object_feed_summary_export();
+                }
+                FirstSimulatorInboundMessageKind::ObjectUpdateCompressed => {
+                    self.simulator_payload_decode_summary
+                        .object_feed_update_messages += 1;
+                    if let Some(ids) = decode_object_update_compressed_local_ids(payload) {
+                        for local_id in ids {
+                            self.object_feed_upsert(local_id, None);
+                        }
+                    } else {
+                        self.simulator_payload_decode_summary
+                            .object_feed_decode_dropped += 1;
+                    }
+                    self.refresh_object_feed_summary_export();
+                }
+                FirstSimulatorInboundMessageKind::ObjectUpdateCached => {
+                    self.simulator_payload_decode_summary
+                        .object_feed_update_messages += 1;
+                    if let Some(ids) = decode_object_update_cached_local_ids(payload) {
+                        for local_id in ids {
+                            self.object_feed_upsert(local_id, None);
+                        }
+                    } else {
+                        self.simulator_payload_decode_summary
+                            .object_feed_decode_dropped += 1;
+                    }
+                    self.refresh_object_feed_summary_export();
+                }
+                FirstSimulatorInboundMessageKind::ImprovedTerseObjectUpdate => {
+                    self.simulator_payload_decode_summary
+                        .object_feed_update_messages += 1;
+                    if let Some(ids) = decode_improved_terse_object_update_local_ids(payload) {
+                        for local_id in ids {
+                            self.object_feed_upsert(local_id, None);
+                        }
+                    } else {
+                        self.simulator_payload_decode_summary
+                            .object_feed_decode_dropped += 1;
+                    }
+                    self.refresh_object_feed_summary_export();
+                }
+                FirstSimulatorInboundMessageKind::KillObject => {
+                    self.simulator_payload_decode_summary
+                        .object_feed_kill_messages += 1;
+                    if let Some(ids) = decode_kill_object_local_ids(payload) {
+                        for local_id in ids {
+                            self.object_feed_kill(local_id);
+                        }
+                    } else {
+                        self.simulator_payload_decode_summary
+                            .object_feed_decode_dropped += 1;
+                    }
+                    self.refresh_object_feed_summary_export();
+                }
+                _ => {}
             }
         }
         if let Some(kind) = to_region_transition_control_kind(classification.kind) {
@@ -3297,6 +3484,9 @@ impl Connection {
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
         self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
+        self.object_feed_objects.clear();
+        self.object_feed_recent_kills.clear();
+        self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
     }
 
@@ -3935,6 +4125,51 @@ fn classify_first_simulator_inbound_from_packet(
     let signal = format!("packet:0x{:08x}", header.message_number);
 
     match header.message_number {
+        num if num == u32::from(LLUDP_OBJECT_UPDATE_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ObjectUpdate,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == u32::from(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ObjectUpdateCompressed,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == u32::from(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ObjectUpdateCached,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == u32::from(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ImprovedTerseObjectUpdate,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == u32::from(LLUDP_KILL_OBJECT_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::KillObject,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::AgentMovementComplete,
@@ -4211,6 +4446,256 @@ fn decode_health_message(payload: &[u8]) -> Option<DecodedHealthMessage> {
         return None;
     }
     Some(DecodedHealthMessage { health })
+}
+
+fn decode_zerocoded_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len().min(4096));
+    let mut i = 0usize;
+    while i < body.len() {
+        let b = body[i];
+        i += 1;
+        if b != 0 {
+            out.push(b);
+            continue;
+        }
+        let zeros = *body.get(i)? as usize;
+        i += 1;
+        if out.len().saturating_add(zeros) > MAX_ZEROCODED_BODY_BYTES {
+            return None;
+        }
+        out.extend(std::iter::repeat_n(0u8, zeros));
+    }
+    Some(out)
+}
+
+fn quantize_vector3_centi(vec: [f32; 3]) -> Option<[u16; 3]> {
+    let mut out = [0u16; 3];
+    for (idx, v) in vec.iter().copied().enumerate() {
+        if !v.is_finite() {
+            return None;
+        }
+        let scaled = (v * 100.0).round();
+        if scaled < 0.0 {
+            return None;
+        }
+        out[idx] = u16::try_from(scaled as i64).ok()?;
+    }
+    Some(out)
+}
+
+fn read_u8(body: &[u8], offset: &mut usize) -> Option<u8> {
+    let v = *body.get(*offset)?;
+    *offset += 1;
+    Some(v)
+}
+
+fn read_u16_le(body: &[u8], offset: &mut usize) -> Option<u16> {
+    let bytes: [u8; 2] = body.get(*offset..(*offset + 2))?.try_into().ok()?;
+    *offset += 2;
+    Some(u16::from_le_bytes(bytes))
+}
+
+fn read_u32_le(body: &[u8], offset: &mut usize) -> Option<u32> {
+    let bytes: [u8; 4] = body.get(*offset..(*offset + 4))?.try_into().ok()?;
+    *offset += 4;
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn read_u64_le(body: &[u8], offset: &mut usize) -> Option<u64> {
+    let bytes: [u8; 8] = body.get(*offset..(*offset + 8))?.try_into().ok()?;
+    *offset += 8;
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn read_f32_le(body: &[u8], offset: &mut usize) -> Option<f32> {
+    let bytes: [u8; 4] = body.get(*offset..(*offset + 4))?.try_into().ok()?;
+    *offset += 4;
+    Some(f32::from_le_bytes(bytes))
+}
+
+fn read_vector3f(body: &[u8], offset: &mut usize) -> Option<[f32; 3]> {
+    let x = read_f32_le(body, offset)?;
+    let y = read_f32_le(body, offset)?;
+    let z = read_f32_le(body, offset)?;
+    Some([x, y, z])
+}
+
+fn decode_object_update_ids_and_scales(payload: &[u8]) -> Option<Vec<(u32, Option<[u16; 3]>)>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_HIGH_ID) {
+        return None;
+    }
+
+    let body_raw = payload.get(header.body_offset..)?;
+    let body = decode_zerocoded_body(body_raw)?;
+    let mut offset = 0usize;
+
+    // RegionData single
+    let _region_handle = read_u64_le(&body, &mut offset)?;
+    let _time_dilation = read_u16_le(&body, &mut offset)?;
+
+    // ObjectData variable
+    let count = read_u8(&body, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(count.min(32));
+    for _ in 0..count {
+        let local_id = read_u32_le(&body, &mut offset)?;
+        offset += 1; // State
+        offset += 16; // FullID
+        offset += 4; // CRC
+        offset += 1; // PCode
+        offset += 1; // Material
+        offset += 1; // ClickAction
+        let scale = read_vector3f(&body, &mut offset)?;
+        let scale_centi = quantize_vector3_centi(scale);
+
+        // ObjectData (packed), variable 1 (u8 length)
+        let object_data_len = read_u8(&body, &mut offset)? as usize;
+        offset = offset.checked_add(object_data_len)?;
+
+        // ParentID, UpdateFlags
+        offset += 4;
+        offset += 4;
+
+        // Path/Profile params (fixed sizes)
+        offset += 1; // PathCurve
+        offset += 1; // ProfileCurve
+        offset += 2; // PathBegin
+        offset += 2; // PathEnd
+        offset += 1; // PathScaleX
+        offset += 1; // PathScaleY
+        offset += 1; // PathShearX
+        offset += 1; // PathShearY
+        offset += 1; // PathTwist
+        offset += 1; // PathTwistBegin
+        offset += 1; // PathRadiusOffset
+        offset += 1; // PathTaperX
+        offset += 1; // PathTaperY
+        offset += 1; // PathRevolutions
+        offset += 1; // PathSkew
+        offset += 2; // ProfileBegin
+        offset += 2; // ProfileEnd
+        offset += 2; // ProfileHollow
+
+        // TextureEntry (var 2), TextureAnim (var 1), NameValue (var 2), Data (var 2), Text (var 1)
+        let texture_entry_len = read_u16_le(&body, &mut offset)? as usize;
+        offset = offset.checked_add(texture_entry_len)?;
+        let texture_anim_len = read_u8(&body, &mut offset)? as usize;
+        offset = offset.checked_add(texture_anim_len)?;
+        let name_value_len = read_u16_le(&body, &mut offset)? as usize;
+        offset = offset.checked_add(name_value_len)?;
+        let data_len = read_u16_le(&body, &mut offset)? as usize;
+        offset = offset.checked_add(data_len)?;
+        let text_len = read_u8(&body, &mut offset)? as usize;
+        offset = offset.checked_add(text_len)?;
+
+        // TextColor fixed 4, MediaURL var 1, PSBlock var 1, ExtraParams var 1
+        offset += 4;
+        let media_url_len = read_u8(&body, &mut offset)? as usize;
+        offset = offset.checked_add(media_url_len)?;
+        let ps_len = read_u8(&body, &mut offset)? as usize;
+        offset = offset.checked_add(ps_len)?;
+        let extra_params_len = read_u8(&body, &mut offset)? as usize;
+        offset = offset.checked_add(extra_params_len)?;
+
+        // Sound UUID, OwnerID UUID, Gain f32, Flags u8, Radius f32
+        offset += 16;
+        offset += 16;
+        offset += 4;
+        offset += 1;
+        offset += 4;
+
+        // JointType u8, JointPivot vec3, JointAxisOrAnchor vec3
+        offset += 1;
+        offset += 12;
+        offset += 12;
+
+        out.push((local_id, scale_centi));
+    }
+    Some(out)
+}
+
+fn decode_object_update_cached_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let mut offset = 0usize;
+    offset += 8; // RegionHandle
+    offset += 2; // TimeDilation
+    let count = read_u8(body, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(count.min(32));
+    for _ in 0..count {
+        let id = read_u32_le(body, &mut offset)?;
+        offset += 4; // CRC
+        offset += 4; // UpdateFlags
+        out.push(id);
+    }
+    Some(out)
+}
+
+fn decode_object_update_compressed_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let mut offset = 0usize;
+    offset += 8; // RegionHandle
+    offset += 2; // TimeDilation
+    let count = read_u8(body, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(count.min(32));
+    for _ in 0..count {
+        offset += 4; // UpdateFlags
+        let data_len = read_u16_le(body, &mut offset)? as usize;
+        let data = body.get(offset..offset + data_len)?;
+        offset += data_len;
+        if data.len() >= 20 {
+            let local_id_bytes: [u8; 4] = data.get(16..20)?.try_into().ok()?;
+            out.push(u32::from_le_bytes(local_id_bytes));
+        }
+    }
+    Some(out)
+}
+
+fn decode_improved_terse_object_update_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != u32::from(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let mut offset = 0usize;
+    offset += 8; // RegionHandle
+    offset += 2; // TimeDilation
+    let count = read_u8(body, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(count.min(32));
+    for _ in 0..count {
+        let data_len = read_u8(body, &mut offset)? as usize;
+        let data = body.get(offset..offset + data_len)?;
+        offset += data_len;
+        if data.len() >= 4 {
+            let local_id_bytes: [u8; 4] = data.get(0..4)?.try_into().ok()?;
+            out.push(u32::from_le_bytes(local_id_bytes));
+        }
+        let tex_len = read_u16_le(body, &mut offset)? as usize;
+        offset = offset.checked_add(tex_len)?;
+    }
+    Some(out)
+}
+
+fn decode_kill_object_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
+    let header = decode_first_simulator_packet_header(payload)?;
+    if header.message_number != u32::from(LLUDP_KILL_OBJECT_HIGH_ID) {
+        return None;
+    }
+    let body = payload.get(header.body_offset..)?;
+    let mut offset = 0usize;
+    let count = read_u8(body, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(count.min(32));
+    for _ in 0..count {
+        out.push(read_u32_le(body, &mut offset)?);
+    }
+    Some(out)
 }
 
 fn decode_region_handshake_sim_name(payload: &[u8]) -> Option<String> {
@@ -6256,6 +6741,21 @@ mod tests {
         payload
     }
 
+    fn make_high_frequency_packet(high_id: u8) -> Vec<u8> {
+        vec![
+            0x00, // flags
+            0x00, 0x00, 0x00, 0x01, // packet sequence
+            0x00, // extra header offset
+            high_id,
+        ]
+    }
+
+    fn make_high_frequency_packet_with_body(high_id: u8, body: &[u8]) -> Vec<u8> {
+        let mut payload = make_high_frequency_packet(high_id);
+        payload.extend_from_slice(body);
+        payload
+    }
+
     fn make_chat_from_simulator_packet(sender: &str, message: &str) -> Vec<u8> {
         let mut payload = make_low_frequency_packet(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID);
         let mut sender_bytes = sender.as_bytes().to_vec();
@@ -8148,6 +8648,85 @@ mod tests {
             .expect("simulator viewer time message should decode from packet body");
         assert_eq!(decoded.body_len, 6);
         assert_eq!(decoded.signature, Some(0x44332211));
+    }
+
+    #[test]
+    fn decode_kill_object_local_ids_extracts_local_ids() {
+        let mut body = Vec::new();
+        body.push(2); // block count
+        body.extend_from_slice(&123u32.to_le_bytes());
+        body.extend_from_slice(&456u32.to_le_bytes());
+        let payload = make_high_frequency_packet_with_body(LLUDP_KILL_OBJECT_HIGH_ID, &body);
+        let ids = decode_kill_object_local_ids(&payload).expect("kill object should decode");
+        assert_eq!(ids, vec![123, 456]);
+    }
+
+    #[test]
+    fn decode_improved_terse_object_update_extracts_local_ids() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(2); // object count
+        for id in [42u32, 99u32] {
+            body.push(4); // Data len (var 1)
+            body.extend_from_slice(&id.to_le_bytes());
+            body.extend_from_slice(&0u16.to_le_bytes()); // TextureEntry len (var 2)
+        }
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID, &body);
+        let ids =
+            decode_improved_terse_object_update_local_ids(&payload).expect("terse should decode");
+        assert_eq!(ids, vec![42, 99]);
+    }
+
+    #[test]
+    fn decode_object_update_cached_extracts_local_ids() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(2); // object count
+        for id in [7u32, 8u32] {
+            body.extend_from_slice(&id.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes()); // CRC
+            body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        }
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID, &body);
+        let ids =
+            decode_object_update_cached_local_ids(&payload).expect("cached update should decode");
+        assert_eq!(ids, vec![7, 8]);
+    }
+
+    #[test]
+    fn decode_object_update_compressed_extracts_local_ids() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(1); // object count
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        let mut data = vec![0u8; 16]; // UUID
+        data.extend_from_slice(&55u32.to_le_bytes()); // LocalID
+        data.push(9); // PCode
+        let data_len = u16::try_from(data.len()).expect("len fits u16");
+        body.extend_from_slice(&data_len.to_le_bytes());
+        body.extend_from_slice(&data);
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID, &body);
+        let ids = decode_object_update_compressed_local_ids(&payload)
+            .expect("compressed update should decode");
+        assert_eq!(ids, vec![55]);
+    }
+
+    #[test]
+    fn decode_object_update_allows_empty_object_list() {
+        // ObjectUpdate is zerocoded on the wire; this body is the zerocoded encoding of:
+        // RegionHandle=1 (LE), TimeDilation=0 (LE), ObjectData count=0.
+        let zerocoded_body = vec![1, 0, 7, 0, 2, 0, 1];
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_HIGH_ID, &zerocoded_body);
+        let decoded = decode_object_update_ids_and_scales(&payload)
+            .expect("object update should decode with empty list");
+        assert!(decoded.is_empty());
     }
 
     #[test]

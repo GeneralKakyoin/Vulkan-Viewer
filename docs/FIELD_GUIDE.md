@@ -79,3 +79,13 @@ hard to discover by standard grep or that have non-obvious significance.
 **What it is:** Standardized documentation blocks that define the "Purpose", "Logic", and "Boundary Rules" for each crate and major subsystem.
 
 **Why it's non-obvious:** These headers serve as the primary on-boarding and continuity mechanism for agents. They explicitly state what a crate *must not* do (e.g., `viewer_net` must not own grid-specific meaning). When starting work in a new crate, always read these headers first to avoid architectural drift.
+
+---
+
+## G09 — Canonical Testing/Verification Reference
+
+**Location:** `docs/TESTING_REFERENCE.md`
+
+**What it is:** The single canonical list of validation commands, deterministic runtime verification modes, and supported `VIEWER_*` env vars used as test knobs.
+
+**Why it's non-obvious:** The repo uses “tests” as a mix of `cargo test`, runtime smoke, and deterministic stress modes. This file is where agents should look first when deciding what to run.

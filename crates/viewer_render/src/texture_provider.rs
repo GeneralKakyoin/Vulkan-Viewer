@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use viewer_core::AssetID;
 
 /// Represents the state of a texture asset in the rendering pipeline.
@@ -35,9 +35,9 @@ impl DefaultTextureProvider {
 impl TextureProvider for DefaultTextureProvider {
     fn get_texture(&self, _id: &AssetID) -> PendingTexture {
         if _id.is_empty() {
-             PendingTexture::Missing
+            PendingTexture::Missing
         } else {
-             PendingTexture::Loading // Simulate loading for any non-empty ID
+            PendingTexture::Loading // Simulate loading for any non-empty ID
         }
     }
     fn touch(&self, _id: &AssetID, _score: f32) {}
@@ -63,17 +63,20 @@ impl StreamingTextureProvider {
         }
     }
 
-    pub fn insert(&self, id: AssetID, view: Arc<wgpu::TextureView>, size: u64) {
+    pub fn insert(&self, id: AssetID, view: Arc<wgpu::TextureView>, size: u64) -> Vec<AssetID> {
         let mut views = self.views.lock().unwrap();
         let mut lru_scores = self.lru_scores.lock().unwrap();
+        let mut evicted = Vec::new();
 
         // Evict if over limit
-        while self.current_vram.load(Ordering::Relaxed) + size > self.max_vram && !views.is_empty() {
+        while self.current_vram.load(Ordering::Relaxed) + size > self.max_vram && !views.is_empty()
+        {
             if let Some(to_evict) = self.find_eviction_candidate_locked(&lru_scores) {
                 if let Some((_, evicted_size)) = views.remove(&to_evict) {
                     self.current_vram.fetch_sub(evicted_size, Ordering::Relaxed);
                 }
                 lru_scores.remove(&to_evict);
+                evicted.push(to_evict);
             } else {
                 break; // Nothing more to evict
             }
@@ -84,6 +87,7 @@ impl StreamingTextureProvider {
         }
         views.insert(id.clone(), (view, size));
         lru_scores.insert(id, 0.0); // Reset score
+        evicted
     }
 
     pub fn touch_mut(&self, id: &AssetID, score: f32) {
@@ -100,8 +104,12 @@ impl StreamingTextureProvider {
         }
     }
 
-    fn find_eviction_candidate_locked(&self, scores: &std::collections::HashMap<AssetID, f32>) -> Option<AssetID> {
-        scores.iter()
+    fn find_eviction_candidate_locked(
+        &self,
+        scores: &std::collections::HashMap<AssetID, f32>,
+    ) -> Option<AssetID> {
+        scores
+            .iter()
             .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(id, _)| id.clone())
     }

@@ -15,6 +15,7 @@ See:
 - `docs/HANDOFF.md` for the latest exact next step
 - `docs/ARCHITECTURE.md` and `docs/INTERFACES.md` for boundaries
 - `docs/FIELD_GUIDE.md` for non-obvious ownership and lookup points
+- `docs/TESTING_REFERENCE.md` for canonical validation commands + test knobs
 - `docs/LEARNINGS.md` for durable lessons and dead ends
 
 ---
@@ -39,7 +40,8 @@ For any meaningful task:
      - `docs/MASTER_PLAN.md`
      - `docs/LEARNINGS.md`
      - `docs/FIELD_GUIDE.md`
-     - `docs/PLAN.md`
+     - `docs/plans/PLAN.md`
+     - `docs/TESTING_REFERENCE.md` (validation commands + deterministic verification knobs)
      - relevant Firestorm/reference docs
      - relevant code
 
@@ -62,10 +64,14 @@ For any meaningful task:
    A good plan is decision-complete and implementation-ready.
    The implementer should not have to invent scope, boundaries, or validation.
 
-6. **Review the plan before implementation.**
+6. **Capture deferred-too-early features.**
+   If planning identifies useful scope that is too early for the current task/milestone,
+   record it in `docs/plans/DEFERRED_FEATURES.md` with reason, trigger/dependency, and earliest reconsideration milestone.
+
+7. **Review the plan before implementation.**
    Store plan reviews in `docs/reviews/`.
 
-7. **Get user sign-off before implementation.**
+8. **Get user sign-off before implementation.**
    Do not begin meaningful implementation on an unapproved plan.
 
 ---
@@ -85,4 +91,6 @@ Use this structure:
 ## Step sequence
 ## Validation plan
 ## Risks and open questions
+## Deferred-too-early candidates captured
 ## Completion criteria
+```

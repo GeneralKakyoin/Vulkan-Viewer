@@ -12,5 +12,6 @@ winit.workspace = true
 tracing.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
+image.workspace = true
 
 viewer_core = { path = "../viewer_core" }

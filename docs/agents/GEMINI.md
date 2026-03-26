@@ -6,6 +6,7 @@ Gemini is the default planning and review tool for this repo.
 
 - perform repo scans and summarize current state
 - write task plans
+- capture "valid but too early" scope in `docs/plans/DEFERRED_FEATURES.md` during planning
 - review plans for correctness, modularity, architecture fit, and milestone alignment
 - review implementations for boundary fit and validation adequacy
 - propose design adjustments when necessary

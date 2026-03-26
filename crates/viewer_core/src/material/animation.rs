@@ -1,5 +1,5 @@
 // =============================================================================
-// UV ANIMATION ENGINE: TextureAnim 
+// UV ANIMATION ENGINE: TextureAnim
 // =============================================================================
 // Implements SL-compatible 2D texture coordinate transformations.
 // Logic:
@@ -41,15 +41,23 @@ impl TextureAnim {
     pub fn clamp_to_safe_limits(&mut self) {
         // Mode is a bitfield, keep as is for now but could be masked.
         // size_x/y should be at least 1 if used for tiling.
-        if self.size_x == 0 { self.size_x = 1; }
-        if self.size_y == 0 { self.size_y = 1; }
-        
+        if self.size_x == 0 {
+            self.size_x = 1;
+        }
+        if self.size_y == 0 {
+            self.size_y = 1;
+        }
+
         // Rate should be bounded to avoid epilepsy or rendering issues.
         self.rate = self.rate.clamp(-100.0, 100.0);
-        
+
         // Start and length should be finite.
-        if !self.start.is_finite() { self.start = 0.0; }
-        if !self.length.is_finite() { self.length = 0.0; }
+        if !self.start.is_finite() {
+            self.start = 0.0;
+        }
+        if !self.length.is_finite() {
+            self.length = 0.0;
+        }
     }
 }
 
@@ -61,13 +69,17 @@ pub const SMOOTH: u8 = 0x10;
 pub const ROTATE: u8 = 0x20;
 pub const SCALE: u8 = 0x40;
 
-use crate::{mat3_mul, mat3_rotate, mat3_scale, mat3_translate, TextureEntry};
+use crate::{TextureEntry, mat3_mul, mat3_rotate, mat3_scale, mat3_translate};
 
 /// Computes a 3x3 texture transformation matrix based on material params and animation state.
-/// 
+///
 /// This matrix transforms standard (0,0)-(1,1) UV coordinates into the animated
 /// coordinates consumed by the shader.
-pub fn compute_texture_matrix(params: &TextureEntry, anim: &TextureAnim, time: f32) -> [[f32; 3]; 3] {
+pub fn compute_texture_matrix(
+    params: &TextureEntry,
+    anim: &TextureAnim,
+    time: f32,
+) -> [[f32; 3]; 3] {
     let mut offset_s = params.offset_s;
     let mut offset_t = params.offset_t;
     let mut scale_s = params.scale_s;
@@ -81,8 +93,12 @@ pub fn compute_texture_matrix(params: &TextureEntry, anim: &TextureAnim, time: f
         if (anim.mode & PING_PONG) != 0 {
             let len = if anim.length > 0.0 { anim.length } else { 1.0 };
             let normalized_t = (t - anim.start) % (2.0 * len);
-            let phase = if normalized_t < 0.0 { normalized_t + 2.0 * len } else { normalized_t };
-            
+            let phase = if normalized_t < 0.0 {
+                normalized_t + 2.0 * len
+            } else {
+                normalized_t
+            };
+
             t = if phase < len {
                 anim.start + phase
             } else {
@@ -91,7 +107,11 @@ pub fn compute_texture_matrix(params: &TextureEntry, anim: &TextureAnim, time: f
         } else if (anim.mode & LOOP) != 0 {
             let len = if anim.length > 0.0 { anim.length } else { 1.0 };
             let normalized_t = (t - anim.start) % len;
-            t = if normalized_t < 0.0 { normalized_t + len } else { normalized_t };
+            t = if normalized_t < 0.0 {
+                normalized_t + len
+            } else {
+                normalized_t
+            };
             t += anim.start;
         } else {
             // One-shot
@@ -116,13 +136,13 @@ pub fn compute_texture_matrix(params: &TextureEntry, anim: &TextureAnim, time: f
             let frames = size_x * size_y;
             let frame = t.floor() % frames;
             let frame = if frame < 0.0 { frame + frames } else { frame };
-            
+
             let col = frame % size_x;
             let row = (frame / size_x).floor();
-            
+
             scale_s = 1.0 / size_x;
             scale_t = 1.0 / size_y;
-            
+
             offset_s = col * scale_s;
             // SL rows are top-to-bottom for flipbooks, but V-coord is bottom-to-top.
             // Row 0 is at offset_t = (size_y - 1) * scale_t
@@ -136,19 +156,19 @@ pub fn compute_texture_matrix(params: &TextureEntry, anim: &TextureAnim, time: f
     // 3. Un-center
     // 4. Scale (repeat/tiles)
     // 5. Offset
-    
+
     let m_center = mat3_translate(-0.5, -0.5);
     let m_rotate = mat3_rotate(rotation);
     let m_uncenter = mat3_translate(0.5, 0.5);
     let m_scale = mat3_scale(scale_s, scale_t);
     let m_offset = mat3_translate(offset_s, offset_t);
-    
+
     // Matrix concat (Column-major logic): M = Offset * Scale * Uncenter * Rotate * Center
     let res = mat3_mul(m_rotate, m_center);
     let res = mat3_mul(m_uncenter, res);
     let res = mat3_mul(m_scale, res);
     let res = mat3_mul(m_offset, res);
-    
+
     res
 }
 
@@ -169,10 +189,10 @@ mod tests {
         };
         let anim = TextureAnim::default();
         let m = compute_texture_matrix(&params, &anim, 0.0);
-        
+
         let uv_in = [0.5, 0.5];
         let uv_out = mat3_transform_vec2(m, uv_in);
-        
+
         // Scale 2,3 Offset 0.1, 0.2 around center 0.5, 0.5
         // U' = (0.5-0.5)*1.0 + 0.5 = 0.5; U'' = 0.5 * 2.0 + 0.1 = 1.1
         // V' = (0.5-0.5)*1.0 + 0.5 = 0.5; V'' = 0.5 * 3.0 + 0.2 = 1.7
@@ -188,12 +208,12 @@ mod tests {
         };
         let anim = TextureAnim::default();
         let m = compute_texture_matrix(&params, &anim, 0.0);
-        
+
         // Center should stay center
         let uv_center = mat3_transform_vec2(m, [0.5, 0.5]);
         assert!((uv_center[0] - 0.5).abs() < 1e-5);
         assert!((uv_center[1] - 0.5).abs() < 1e-5);
-        
+
         // Right middle (1.0, 0.5) rotates to top middle (0.5, 1.0)
         let uv_right = mat3_transform_vec2(m, [1.0, 0.5]);
         assert!((uv_right[0] - 0.5).abs() < 1e-5);
@@ -209,14 +229,14 @@ mod tests {
             length: 1.0,
             ..TextureAnim::default()
         };
-        
+
         // At t=0.5, offset should be 0.5
         let m = compute_texture_matrix(&params, &anim, 0.5);
         let uv_out = mat3_transform_vec2(m, [0.0, 0.0]);
         // M = T(0.5, 0) * S(1,1) * T(0.5, 0.5) * R(0) * T(-0.5, -0.5)
         // (0,0) -> (-0.5, -0.5) -> (-0.5, -0.5) -> (0, 0) -> (0, 0) -> (0.5, 0.0)
         assert!((uv_out[0] - 0.5).abs() < 1e-5);
-        
+
         // At t=1.5, loop should wrap back to 0.5
         let m2 = compute_texture_matrix(&params, &anim, 1.5);
         let uv_out2 = mat3_transform_vec2(m2, [0.0, 0.0]);
@@ -234,7 +254,7 @@ mod tests {
             length: 4.0, // 4 frames to loop over
             ..TextureAnim::default()
         };
-        
+
         // Frame 0 (t=0.1)
         let m0 = compute_texture_matrix(&params, &anim, 0.1);
         let uv_out0 = mat3_transform_vec2(m0, [0.0, 0.0]);
@@ -242,7 +262,7 @@ mod tests {
         // (0,0) -> (-0.5, -0.5) -> (-0.5, -0.5) -> (0, 0) -> (0, 0) -> (0, 0.5)
         assert!((uv_out0[0] - 0.0).abs() < 1e-5);
         assert!((uv_out0[1] - 0.5).abs() < 1e-5);
-        
+
         // Frame 1 (t=1.1)
         let m1 = compute_texture_matrix(&params, &anim, 1.1);
         let uv_out1 = mat3_transform_vec2(m1, [0.0, 0.0]);
@@ -261,15 +281,15 @@ mod tests {
             length: 1.0,
             ..TextureAnim::default()
         };
-        
+
         // t=0.5 -> 0.5
         let m1 = compute_texture_matrix(&params, &anim, 0.5);
         assert!((mat3_transform_vec2(m1, [0.0, 0.0])[0] - 0.5).abs() < 1e-5);
-        
+
         // t=1.5 -> phase 1.5 is > 1.0, so 2.0 - 1.5 = 0.5
         let m2 = compute_texture_matrix(&params, &anim, 1.5);
         assert!((mat3_transform_vec2(m2, [0.0, 0.0])[0] - 0.5).abs() < 1e-5);
-        
+
         // t=2.1 -> wrap to 0.1
         let m3 = compute_texture_matrix(&params, &anim, 2.1);
         assert!((mat3_transform_vec2(m3, [0.0, 0.0])[0] - 0.1).abs() < 1e-5);

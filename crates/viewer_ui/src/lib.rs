@@ -392,6 +392,7 @@ impl UiSystem {
         avg_scene_update_ms: f32,
         total_instances: usize,
         visible_proxies: usize,
+        show_chat_window: bool,
     ) -> UiActions {
         if surface_size.width == 0 || surface_size.height == 0 {
             return UiActions::default();
@@ -496,204 +497,134 @@ impl UiSystem {
                     ui.label(format!("Visible Proxies: {}", visible_proxies));
                 });
 
-            egui::Window::new("Chat + IM")
-                .default_pos(egui::pos2(16.0, 340.0))
-                .default_size(egui::vec2(760.0, 360.0))
-                .min_size(egui::vec2(520.0, 260.0))
-                .max_size(egui::vec2(1100.0, 760.0))
-                .resizable(true)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        let (connection_text, color) = connection_chip(&chat_state.connection);
-                        ui.colored_label(color, format!(" connection: {connection_text} "));
-                        if let Some((send_text, send_color)) = send_chip(&chat_state.send_status) {
-                            ui.colored_label(send_color, format!(" nearby: {send_text} "));
-                        }
-                        if !social_state.im_draft.trim().is_empty() {
-                            ui.colored_label(egui::Color32::LIGHT_BLUE, " im draft unsent ");
-                        }
-                    });
-                    if let ChatConnectionState::Failed(reason) = &chat_state.connection {
-                        ui.colored_label(egui::Color32::RED, format!("Connection error: {reason}"));
-                    }
-                    ui.separator();
-
-                    ui.columns(2, |cols| {
-                        let total_width = cols[0].available_width() + cols[1].available_width();
-                        cols[0].set_width(total_width * 0.34);
-                        cols[0].vertical(|ui| {
-                            ui.strong("Conversations");
-                            let nearby_selected = self.active_chat_target == ChatTarget::Nearby;
-                            if ui.selectable_label(nearby_selected, "Nearby").clicked() {
-                                self.active_chat_target = ChatTarget::Nearby;
+            if show_chat_window {
+                egui::Window::new("Chat + IM")
+                    .default_pos(egui::pos2(16.0, 340.0))
+                    .default_size(egui::vec2(760.0, 360.0))
+                    .min_size(egui::vec2(520.0, 260.0))
+                    .max_size(egui::vec2(1100.0, 760.0))
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            let (connection_text, color) = connection_chip(&chat_state.connection);
+                            ui.colored_label(color, format!(" connection: {connection_text} "));
+                            if let Some((send_text, send_color)) =
+                                send_chip(&chat_state.send_status)
+                            {
+                                ui.colored_label(send_color, format!(" nearby: {send_text} "));
                             }
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.strong("Threads");
-                                ui.selectable_value(
-                                    &mut self.thread_filter,
-                                    ThreadFilter::Recent,
-                                    "Recent",
-                                );
-                                ui.selectable_value(
-                                    &mut self.thread_filter,
-                                    ThreadFilter::Online,
-                                    "Online",
-                                );
-                                ui.selectable_value(
-                                    &mut self.thread_filter,
-                                    ThreadFilter::All,
-                                    "All",
-                                );
-                            });
-                            let friend_ids =
-                                sorted_friend_ids_for_filter(social_state, self.thread_filter);
-                            egui::ScrollArea::vertical()
-                                .id_salt("chat_thread_sidebar")
-                                .show(ui, |ui| {
-                                    if friend_ids.is_empty() {
-                                        ui.weak("No friends loaded");
-                                    }
-                                    for friend_id in friend_ids {
-                                        let label = social_state
-                                            .friends
-                                            .iter()
-                                            .find(|f| f.id == friend_id)
-                                            .map(SocialState::friend_display_label)
-                                            .unwrap_or_else(|| friend_id.clone());
-                                        let unread = social_state
-                                            .thread_for_participant(&friend_id)
-                                            .map(|thread| thread.unread_count)
-                                            .unwrap_or(0);
-                                        let hinted = if unread > 0 {
-                                            format!("{label} [{unread}]")
-                                        } else {
-                                            label
-                                        };
-                                        let selected = social_state
-                                            .selected_friend_id
-                                            .as_ref()
-                                            .map(|id| id == &friend_id)
-                                            .unwrap_or(false)
-                                            && self.active_chat_target == ChatTarget::DirectIm;
-                                        if ui.selectable_label(selected, hinted).clicked() {
-                                            self.active_chat_target = ChatTarget::DirectIm;
-                                            social_state.selected_friend_id =
-                                                Some(friend_id.clone());
-                                            social_state
-                                                .mark_thread_read_by_participant(&friend_id, 0);
-                                        }
-                                    }
-                                });
-                            if ui.button("Clear all unread").clicked() {
-                                social_state.clear_all_unread(0);
+                            if !social_state.im_draft.trim().is_empty() {
+                                ui.colored_label(egui::Color32::LIGHT_BLUE, " im draft unsent ");
                             }
                         });
+                        if let ChatConnectionState::Failed(reason) = &chat_state.connection {
+                            ui.colored_label(
+                                egui::Color32::RED,
+                                format!("Connection error: {reason}"),
+                            );
+                        }
+                        ui.separator();
 
-                        cols[1].vertical(|ui| match self.active_chat_target {
-                            ChatTarget::Nearby => {
-                                ui.strong("Nearby Chat");
-                                egui::ScrollArea::vertical()
-                                    .id_salt("nearby_messages_compact")
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        let mut prev_sender = String::new();
-                                        for message in &chat_state.messages {
-                                            let grouped = prev_sender == message.sender;
-                                            render_compact_message_row(
-                                                ui,
-                                                &message.sender,
-                                                &message.text,
-                                                message.observed_at_unix_ms,
-                                                message.sender == "You",
-                                                grouped,
-                                            );
-                                            prev_sender = message.sender.clone();
-                                        }
-                                    });
+                        ui.columns(2, |cols| {
+                            let total_width = cols[0].available_width() + cols[1].available_width();
+                            cols[0].set_width(total_width * 0.34);
+                            cols[0].vertical(|ui| {
+                                ui.strong("Conversations");
+                                let nearby_selected = self.active_chat_target == ChatTarget::Nearby;
+                                if ui.selectable_label(nearby_selected, "Nearby").clicked() {
+                                    self.active_chat_target = ChatTarget::Nearby;
+                                }
                                 ui.separator();
-                                let text_edit = ui.add(
-                                    egui::TextEdit::multiline(&mut chat_state.draft.text)
-                                        .desired_rows(3)
-                                        .hint_text("Enter sends, Shift+Enter newline"),
-                                );
-                                let can_send = !chat_state.draft.text.trim().is_empty();
-                                let enter_send = text_edit.has_focus()
-                                    && ui.input(|input| {
-                                        should_submit_on_enter(
-                                            input.key_pressed(egui::Key::Enter),
-                                            input.modifiers.shift,
-                                        )
-                                    });
-                                let click_send = ui
-                                    .add_enabled(can_send, egui::Button::new("Send nearby"))
-                                    .clicked();
-                                if can_send && (enter_send || click_send) {
-                                    actions.nearby_chat_send =
-                                        Some(chat_state.draft.text.trim().to_string());
-                                }
-                            }
-                            ChatTarget::DirectIm => {
-                                if social_state.selected_friend_id.is_none() {
-                                    social_state.selected_friend_id = social_state
-                                        .friends
-                                        .first()
-                                        .map(|friend| friend.id.clone());
-                                }
-                                if let Some(selected) = social_state.selected_friend_id.clone() {
-                                    social_state.mark_thread_read_by_participant(&selected, 0);
-                                    let label = social_state
-                                        .friends
-                                        .iter()
-                                        .find(|f| f.id == selected)
-                                        .map(SocialState::friend_display_label)
-                                        .unwrap_or_else(|| selected.clone());
-                                    ui.horizontal(|ui| {
-                                        ui.strong(format!("Direct IM: {label}"));
-                                        if ui.button("Profile").clicked() {
-                                            actions.open_avatar_profile = Some(selected.clone());
+                                ui.horizontal(|ui| {
+                                    ui.strong("Threads");
+                                    ui.selectable_value(
+                                        &mut self.thread_filter,
+                                        ThreadFilter::Recent,
+                                        "Recent",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.thread_filter,
+                                        ThreadFilter::Online,
+                                        "Online",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.thread_filter,
+                                        ThreadFilter::All,
+                                        "All",
+                                    );
+                                });
+                                let friend_ids =
+                                    sorted_friend_ids_for_filter(social_state, self.thread_filter);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("chat_thread_sidebar")
+                                    .show(ui, |ui| {
+                                        if friend_ids.is_empty() {
+                                            ui.weak("No friends loaded");
                                         }
-                                        if ui.button("Mark read").clicked() {
-                                            social_state
-                                                .mark_thread_read_by_participant(&selected, 0);
+                                        for friend_id in friend_ids {
+                                            let label = social_state
+                                                .friends
+                                                .iter()
+                                                .find(|f| f.id == friend_id)
+                                                .map(SocialState::friend_display_label)
+                                                .unwrap_or_else(|| friend_id.clone());
+                                            let unread = social_state
+                                                .thread_for_participant(&friend_id)
+                                                .map(|thread| thread.unread_count)
+                                                .unwrap_or(0);
+                                            let hinted = if unread > 0 {
+                                                format!("{label} [{unread}]")
+                                            } else {
+                                                label
+                                            };
+                                            let selected = social_state
+                                                .selected_friend_id
+                                                .as_ref()
+                                                .map(|id| id == &friend_id)
+                                                .unwrap_or(false)
+                                                && self.active_chat_target == ChatTarget::DirectIm;
+                                            if ui.selectable_label(selected, hinted).clicked() {
+                                                self.active_chat_target = ChatTarget::DirectIm;
+                                                social_state.selected_friend_id =
+                                                    Some(friend_id.clone());
+                                                social_state
+                                                    .mark_thread_read_by_participant(&friend_id, 0);
+                                            }
                                         }
                                     });
-                                    if let Some(thread) =
-                                        social_state.thread_for_participant(&selected)
-                                    {
-                                        egui::ScrollArea::vertical()
-                                            .id_salt("direct_im_messages_compact")
-                                            .stick_to_bottom(true)
-                                            .show(ui, |ui| {
-                                                let mut prev_sender = String::new();
-                                                for msg in &thread.messages {
-                                                    let prefix = if msg.outgoing {
-                                                        "You"
-                                                    } else {
-                                                        msg.from_name.as_str()
-                                                    };
-                                                    let grouped = prev_sender == prefix;
-                                                    render_compact_message_row(
-                                                        ui,
-                                                        prefix,
-                                                        &msg.text,
-                                                        msg.observed_at_unix_ms,
-                                                        msg.outgoing,
-                                                        grouped,
-                                                    );
-                                                    prev_sender = prefix.to_string();
-                                                }
-                                            });
-                                    } else {
-                                        ui.label("No IM history yet.");
-                                    }
+                                if ui.button("Clear all unread").clicked() {
+                                    social_state.clear_all_unread(0);
+                                }
+                            });
+
+                            cols[1].vertical(|ui| match self.active_chat_target {
+                                ChatTarget::Nearby => {
+                                    ui.strong("Nearby Chat");
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("nearby_messages_compact")
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            let mut prev_sender = String::new();
+                                            for message in &chat_state.messages {
+                                                let grouped = prev_sender == message.sender;
+                                                render_compact_message_row(
+                                                    ui,
+                                                    &message.sender,
+                                                    &message.text,
+                                                    message.observed_at_unix_ms,
+                                                    message.sender == "You",
+                                                    grouped,
+                                                );
+                                                prev_sender = message.sender.clone();
+                                            }
+                                        });
                                     ui.separator();
                                     let text_edit = ui.add(
-                                        egui::TextEdit::multiline(&mut social_state.im_draft)
+                                        egui::TextEdit::multiline(&mut chat_state.draft.text)
                                             .desired_rows(3)
                                             .hint_text("Enter sends, Shift+Enter newline"),
                                     );
-                                    let can_send = !social_state.im_draft.trim().is_empty();
+                                    let can_send = !chat_state.draft.text.trim().is_empty();
                                     let enter_send = text_edit.has_focus()
                                         && ui.input(|input| {
                                             should_submit_on_enter(
@@ -702,21 +633,100 @@ impl UiSystem {
                                             )
                                         });
                                     let click_send = ui
-                                        .add_enabled(can_send, egui::Button::new("Send IM"))
+                                        .add_enabled(can_send, egui::Button::new("Send nearby"))
                                         .clicked();
                                     if can_send && (enter_send || click_send) {
-                                        actions.direct_im_send = Some((
-                                            selected.clone(),
-                                            social_state.im_draft.trim().to_string(),
-                                        ));
+                                        actions.nearby_chat_send =
+                                            Some(chat_state.draft.text.trim().to_string());
                                     }
-                                } else {
-                                    ui.label("No friends available for direct IM.");
                                 }
-                            }
+                                ChatTarget::DirectIm => {
+                                    if social_state.selected_friend_id.is_none() {
+                                        social_state.selected_friend_id = social_state
+                                            .friends
+                                            .first()
+                                            .map(|friend| friend.id.clone());
+                                    }
+                                    if let Some(selected) = social_state.selected_friend_id.clone()
+                                    {
+                                        social_state.mark_thread_read_by_participant(&selected, 0);
+                                        let label = social_state
+                                            .friends
+                                            .iter()
+                                            .find(|f| f.id == selected)
+                                            .map(SocialState::friend_display_label)
+                                            .unwrap_or_else(|| selected.clone());
+                                        ui.horizontal(|ui| {
+                                            ui.strong(format!("Direct IM: {label}"));
+                                            if ui.button("Profile").clicked() {
+                                                actions.open_avatar_profile =
+                                                    Some(selected.clone());
+                                            }
+                                            if ui.button("Mark read").clicked() {
+                                                social_state
+                                                    .mark_thread_read_by_participant(&selected, 0);
+                                            }
+                                        });
+                                        if let Some(thread) =
+                                            social_state.thread_for_participant(&selected)
+                                        {
+                                            egui::ScrollArea::vertical()
+                                                .id_salt("direct_im_messages_compact")
+                                                .stick_to_bottom(true)
+                                                .show(ui, |ui| {
+                                                    let mut prev_sender = String::new();
+                                                    for msg in &thread.messages {
+                                                        let prefix = if msg.outgoing {
+                                                            "You"
+                                                        } else {
+                                                            msg.from_name.as_str()
+                                                        };
+                                                        let grouped = prev_sender == prefix;
+                                                        render_compact_message_row(
+                                                            ui,
+                                                            prefix,
+                                                            &msg.text,
+                                                            msg.observed_at_unix_ms,
+                                                            msg.outgoing,
+                                                            grouped,
+                                                        );
+                                                        prev_sender = prefix.to_string();
+                                                    }
+                                                });
+                                        } else {
+                                            ui.label("No IM history yet.");
+                                        }
+                                        ui.separator();
+                                        let text_edit = ui.add(
+                                            egui::TextEdit::multiline(&mut social_state.im_draft)
+                                                .desired_rows(3)
+                                                .hint_text("Enter sends, Shift+Enter newline"),
+                                        );
+                                        let can_send = !social_state.im_draft.trim().is_empty();
+                                        let enter_send = text_edit.has_focus()
+                                            && ui.input(|input| {
+                                                should_submit_on_enter(
+                                                    input.key_pressed(egui::Key::Enter),
+                                                    input.modifiers.shift,
+                                                )
+                                            });
+                                        let click_send = ui
+                                            .add_enabled(can_send, egui::Button::new("Send IM"))
+                                            .clicked();
+                                        if can_send && (enter_send || click_send) {
+                                            actions.direct_im_send = Some((
+                                                selected.clone(),
+                                                social_state.im_draft.trim().to_string(),
+                                            ));
+                                        }
+                                    } else {
+                                        ui.label("No friends available for direct IM.");
+                                    }
+                                }
+                            });
                         });
                     });
-                });
+            }
 
             if let Some(profile) = profile_state.as_mut() {
                 egui::Window::new("Avatar Profile")
@@ -1241,6 +1251,14 @@ mod tests {
             decoded_viewer_time_updates: 0,
             decoded_viewer_time_body_len: None,
             decoded_viewer_time_signature: None,
+            decoded_object_feed_update_messages: 0,
+            decoded_object_feed_kill_messages: 0,
+            decoded_object_feed_decode_dropped: 0,
+            decoded_object_feed_evicted: 0,
+            decoded_object_feed_total_objects: 0,
+            decoded_object_feed_export_truncated: false,
+            decoded_object_feed_objects: Vec::new(),
+            decoded_object_feed_recent_kills: Vec::new(),
             observed_at_unix_ms: 1,
         };
         let lines = live_visual_lines(Some(&snapshot));

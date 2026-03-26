@@ -3919,6 +3919,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "gltf",
+ "image",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -3977,6 +3978,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "image",
  "pollster",
  "tracing",
  "viewer_core",

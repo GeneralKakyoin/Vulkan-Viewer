@@ -8,7 +8,23 @@ Do not use it as a roadmap, milestone history log, or planning journal.
 
 ## Latest notable changes
 
-* The master roadmap in `docs/plans/PLAN.md` now uses prefixed milestone IDs (`R/A/N/U`) and treats the next planning sequence as `R01 -> A02 -> N03`.
+* R01 execution: mesh loading/caching is hardened so empty/invalid glTF bytes cannot poison the mesh cache; dynamic geometry upload skips zero-index submeshes and only updates AABBs when upload succeeds.
+* A02 execution: fixture-backed texture acquisition + bounded CPU cache foundation is in place (`AssetStatus` + `FixtureTextureCache`), and `viewer_app` can upload fixture textures to the renderer when `VIEWER_FIXTURE_TEXTURES` is set.
+* New flag-driven runtime verification modes are available:
+  * `STRESS_TEST=camera` for deterministic auto-camera orbit validation
+  * `STRESS_TEST=screenshot` for automated PNG capture (`artifacts/screenshots` default) to support model/agent visual verification
+* A canonical test/verification reference now exists at `docs/TESTING_REFERENCE.md` (commands, flags, and `VIEWER_*` env vars).
+* New prefixed milestone plans are now authored:
+  * `docs/plans/PLAN_R01.md`
+  * `docs/plans/PLAN_A02.md`
+* Matching plan reviews are now authored:
+  * `docs/reviews/REVIEW_plan_r01.md`
+  * `docs/reviews/REVIEW_plan_a02.md`
+* `N03` execution: bounded object-update classification + minimal decode now exports a capped object feed through `LiveVisualSnapshot` and the ingestion seam, and the scene now renders deterministic world-object feed proxy instances with lifecycle-safe removal behavior.
+* Deferred-feature capture policy is now propagated across workflow docs (`AGENTS.md`, `docs/TASKS.md`, and planner/reviewer runbook prompts), not just `docs/plans/PLAN.md`.
+* `docs/plans/PLAN.md` now includes explicit instructions for expanding future concise milestones (`U04+`) into implementation-ready milestone plans.
+* A canonical deferred-feature parking list now exists at `docs/plans/DEFERRED_FEATURES.md`; planning-time "too early" features must be recorded there.
+* The master roadmap in `docs/plans/PLAN.md` now uses prefixed milestone IDs (`R/A/N/U`) and treats the next milestone sequence as `R01 -> A02 -> N03` (with `N03` now next).
 * `docs/plans/RENDERING_ROADMAP_V2.md` is now deprecated and redirects planning to the master roadmap plus per-milestone `PLAN_<ID>.md` files.
 * The rendering track should currently be treated as complete through **M2**.
 * The M2 geometry torture test (`STRESS_TEST=2`) now uploads and renders real procedural/sculpt geometry (dynamic meshes) instead of falling back to diagnostic cubes.
