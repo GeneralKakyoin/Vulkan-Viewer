@@ -130,15 +130,15 @@ fn decode_profile_image_color(bytes: &[u8]) -> Result<egui::ColorImage, String> 
         ));
     }
 
-    if let Ok(j2k) = jpeg2k::Image::from_bytes(bytes) {
-        if let Ok(decoded) = image::DynamicImage::try_from(&j2k) {
-            let rgba = decoded.to_rgba8();
-            let size = [rgba.width() as usize, rgba.height() as usize];
-            return Ok(egui::ColorImage::from_rgba_unmultiplied(
-                size,
-                rgba.as_raw(),
-            ));
-        }
+    if let Ok(j2k) = jpeg2k::Image::from_bytes(bytes)
+        && let Ok(decoded) = image::DynamicImage::try_from(&j2k)
+    {
+        let rgba = decoded.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        return Ok(egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            rgba.as_raw(),
+        ));
     }
 
     let jp2 = justjp2::decode(bytes).map_err(|err| err.to_string())?;
@@ -242,6 +242,34 @@ pub struct UiActions {
     pub select_avatar_profile_tab: Option<(String, AvatarProfileTab)>,
     pub refresh_avatar_profile: Option<(String, Option<AvatarProfileTab>)>,
     pub open_external_url: Option<String>,
+}
+
+pub struct RenderInput<'a> {
+    pub window: &'a Window,
+    pub device: &'a Device,
+    pub queue: &'a Queue,
+    pub encoder: &'a mut CommandEncoder,
+    pub target_view: &'a TextureView,
+    pub surface_size: PhysicalSize<u32>,
+    pub camera: &'a Camera,
+    pub live_visual: Option<&'a LiveVisualSnapshot>,
+    pub session_status: SessionUxStatus,
+    pub chat_state: &'a mut ChatState,
+    pub social_state: &'a mut SocialState,
+    pub world_avatars: &'a [WorldAvatarPlaceholder],
+    pub world_sim_name: Option<&'a str>,
+    pub world_self_location: Option<[f32; 3]>,
+    pub profile_state: &'a mut Option<AvatarProfileState>,
+    pub profile_image_bytes: &'a BTreeMap<String, Vec<u8>>,
+    pub now_unix_ms: u64,
+    pub profile_cache_ttl_secs: u64,
+    pub fps: f32,
+    pub frame_ms: f32,
+    pub avg_scene_update_ms: f32,
+    pub total_instances: usize,
+    pub visible_proxies: usize,
+    pub fixture_texture_metrics: viewer_core::AssetContinuityMetrics,
+    pub show_chat_window: bool,
 }
 
 fn should_submit_on_enter(enter_pressed: bool, shift_held: bool) -> bool {
@@ -424,34 +452,34 @@ impl UiSystem {
     /// Draws the persistent overlay that existed in the prior viewer_app implementation.
     /// The caller owns the encoder and render target so that it can merge this draw call
     /// with other renderer work.
-    pub fn render(
-        &mut self,
-        window: &Window,
-        device: &Device,
-        queue: &Queue,
-        encoder: &mut CommandEncoder,
-        target_view: &TextureView,
-        surface_size: PhysicalSize<u32>,
-        camera: &Camera,
-        live_visual: Option<&LiveVisualSnapshot>,
-        session_status: SessionUxStatus,
-        chat_state: &mut ChatState,
-        social_state: &mut SocialState,
-        world_avatars: &[WorldAvatarPlaceholder],
-        world_sim_name: Option<&str>,
-        world_self_location: Option<[f32; 3]>,
-        profile_state: &mut Option<AvatarProfileState>,
-        profile_image_bytes: &BTreeMap<String, Vec<u8>>,
-        now_unix_ms: u64,
-        profile_cache_ttl_secs: u64,
-        fps: f32,
-        frame_ms: f32,
-        avg_scene_update_ms: f32,
-        total_instances: usize,
-        visible_proxies: usize,
-        fixture_texture_metrics: viewer_core::AssetContinuityMetrics,
-        _show_chat_window: bool,
-    ) -> UiActions {
+    pub fn render(&mut self, input: RenderInput<'_>) -> UiActions {
+        let RenderInput {
+            window,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_size,
+            camera,
+            live_visual,
+            session_status,
+            chat_state,
+            social_state,
+            world_avatars,
+            world_sim_name,
+            world_self_location,
+            profile_state,
+            profile_image_bytes,
+            now_unix_ms,
+            profile_cache_ttl_secs,
+            fps,
+            frame_ms,
+            avg_scene_update_ms,
+            total_instances,
+            visible_proxies,
+            fixture_texture_metrics,
+            show_chat_window: _show_chat_window,
+        } = input;
         if surface_size.width == 0 || surface_size.height == 0 {
             return UiActions::default();
         }
@@ -672,10 +700,10 @@ impl UiSystem {
                                 .events
                                 .iter()
                                 .filter(|e| {
-                                    if let Some(min_level) = self.relay_level_filter {
-                                        if e.level < min_level {
-                                            return false;
-                                        }
+                                    if let Some(min_level) = self.relay_level_filter
+                                        && e.level < min_level
+                                    {
+                                        return false;
                                     }
                                     if !self.relay_filter_text.is_empty() {
                                         let filter = self.relay_filter_text.to_lowercase();
@@ -1057,7 +1085,7 @@ impl UiSystem {
                             let last_refresh = profile.last_refresh_unix_ms.unwrap_or(0);
                             let on_cooldown = now_unix_ms < last_refresh + cooldown_ms;
                             let remaining_secs = if on_cooldown {
-                                (last_refresh + cooldown_ms - now_unix_ms + 999) / 1000
+                                (last_refresh + cooldown_ms - now_unix_ms).div_ceil(1000)
                             } else {
                                 0
                             };
@@ -1162,10 +1190,10 @@ impl UiSystem {
                             AvatarProfileTab::Feed => {
                                 let feed_url = profile.feed.url.as_deref().unwrap_or("n/a");
                                 ui.label(format!("Feed URL: {feed_url}"));
-                                if let Some(url) = profile.feed.url.as_ref() {
-                                    if ui.button("Open in Browser").clicked() {
-                                        actions.open_external_url = Some(url.clone());
-                                    }
+                                if let Some(url) = profile.feed.url.as_ref()
+                                    && ui.button("Open in Browser").clicked()
+                                {
+                                    actions.open_external_url = Some(url.clone());
                                 }
                             }
                             AvatarProfileTab::Picks => {
@@ -1205,40 +1233,35 @@ impl UiSystem {
                                     ui.separator();
                                     if let Some(selected_id) =
                                         profile.picks.selected_pick_id.as_ref()
-                                    {
-                                        if let Some(details) =
+                                        && let Some(details) =
                                             profile.picks.details.get(selected_id)
-                                        {
-                                            let pick_title = if details.name.is_empty() {
-                                                short_id(&details.id)
-                                            } else {
-                                                details.name.clone()
-                                            };
-                                            ui.label(format!("Pick: {}", pick_title));
-                                            ui.label(format!("ID: {}", details.id));
-                                            if let Some(description) = details.description.as_ref()
-                                            {
-                                                ui.label(format!("Description: {description}"));
-                                            }
-                                            if let Some(sim_name) = details.sim_name.as_ref() {
-                                                ui.label(format!("Region: {sim_name}"));
-                                            }
-                                            if let Some(parcel_name) = details.parcel_name.as_ref()
-                                            {
-                                                ui.label(format!("Parcel: {parcel_name}"));
-                                            }
-                                            if let Some(snapshot_id) = details.snapshot_id.as_ref()
-                                            {
-                                                render_profile_image(
-                                                    ui,
-                                                    &self.egui_ctx,
-                                                    profile_image_bytes,
-                                                    &mut self.profile_texture_cache,
-                                                    &mut self.profile_texture_failures,
-                                                    Some(snapshot_id.as_str()),
-                                                    "pick",
-                                                );
-                                            }
+                                    {
+                                        let pick_title = if details.name.is_empty() {
+                                            short_id(&details.id)
+                                        } else {
+                                            details.name.clone()
+                                        };
+                                        ui.label(format!("Pick: {}", pick_title));
+                                        ui.label(format!("ID: {}", details.id));
+                                        if let Some(description) = details.description.as_ref() {
+                                            ui.label(format!("Description: {description}"));
+                                        }
+                                        if let Some(sim_name) = details.sim_name.as_ref() {
+                                            ui.label(format!("Region: {sim_name}"));
+                                        }
+                                        if let Some(parcel_name) = details.parcel_name.as_ref() {
+                                            ui.label(format!("Parcel: {parcel_name}"));
+                                        }
+                                        if let Some(snapshot_id) = details.snapshot_id.as_ref() {
+                                            render_profile_image(
+                                                ui,
+                                                &self.egui_ctx,
+                                                profile_image_bytes,
+                                                &mut self.profile_texture_cache,
+                                                &mut self.profile_texture_failures,
+                                                Some(snapshot_id.as_str()),
+                                                "pick",
+                                            );
                                         }
                                     }
                                 }
@@ -1280,43 +1303,38 @@ impl UiSystem {
                                     ui.separator();
                                     if let Some(selected_id) =
                                         profile.classifieds.selected_classified_id.as_ref()
-                                    {
-                                        if let Some(details) =
+                                        && let Some(details) =
                                             profile.classifieds.details.get(selected_id)
-                                        {
-                                            let classified_title = if details.name.is_empty() {
-                                                short_id(&details.id)
-                                            } else {
-                                                details.name.clone()
-                                            };
-                                            ui.label(format!("Classified: {}", classified_title));
-                                            ui.label(format!("ID: {}", details.id));
-                                            if let Some(description) = details.description.as_ref()
-                                            {
-                                                ui.label(format!("Description: {description}"));
-                                            }
-                                            if let Some(sim_name) = details.sim_name.as_ref() {
-                                                ui.label(format!("Region: {sim_name}"));
-                                            }
-                                            if let Some(parcel_name) = details.parcel_name.as_ref()
-                                            {
-                                                ui.label(format!("Parcel: {parcel_name}"));
-                                            }
-                                            if let Some(price) = details.price_for_listing {
-                                                ui.label(format!("Price: {price}"));
-                                            }
-                                            if let Some(snapshot_id) = details.snapshot_id.as_ref()
-                                            {
-                                                render_profile_image(
-                                                    ui,
-                                                    &self.egui_ctx,
-                                                    profile_image_bytes,
-                                                    &mut self.profile_texture_cache,
-                                                    &mut self.profile_texture_failures,
-                                                    Some(snapshot_id.as_str()),
-                                                    "classified",
-                                                );
-                                            }
+                                    {
+                                        let classified_title = if details.name.is_empty() {
+                                            short_id(&details.id)
+                                        } else {
+                                            details.name.clone()
+                                        };
+                                        ui.label(format!("Classified: {}", classified_title));
+                                        ui.label(format!("ID: {}", details.id));
+                                        if let Some(description) = details.description.as_ref() {
+                                            ui.label(format!("Description: {description}"));
+                                        }
+                                        if let Some(sim_name) = details.sim_name.as_ref() {
+                                            ui.label(format!("Region: {sim_name}"));
+                                        }
+                                        if let Some(parcel_name) = details.parcel_name.as_ref() {
+                                            ui.label(format!("Parcel: {parcel_name}"));
+                                        }
+                                        if let Some(price) = details.price_for_listing {
+                                            ui.label(format!("Price: {price}"));
+                                        }
+                                        if let Some(snapshot_id) = details.snapshot_id.as_ref() {
+                                            render_profile_image(
+                                                ui,
+                                                &self.egui_ctx,
+                                                profile_image_bytes,
+                                                &mut self.profile_texture_cache,
+                                                &mut self.profile_texture_failures,
+                                                Some(snapshot_id.as_str()),
+                                                "classified",
+                                            );
                                         }
                                     }
                                 }

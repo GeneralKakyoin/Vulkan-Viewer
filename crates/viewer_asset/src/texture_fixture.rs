@@ -61,6 +61,12 @@ pub struct FixtureTextureCache {
     promotions_this_tick: usize,
 }
 
+impl Default for FixtureTextureCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FixtureTextureCache {
     pub fn new() -> Self {
         Self::with_base_dir(default_fixture_dir(), budget_bytes_from_env())
@@ -395,10 +401,10 @@ impl FixtureTextureCache {
         if self.negative_set.contains(&id) {
             return;
         }
-        if self.negative_set.len() >= self.negative_cap {
-            if let Some(old) = self.negative.pop_front() {
-                self.negative_set.remove(&old);
-            }
+        if self.negative_set.len() >= self.negative_cap
+            && let Some(old) = self.negative.pop_front()
+        {
+            self.negative_set.remove(&old);
         }
         self.negative.push_back(id.clone());
         self.negative_set.insert(id);

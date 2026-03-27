@@ -31,7 +31,7 @@ use viewer_net::{
     poll_event_queue_url_once,
 };
 use viewer_render::RenderBackend;
-use viewer_ui::UiSystem;
+use viewer_ui::{RenderInput, UiSystem};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -169,11 +169,11 @@ impl AutoCameraConfig {
     }
 
     fn apply_to_camera(&self, camera: &mut Camera, elapsed_seconds: f32) {
-        if let Some(script) = &self.path_script {
-            if let Some((position, target)) = script.sample(elapsed_seconds) {
-                apply_camera_look_at(camera, position, target);
-                return;
-            }
+        if let Some(script) = &self.path_script
+            && let Some((position, target)) = script.sample(elapsed_seconds)
+        {
+            apply_camera_look_at(camera, position, target);
+            return;
         }
 
         let angle = elapsed_seconds * self.angular_speed_radians + self.phase_radians;
@@ -998,15 +998,15 @@ async fn run_in_process_live_feed(
                 if let Some(profile_url) = agent_profile_url.as_deref() {
                     let mut profile_count = 0usize;
                     for id in &bootstrap_friend_ids {
-                        if let Ok(profile) = connection.fetch_agent_profile(profile_url, id).await {
-                            if let Some(display_name) = pick_best_avatar_name(&profile) {
-                                profile_count = profile_count.saturating_add(1);
-                                let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
-                                    id: id.clone(),
-                                    display_name,
-                                    source: String::from("caps.AgentProfile"),
-                                });
-                            }
+                        if let Ok(profile) = connection.fetch_agent_profile(profile_url, id).await
+                            && let Some(display_name) = pick_best_avatar_name(&profile)
+                        {
+                            profile_count = profile_count.saturating_add(1);
+                            let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                id: id.clone(),
+                                display_name,
+                                source: String::from("caps.AgentProfile"),
+                            });
                         }
                     }
                     emit_relay(
@@ -1585,7 +1585,7 @@ async fn run_in_process_live_feed(
 
             if let Some(url) = event_queue_url.as_deref() {
                 if event_queue_poll_task.is_none()
-                    && worker_tick % u64::from(config.event_queue_poll_every_ticks) == 0
+                    && worker_tick.is_multiple_of(u64::from(config.event_queue_poll_every_ticks))
                 {
                     let url = url.to_string();
                     let ack = event_ack;
@@ -1599,64 +1599,62 @@ async fn run_in_process_live_feed(
                     .as_ref()
                     .map(|task| task.is_finished())
                     .unwrap_or(false);
-                if task_finished {
-                    if let Some(task) = event_queue_poll_task.take() {
-                        match task.await {
-                            Ok(Ok(poll)) => {
-                                event_queue_consecutive_failures = 0;
-                                if let Some(next_ack) = poll.id {
-                                    event_ack = next_ack;
-                                }
-                                for message in connection.extract_nearby_chat_messages(&poll) {
-                                    let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
-                                        id: now_unix_ms(),
-                                        observed_at_unix_ms: now_unix_ms(),
-                                        sender: message.sender,
-                                        text: message.text,
-                                        source: message.source,
-                                    }));
-                                }
+                if task_finished && let Some(task) = event_queue_poll_task.take() {
+                    match task.await {
+                        Ok(Ok(poll)) => {
+                            event_queue_consecutive_failures = 0;
+                            if let Some(next_ack) = poll.id {
+                                event_ack = next_ack;
                             }
-                            Ok(Err(err)) => {
-                                event_queue_consecutive_failures =
-                                    event_queue_consecutive_failures.saturating_add(1);
-                                let should_log = event_queue_consecutive_failures == 1
-                                    || event_queue_consecutive_failures % 10 == 0;
-                                if should_log {
-                                    emit_relay(
-                                        &tx,
-                                        RuntimeRelayLevel::Warn,
-                                        "event_queue",
-                                        &format!(
-                                            "event queue polling failed (count={}): {err}",
-                                            event_queue_consecutive_failures
-                                        ),
-                                    );
-                                }
-                                if config.event_queue_failures_before_reconnect > 0
-                                    && event_queue_consecutive_failures
-                                        >= config.event_queue_failures_before_reconnect
-                                {
-                                    emit_relay(
-                                        &tx,
-                                        RuntimeRelayLevel::Warn,
-                                        "event_queue",
-                                        &format!(
-                                            "event queue failure threshold reached ({}); reconnecting",
-                                            config.event_queue_failures_before_reconnect
-                                        ),
-                                    );
-                                    should_reconnect = true;
-                                }
+                            for message in connection.extract_nearby_chat_messages(&poll) {
+                                let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
+                                    id: now_unix_ms(),
+                                    observed_at_unix_ms: now_unix_ms(),
+                                    sender: message.sender,
+                                    text: message.text,
+                                    source: message.source,
+                                }));
                             }
-                            Err(join_err) => {
+                        }
+                        Ok(Err(err)) => {
+                            event_queue_consecutive_failures =
+                                event_queue_consecutive_failures.saturating_add(1);
+                            let should_log = event_queue_consecutive_failures == 1
+                                || event_queue_consecutive_failures.is_multiple_of(10);
+                            if should_log {
                                 emit_relay(
                                     &tx,
                                     RuntimeRelayLevel::Warn,
                                     "event_queue",
-                                    &format!("event queue task failed: {join_err}"),
+                                    &format!(
+                                        "event queue polling failed (count={}): {err}",
+                                        event_queue_consecutive_failures
+                                    ),
                                 );
                             }
+                            if config.event_queue_failures_before_reconnect > 0
+                                && event_queue_consecutive_failures
+                                    >= config.event_queue_failures_before_reconnect
+                            {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "event_queue",
+                                    &format!(
+                                        "event queue failure threshold reached ({}); reconnecting",
+                                        config.event_queue_failures_before_reconnect
+                                    ),
+                                );
+                                should_reconnect = true;
+                            }
+                        }
+                        Err(join_err) => {
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "event_queue",
+                                &format!("event queue task failed: {join_err}"),
+                            );
                         }
                     }
                 }
@@ -1690,7 +1688,7 @@ async fn run_in_process_live_feed(
                 self_location: extract_worker_self_location(&connection),
                 observed_at_unix_ms: now_unix_ms(),
             });
-            if worker_tick % 40 == 0 {
+            if worker_tick.is_multiple_of(40) {
                 let unresolved_ids: Vec<String> = avatar_samples
                     .iter()
                     .filter_map(|sample| sample.agent_id.clone())
@@ -1734,43 +1732,40 @@ async fn run_in_process_live_feed(
                             }
                         }
                     }
-                    if !resolved_any {
-                        if let Some(profile_url) = agent_profile_url.as_deref() {
-                            let mut profile_resolved = 0usize;
-                            for id in &unresolved_ids {
-                                if let Ok(profile) =
-                                    connection.fetch_agent_profile(profile_url, id).await
-                                {
-                                    if let Some(display_name) = pick_best_avatar_name(&profile) {
-                                        profile_resolved = profile_resolved.saturating_add(1);
-                                        known_avatar_name_ids.insert(id.clone());
-                                        if bootstrap_friend_id_set.contains(id) {
-                                            let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
-                                                id: id.clone(),
-                                                display_name,
-                                                source: String::from("caps.AgentProfile"),
-                                            });
-                                        } else {
-                                            let _ = tx.send(LiveFeedUpdate::AvatarResolvedName {
-                                                id: id.clone(),
-                                                display_name,
-                                                source: String::from("caps.AgentProfile"),
-                                            });
-                                        }
-                                    }
+                    if !resolved_any && let Some(profile_url) = agent_profile_url.as_deref() {
+                        let mut profile_resolved = 0usize;
+                        for id in &unresolved_ids {
+                            if let Ok(profile) =
+                                connection.fetch_agent_profile(profile_url, id).await
+                                && let Some(display_name) = pick_best_avatar_name(&profile)
+                            {
+                                profile_resolved = profile_resolved.saturating_add(1);
+                                known_avatar_name_ids.insert(id.clone());
+                                if bootstrap_friend_id_set.contains(id) {
+                                    let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                                        id: id.clone(),
+                                        display_name,
+                                        source: String::from("caps.AgentProfile"),
+                                    });
+                                } else {
+                                    let _ = tx.send(LiveFeedUpdate::AvatarResolvedName {
+                                        id: id.clone(),
+                                        display_name,
+                                        source: String::from("caps.AgentProfile"),
+                                    });
                                 }
                             }
-                            if profile_resolved > 0 {
-                                emit_relay(
-                                    &tx,
-                                    RuntimeRelayLevel::Info,
-                                    "avatar_name",
-                                    &format!(
-                                        "resolved {} avatar names (fallback AgentProfile)",
-                                        profile_resolved
-                                    ),
-                                );
-                            }
+                        }
+                        if profile_resolved > 0 {
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Info,
+                                "avatar_name",
+                                &format!(
+                                    "resolved {} avatar names (fallback AgentProfile)",
+                                    profile_resolved
+                                ),
+                            );
                         }
                     }
                 }
@@ -2295,15 +2290,15 @@ fn parse_region_name_from_start_location(value: &str) -> Option<String> {
 }
 
 fn pick_best_avatar_name(profile: &AgentProfileData) -> Option<String> {
-    if let Some(name) = profile.display_name.as_ref().map(|v| v.trim()) {
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
+    if let Some(name) = profile.display_name.as_ref().map(|v| v.trim())
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
     }
-    if let Some(name) = profile.username.as_ref().map(|v| v.trim()) {
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
+    if let Some(name) = profile.username.as_ref().map(|v| v.trim())
+        && !name.is_empty()
+    {
+        return Some(name.to_string());
     }
     None
 }
@@ -2339,10 +2334,10 @@ fn uuid_short(value: &str) -> String {
 }
 
 fn format_avatar_label(agent_id: &str, social_state: &SocialState) -> String {
-    if let Some(friend) = social_state.friends.iter().find(|f| f.id == agent_id) {
-        if let Some(name) = friend.display_name.as_deref() {
-            return format!("{name} ({})", uuid_short(agent_id));
-        }
+    if let Some(friend) = social_state.friends.iter().find(|f| f.id == agent_id)
+        && let Some(name) = friend.display_name.as_deref()
+    {
+        return format!("{name} ({})", uuid_short(agent_id));
     }
     uuid_short(agent_id)
 }
@@ -2352,10 +2347,10 @@ fn format_avatar_label_with_cache(
     social_state: &SocialState,
     avatar_name_cache: &BTreeMap<String, String>,
 ) -> String {
-    if let Some(friend) = social_state.friends.iter().find(|f| f.id == agent_id) {
-        if let Some(name) = friend.display_name.as_deref() {
-            return format!("{name} ({})", uuid_short(agent_id));
-        }
+    if let Some(friend) = social_state.friends.iter().find(|f| f.id == agent_id)
+        && let Some(name) = friend.display_name.as_deref()
+    {
+        return format!("{name} ({})", uuid_short(agent_id));
     }
     if let Some(name) = avatar_name_cache.get(agent_id) {
         return format!("{name} ({})", uuid_short(agent_id));
@@ -2397,17 +2392,30 @@ fn update_world_sim_name_state(
     }
 }
 
-fn merge_world_avatar_samples(
-    current: &mut Vec<WorldAvatarPlaceholder>,
-    social_state: &SocialState,
-    avatar_name_cache: &BTreeMap<String, String>,
-    decoded_world_sim_name: Option<&str>,
-    startup_sim_name_fallback: Option<&str>,
-    samples: &[WorkerWorldAvatarSample],
+struct MergeWorldAvatarSamplesInput<'a> {
+    current: &'a mut Vec<WorldAvatarPlaceholder>,
+    social_state: &'a SocialState,
+    avatar_name_cache: &'a BTreeMap<String, String>,
+    decoded_world_sim_name: Option<&'a str>,
+    startup_sim_name_fallback: Option<&'a str>,
+    samples: &'a [WorkerWorldAvatarSample],
     region_coords: Option<[u32; 2]>,
     observed_at_unix_ms: u64,
     stale_after_ms: u64,
-) -> Vec<(String, String)> {
+}
+
+fn merge_world_avatar_samples(input: MergeWorldAvatarSamplesInput<'_>) -> Vec<(String, String)> {
+    let MergeWorldAvatarSamplesInput {
+        current,
+        social_state,
+        avatar_name_cache,
+        decoded_world_sim_name,
+        startup_sim_name_fallback,
+        samples,
+        region_coords,
+        observed_at_unix_ms,
+        stale_after_ms,
+    } = input;
     let mut relay_events = Vec::new();
     for (idx, sample) in samples.iter().enumerate() {
         let fallback_id = if sample.is_self {
@@ -2944,10 +2952,10 @@ impl ViewerApp {
         let mut social_state = SocialState::default();
         let cache_config = SocialCacheConfig::from_env();
         let mut social_cache = SocialCache::open(&cache_config).ok();
-        if let Some(cache) = social_cache.as_ref() {
-            if let Ok(cached) = cache.load_cached_social_state() {
-                social_state = cached;
-            }
+        if let Some(cache) = social_cache.as_ref()
+            && let Ok(cached) = cache.load_cached_social_state()
+        {
+            social_state = cached;
         }
         let avatar_name_cache = social_state
             .friends
@@ -3055,8 +3063,10 @@ impl AppState {
                     params.end_cut = 0.5;
                 } // Half prims
 
-                let mut transform = Transform::default();
-                transform.position = [i as f32 * 4.0 - 8.0, 5.0, j as f32 * 4.0 - 8.0];
+                let transform = Transform {
+                    position: [i as f32 * 4.0 - 8.0, 5.0, j as f32 * 4.0 - 8.0],
+                    ..Transform::default()
+                };
 
                 self.scene.insert_instance(
                     GeometrySource::Procedural(params, 1.0),
@@ -3069,9 +3079,11 @@ impl AppState {
         }
 
         // Add a Sculpted Prim
-        let mut sculpt_trans = Transform::default();
-        sculpt_trans.position = [0.0, 15.0, 0.0];
-        sculpt_trans.scale = [2.0, 2.0, 2.0];
+        let sculpt_trans = Transform {
+            position: [0.0, 15.0, 0.0],
+            scale: [2.0, 2.0, 2.0],
+            ..Transform::default()
+        };
         self.scene.insert_instance(
             GeometrySource::Sculpt("dummy-sculpt".to_string(), viewer_core::SculptType::Sphere),
             InstanceRole::SceneStatic,
@@ -3081,8 +3093,10 @@ impl AppState {
         );
 
         // Add a glTF Mesh (Animation Test)
-        let mut mesh_trans = Transform::default();
-        mesh_trans.position = [5.0, 15.0, 5.0];
+        let mesh_trans = Transform {
+            position: [5.0, 15.0, 5.0],
+            ..Transform::default()
+        };
         let inst_id = self.scene.insert_instance(
             GeometrySource::Mesh("dummy-mesh".to_string(), 0),
             InstanceRole::SceneStatic,
@@ -3113,9 +3127,11 @@ impl AppState {
         }
 
         // Add a Transparent Validation Cube
-        let mut trans_cube_trans = Transform::default();
-        trans_cube_trans.position = [0.0, 18.0, 0.0];
-        trans_cube_trans.scale = [3.0, 3.0, 3.0];
+        let trans_cube_trans = Transform {
+            position: [0.0, 18.0, 0.0],
+            scale: [3.0, 3.0, 3.0],
+            ..Transform::default()
+        };
         self.scene.insert_instance(
             GeometrySource::Diagnostic(MeshKind::Cube),
             InstanceRole::SceneStatic,
@@ -3130,8 +3146,10 @@ impl AppState {
         if std::env::var("STRESS_TEST").as_deref() == Ok("1") {
             for i in 0..10 {
                 for j in 0..10 {
-                    let mut transform = Transform::default();
-                    transform.position = [i as f32 * 2.0, 5.0, j as f32 * 2.0];
+                    let transform = Transform {
+                        position: [i as f32 * 2.0, 5.0, j as f32 * 2.0],
+                        ..Transform::default()
+                    };
                     self.scene.insert_instance(
                         GeometrySource::Diagnostic(MeshKind::Cube),
                         InstanceRole::SceneStatic,
@@ -3142,8 +3160,10 @@ impl AppState {
                 }
             }
             // Small planet/moon system
-            let mut sun_trans = Transform::default();
-            sun_trans.position = [0.0, 10.0, 0.0];
+            let sun_trans = Transform {
+                position: [0.0, 10.0, 0.0],
+                ..Transform::default()
+            };
             let _sun_id = self.scene.insert_instance(
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 InstanceRole::SceneStatic,
@@ -3377,17 +3397,17 @@ impl AppState {
                             .and_then(|snapshot| {
                                 Some([snapshot.first_sim_region_x?, snapshot.first_sim_region_y?])
                             });
-                    let relay = merge_world_avatar_samples(
-                        &mut self.world_avatars,
-                        &self.social_state,
-                        &self.avatar_name_cache,
-                        self.world_sim_name.as_deref(),
-                        self.startup_sim_name_fallback.as_deref(),
-                        &avatars,
+                    let relay = merge_world_avatar_samples(MergeWorldAvatarSamplesInput {
+                        current: &mut self.world_avatars,
+                        social_state: &self.social_state,
+                        avatar_name_cache: &self.avatar_name_cache,
+                        decoded_world_sim_name: self.world_sim_name.as_deref(),
+                        startup_sim_name_fallback: self.startup_sim_name_fallback.as_deref(),
+                        samples: &avatars,
                         region_coords,
                         observed_at_unix_ms,
-                        12_000,
-                    );
+                        stale_after_ms: 12_000,
+                    });
                     for (category, message) in relay {
                         self.social_state.relay.push(RuntimeRelayEvent {
                             at_unix_ms: now_unix_ms(),
@@ -3540,61 +3560,61 @@ impl AppState {
 
         // Prepare dynamic geometry
         for &id in &visibility_list {
-            if let Some(instance) = self.scene.instances.get(&id) {
-                if !self.renderer.has_dynamic_geometry(&instance.geometry) {
-                    let mesh = match &instance.geometry {
-                        GeometrySource::Procedural(params, detail) => {
-                            Some(self.geometry_cache.get_procedural(params, *detail))
-                        }
-                        GeometrySource::Sculpt(uuid, sculpt_type) => {
-                            let dummy_pixels = vec![128u8; 32 * 32 * 3]; // Neutral gray sculpt
-                            Some(self.geometry_cache.get_sculpt(
-                                uuid,
-                                *sculpt_type,
-                                &dummy_pixels,
-                                32,
-                                32,
-                            ))
-                        }
-                        GeometrySource::Mesh(uuid, lod) => {
-                            Some(self.geometry_cache.get_mesh(uuid, *lod, &[]))
-                        }
-                        _ => None,
-                    };
+            if let Some(instance) = self.scene.instances.get(&id)
+                && !self.renderer.has_dynamic_geometry(&instance.geometry)
+            {
+                let mesh = match &instance.geometry {
+                    GeometrySource::Procedural(params, detail) => {
+                        Some(self.geometry_cache.get_procedural(params, *detail))
+                    }
+                    GeometrySource::Sculpt(uuid, sculpt_type) => {
+                        let dummy_pixels = vec![128u8; 32 * 32 * 3]; // Neutral gray sculpt
+                        Some(self.geometry_cache.get_sculpt(
+                            uuid,
+                            *sculpt_type,
+                            &dummy_pixels,
+                            32,
+                            32,
+                        ))
+                    }
+                    GeometrySource::Mesh(uuid, lod) => {
+                        Some(self.geometry_cache.get_mesh(uuid, *lod, &[]))
+                    }
+                    _ => None,
+                };
 
-                    if let Some(mesh) = mesh {
-                        if mesh.vertices.is_empty() || mesh.submeshes.is_empty() {
+                if let Some(mesh) = mesh {
+                    if mesh.vertices.is_empty() || mesh.submeshes.is_empty() {
+                        continue;
+                    }
+                    let mut submeshes = Vec::new();
+                    let mut index_start = 0;
+                    let mut all_indices = Vec::new();
+                    for sm in &mesh.submeshes {
+                        if sm.indices.is_empty() {
                             continue;
                         }
-                        let mut submeshes = Vec::new();
-                        let mut index_start = 0;
-                        let mut all_indices = Vec::new();
-                        for sm in &mesh.submeshes {
-                            if sm.indices.is_empty() {
-                                continue;
-                            }
-                            let count = sm.indices.len() as u32;
-                            submeshes.push(viewer_render::SubMeshRange {
-                                face_id: sm.face_id,
-                                index_start,
-                                index_count: count,
-                            });
-                            all_indices.extend_from_slice(&sm.indices);
-                            index_start += count;
-                        }
-                        if !all_indices.is_empty() && !submeshes.is_empty() {
-                            self.renderer.upsert_geometry(
-                                instance.geometry.clone(),
-                                bytemuck::cast_slice(&mesh.vertices),
-                                bytemuck::cast_slice(&all_indices),
-                                submeshes,
-                            );
+                        let count = sm.indices.len() as u32;
+                        submeshes.push(viewer_render::SubMeshRange {
+                            face_id: sm.face_id,
+                            index_start,
+                            index_count: count,
+                        });
+                        all_indices.extend_from_slice(&sm.indices);
+                        index_start += count;
+                    }
+                    if !all_indices.is_empty() && !submeshes.is_empty() {
+                        self.renderer.upsert_geometry(
+                            instance.geometry.clone(),
+                            bytemuck::cast_slice(&mesh.vertices),
+                            bytemuck::cast_slice(&all_indices),
+                            submeshes,
+                        );
 
-                            // Sync AABB to instance and mark for spatial update
-                            if let Some(instance_mut) = self.scene.get_instance_mut(id) {
-                                instance_mut.local_aabb = mesh.aabb;
-                                instance_mut.dirty_spatial = true;
-                            }
+                        // Sync AABB to instance and mark for spatial update
+                        if let Some(instance_mut) = self.scene.get_instance_mut(id) {
+                            instance_mut.local_aabb = mesh.aabb;
+                            instance_mut.dirty_spatial = true;
                         }
                     }
                 }
@@ -3610,33 +3630,33 @@ impl AppState {
             self.app_start_time.elapsed().as_secs_f32(),
             screenshot_path.as_deref(),
             |device, queue, encoder, target_view, surface_size| {
-                let actions = ui.render(
-                    &window,
+                let actions = ui.render(RenderInput {
+                    window: &window,
                     device,
                     queue,
                     encoder,
                     target_view,
                     surface_size,
-                    &camera,
-                    live_visual.as_ref(),
+                    camera: &camera,
+                    live_visual: live_visual.as_ref(),
                     session_status,
                     chat_state,
                     social_state,
                     world_avatars,
-                    world_sim_name.as_deref(),
+                    world_sim_name: world_sim_name.as_deref(),
                     world_self_location,
                     profile_state,
                     profile_image_bytes,
-                    now_unix_ms(),
-                    self.live_visual_state.profile_cache_ttl_secs,
-                    self.smoothed_fps,
-                    self.smoothed_frame_ms,
-                    self.avg_scene_update_ms,
-                    metrics.total_instances,
-                    metrics.visible_proxies,
-                    self.fixture_texture_cache.metrics.clone(),
-                    self.stress_test_mode != StressTestMode::Screenshot,
-                );
+                    now_unix_ms: now_unix_ms(),
+                    profile_cache_ttl_secs: self.live_visual_state.profile_cache_ttl_secs,
+                    fps: self.smoothed_fps,
+                    frame_ms: self.smoothed_frame_ms,
+                    avg_scene_update_ms: self.avg_scene_update_ms,
+                    total_instances: metrics.total_instances,
+                    visible_proxies: metrics.visible_proxies,
+                    fixture_texture_metrics: self.fixture_texture_cache.metrics,
+                    show_chat_window: self.stress_test_mode != StressTestMode::Screenshot,
+                });
                 pending_chat_send = actions.nearby_chat_send;
                 pending_direct_im_send = actions.direct_im_send;
                 pending_profile_open = actions.open_avatar_profile;
@@ -3659,25 +3679,25 @@ impl AppState {
             });
             self.live_visual_state.send_chat(text);
         }
-        if let Some((to_agent_id, text)) = pending_direct_im_send {
-            if !text.is_empty() {
-                self.social_state.im_draft.clear();
-                self.live_visual_state.send_direct_im(to_agent_id, text);
-            }
+        if let Some((to_agent_id, text)) = pending_direct_im_send
+            && !text.is_empty()
+        {
+            self.social_state.im_draft.clear();
+            self.live_visual_state.send_direct_im(to_agent_id, text);
         }
         if let Some(avatar_id) = pending_profile_open {
             self.live_visual_state.open_avatar_profile(avatar_id);
         }
-        if let Some((avatar_id, tab)) = pending_profile_tab_select {
-            if should_fetch_profile_tab(
+        if let Some((avatar_id, tab)) = pending_profile_tab_select
+            && should_fetch_profile_tab(
                 self.profile_state.as_ref(),
                 &avatar_id,
                 tab,
                 self.live_visual_state.profile_cache_ttl_secs,
-            ) {
-                self.live_visual_state
-                    .select_avatar_profile_tab(avatar_id, tab);
-            }
+            )
+        {
+            self.live_visual_state
+                .select_avatar_profile_tab(avatar_id, tab);
         }
         if let Some((avatar_id, tab)) = pending_profile_refresh {
             let at = now_unix_ms();
@@ -3784,16 +3804,16 @@ impl AppState {
     fn handle_input_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        apply_u09_shortcut(
-                            code,
-                            &mut self.ui.show_diagnostics,
-                            &mut self.ui.show_social,
-                            &mut self.ui.focus_continuity_requested,
-                            &mut self.ui.focus_social_requested,
-                        );
-                    }
+                if event.state == ElementState::Pressed
+                    && let PhysicalKey::Code(code) = event.physical_key
+                {
+                    apply_u09_shortcut(
+                        code,
+                        &mut self.ui.show_diagnostics,
+                        &mut self.ui.show_social,
+                        &mut self.ui.focus_continuity_requested,
+                        &mut self.ui.focus_social_requested,
+                    );
                 }
                 self.input.handle_key_event(event);
             }
@@ -4932,11 +4952,13 @@ mod tests {
         let mut scene = Scene::prototype();
 
         // Instance 1: tex_b, tex_c
-        let mut mat1 = MaterialSet::default();
-        mat1.default = MaterialDescriptor::Legacy(TextureEntry {
-            texture_id: AssetID::new("tex_b"),
-            ..TextureEntry::default()
-        });
+        let mut mat1 = MaterialSet {
+            default: MaterialDescriptor::Legacy(TextureEntry {
+                texture_id: AssetID::new("tex_b"),
+                ..TextureEntry::default()
+            }),
+            ..MaterialSet::default()
+        };
         mat1.by_face.insert(
             1,
             MaterialDescriptor::Legacy(TextureEntry {
@@ -4957,11 +4979,13 @@ mod tests {
         );
 
         // Instance 2: tex_a
-        let mut mat2 = MaterialSet::default();
-        mat2.default = MaterialDescriptor::Legacy(TextureEntry {
-            texture_id: AssetID::new("tex_a"),
-            ..TextureEntry::default()
-        });
+        let mat2 = MaterialSet {
+            default: MaterialDescriptor::Legacy(TextureEntry {
+                texture_id: AssetID::new("tex_a"),
+                ..TextureEntry::default()
+            }),
+            ..MaterialSet::default()
+        };
         scene.instances.insert(
             2,
             RenderableInstance::new(

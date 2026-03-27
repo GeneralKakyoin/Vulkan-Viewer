@@ -1082,14 +1082,13 @@ impl RenderBackend {
                 let byte_offset = self.object_uniform_stride * object_index as u64;
                 if let Ok(dynamic_offset) = u32::try_from(byte_offset) {
                     // Identify face_id for this submesh slot
-                    let face_id = match &instance.geometry {
-                        source => self
-                            .dynamic_geometries
-                            .get(source)
-                            .and_then(|m| m.submeshes.get(sub_idx))
-                            .map(|s| s.face_id)
-                            .unwrap_or(0),
-                    };
+                    let source = &instance.geometry;
+                    let face_id = self
+                        .dynamic_geometries
+                        .get(source)
+                        .and_then(|m| m.submeshes.get(sub_idx))
+                        .map(|s| s.face_id)
+                        .unwrap_or(0);
 
                     let mat = instance.materials.material_for_face(face_id);
                     let (uv_matrix, material_tint) = match mat {
@@ -1490,11 +1489,13 @@ mod tests {
 
     #[test]
     fn test_material_slot_mapping_respects_face_id() {
-        let mut mat_set = MaterialSet::default();
-        mat_set.default = MaterialDescriptor::Legacy(TextureEntry {
-            texture_id: AssetID::new("default_tex"),
-            ..TextureEntry::default()
-        });
+        let mut mat_set = MaterialSet {
+            default: MaterialDescriptor::Legacy(TextureEntry {
+                texture_id: AssetID::new("default_tex"),
+                ..TextureEntry::default()
+            }),
+            ..MaterialSet::default()
+        };
 
         let face_1_mat = MaterialDescriptor::Legacy(TextureEntry {
             texture_id: AssetID::new("face_1_tex"),

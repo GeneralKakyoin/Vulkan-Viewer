@@ -91,17 +91,12 @@ pub trait LoginCodec {
     fn decode_response(&self, body: &[u8]) -> Result<GridLoginResponse, CodecError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LoginWireFormat {
+    #[default]
     Json,
     Llsd,
     XmlRpc,
-}
-
-impl Default for LoginWireFormat {
-    fn default() -> Self {
-        LoginWireFormat::Json
-    }
 }
 
 impl LoginWireFormat {
@@ -210,7 +205,7 @@ impl LoginCodec for LlsdLoginCodec {
     fn decode_response(&self, body: &[u8]) -> Result<GridLoginResponse, CodecError> {
         let map = parse_llsd_map(body)?;
         Ok(GridLoginResponse {
-            login: map.get("login").and_then(|value| llsd_to_bool(value)),
+            login: map.get("login").and_then(llsd_to_bool),
             reason: map.get("reason").and_then(llsd_to_string),
             message: map.get("message").and_then(llsd_to_string),
             message_id: map.get("message_id").and_then(llsd_to_string),
@@ -612,37 +607,35 @@ fn parse_llsd_map(body: &[u8]) -> Result<HashMap<String, LlsdValue>, CodecError>
                 }
             }
             Event::Text(e) => {
-                if map_depth == 1 {
-                    if let Ok(text) = e.unescape() {
-                        let text = text.into_owned();
-                        match current_tag.take() {
-                            Some(TagType::Key) => {
-                                current_key = Some(text);
-                            }
-                            Some(tag) => {
-                                if let Some(key) = current_key.take() {
-                                    match tag {
-                                        TagType::String => {
-                                            map.insert(key, LlsdValue::String(text));
-                                        }
-                                        TagType::Integer => {
-                                            if let Ok(value) = text.parse::<i64>() {
-                                                map.insert(key, LlsdValue::Integer(value));
-                                            }
-                                        }
-                                        TagType::Boolean => {
-                                            let normalized = matches!(
-                                                text.to_lowercase().as_str(),
-                                                "true" | "1"
-                                            );
-                                            map.insert(key, LlsdValue::Bool(normalized));
-                                        }
-                                        TagType::Key => {}
+                if map_depth == 1
+                    && let Ok(text) = e.unescape()
+                {
+                    let text = text.into_owned();
+                    match current_tag.take() {
+                        Some(TagType::Key) => {
+                            current_key = Some(text);
+                        }
+                        Some(tag) => {
+                            if let Some(key) = current_key.take() {
+                                match tag {
+                                    TagType::String => {
+                                        map.insert(key, LlsdValue::String(text));
                                     }
+                                    TagType::Integer => {
+                                        if let Ok(value) = text.parse::<i64>() {
+                                            map.insert(key, LlsdValue::Integer(value));
+                                        }
+                                    }
+                                    TagType::Boolean => {
+                                        let normalized =
+                                            matches!(text.to_lowercase().as_str(), "true" | "1");
+                                        map.insert(key, LlsdValue::Bool(normalized));
+                                    }
+                                    TagType::Key => {}
                                 }
                             }
-                            None => {}
                         }
+                        None => {}
                     }
                 }
             }
@@ -1472,25 +1465,21 @@ impl Connection {
             return;
         }
         self.object_feed_tick = self.object_feed_tick.saturating_add(1);
-        let entry = self
-            .object_feed_objects
-            .entry(local_id)
-            .or_insert_with(ObjectFeedObjectState::default);
+        let entry = self.object_feed_objects.entry(local_id).or_default();
         entry.last_seen_tick = self.object_feed_tick;
         if scale_centi.is_some() {
             entry.scale_centi = scale_centi;
         }
 
-        if self.object_feed_objects.len() > MAX_OBJECT_FEED_OBJECTS {
-            if let Some((evict_id, _)) = self
+        if self.object_feed_objects.len() > MAX_OBJECT_FEED_OBJECTS
+            && let Some((evict_id, _)) = self
                 .object_feed_objects
                 .iter()
                 .map(|(id, state)| (*id, state.last_seen_tick))
                 .min_by_key(|(id, tick)| (*tick, *id))
-            {
-                self.object_feed_objects.remove(&evict_id);
-                self.simulator_payload_decode_summary.object_feed_evicted += 1;
-            }
+        {
+            self.object_feed_objects.remove(&evict_id);
+            self.simulator_payload_decode_summary.object_feed_evicted += 1;
         }
     }
 
@@ -2011,82 +2000,77 @@ impl Connection {
         if classification.kind == FirstSimulatorInboundMessageKind::CoarseLocationUpdate
             && classification.decode_source
                 == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && let Some(decoded) = decode_coarse_location_update(payload)
         {
-            if let Some(decoded) = decode_coarse_location_update(payload) {
-                self.simulator_payload_decode_summary
-                    .coarse_location_updates += 1;
-                self.simulator_payload_decode_summary
-                    .coarse_location_last_count = Some(decoded.location_count);
-                self.simulator_payload_decode_summary
-                    .coarse_location_last_first = decoded.first_location;
-                self.simulator_payload_decode_summary
-                    .coarse_location_last_second = decoded.second_location;
-                self.simulator_payload_decode_summary
-                    .coarse_location_last_third = decoded.third_location;
-                self.simulator_payload_decode_summary
-                    .coarse_location_last_avatars = decoded.avatars;
-                self.simulator_payload_decode_summary
-                    .coarse_location_last_self_index = decoded.self_index;
-            }
+            self.simulator_payload_decode_summary
+                .coarse_location_updates += 1;
+            self.simulator_payload_decode_summary
+                .coarse_location_last_count = Some(decoded.location_count);
+            self.simulator_payload_decode_summary
+                .coarse_location_last_first = decoded.first_location;
+            self.simulator_payload_decode_summary
+                .coarse_location_last_second = decoded.second_location;
+            self.simulator_payload_decode_summary
+                .coarse_location_last_third = decoded.third_location;
+            self.simulator_payload_decode_summary
+                .coarse_location_last_avatars = decoded.avatars;
+            self.simulator_payload_decode_summary
+                .coarse_location_last_self_index = decoded.self_index;
         }
         if classification.kind == FirstSimulatorInboundMessageKind::RegionHandshake
             && classification.decode_source
                 == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && let Some(sim_name) = decode_region_handshake_sim_name(payload)
         {
-            if let Some(sim_name) = decode_region_handshake_sim_name(payload) {
-                self.simulator_payload_decode_summary
-                    .region_handshake_updates += 1;
-                self.simulator_payload_decode_summary
-                    .region_handshake_last_sim_name = Some(sim_name);
-            }
+            self.simulator_payload_decode_summary
+                .region_handshake_updates += 1;
+            self.simulator_payload_decode_summary
+                .region_handshake_last_sim_name = Some(sim_name);
         }
         if classification.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete
             && classification.decode_source
                 == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && let Some(decoded) = decode_agent_movement_complete(payload)
         {
-            if let Some(decoded) = decode_agent_movement_complete(payload) {
-                self.simulator_payload_decode_summary
-                    .agent_movement_complete_updates += 1;
-                self.simulator_payload_decode_summary
-                    .agent_movement_complete_last_position = Some(decoded.position);
-                self.simulator_payload_decode_summary
-                    .agent_movement_complete_last_region_handle = Some(decoded.region_handle);
+            self.simulator_payload_decode_summary
+                .agent_movement_complete_updates += 1;
+            self.simulator_payload_decode_summary
+                .agent_movement_complete_last_position = Some(decoded.position);
+            self.simulator_payload_decode_summary
+                .agent_movement_complete_last_region_handle = Some(decoded.region_handle);
 
-                // Continuity: Movement complete signals the completion of the handoff.
-                self.continuity_summary.phase = HandoffPhase::Completed;
-                let coords = [
-                    (decoded.region_handle >> 32) as u32,
-                    (decoded.region_handle & 0xFFFFFFFF) as u32,
-                ];
-                if self.continuity_summary.active_region_coords != Some(coords) {
-                    self.continuity_summary.previous_region_coords =
-                        self.continuity_summary.active_region_coords;
-                    self.continuity_summary.active_region_coords = Some(coords);
-                }
+            // Continuity: Movement complete signals the completion of the handoff.
+            self.continuity_summary.phase = HandoffPhase::Completed;
+            let coords = [
+                (decoded.region_handle >> 32) as u32,
+                (decoded.region_handle & 0xFFFFFFFF) as u32,
+            ];
+            if self.continuity_summary.active_region_coords != Some(coords) {
+                self.continuity_summary.previous_region_coords =
+                    self.continuity_summary.active_region_coords;
+                self.continuity_summary.active_region_coords = Some(coords);
             }
         }
         if classification.kind == FirstSimulatorInboundMessageKind::HealthMessage
             && classification.decode_source
                 == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && let Some(decoded) = decode_health_message(payload)
         {
-            if let Some(decoded) = decode_health_message(payload) {
-                self.simulator_payload_decode_summary.health_updates += 1;
-                self.simulator_payload_decode_summary
-                    .health_last_basis_points = Some(health_to_basis_points(decoded.health));
-            }
+            self.simulator_payload_decode_summary.health_updates += 1;
+            self.simulator_payload_decode_summary
+                .health_last_basis_points = Some(health_to_basis_points(decoded.health));
         }
         if classification.kind == FirstSimulatorInboundMessageKind::SimulatorViewerTimeMessage
             && classification.decode_source
                 == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            && let Some(decoded) = decode_simulator_viewer_time_message(payload)
         {
-            if let Some(decoded) = decode_simulator_viewer_time_message(payload) {
-                self.simulator_payload_decode_summary
-                    .simulator_viewer_time_updates += 1;
-                self.simulator_payload_decode_summary
-                    .simulator_viewer_time_last_body_len = Some(decoded.body_len);
-                self.simulator_payload_decode_summary
-                    .simulator_viewer_time_last_signature = decoded.signature;
-            }
+            self.simulator_payload_decode_summary
+                .simulator_viewer_time_updates += 1;
+            self.simulator_payload_decode_summary
+                .simulator_viewer_time_last_body_len = Some(decoded.body_len);
+            self.simulator_payload_decode_summary
+                .simulator_viewer_time_last_signature = decoded.signature;
         }
 
         if classification.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber {
@@ -2974,10 +2958,10 @@ impl Connection {
         profile: &AgentProfileData,
         capability_url: Option<&str>,
     ) -> Option<String> {
-        if let Some(url) = profile.profile_url.as_ref() {
-            if !url.trim().is_empty() {
-                return Some(url.clone());
-            }
+        if let Some(url) = profile.profile_url.as_ref()
+            && !url.trim().is_empty()
+        {
+            return Some(url.clone());
         }
         let cap_url = capability_url?.trim();
         if cap_url.is_empty() {
@@ -4499,10 +4483,10 @@ fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocation
                     .and_then(|s| s.try_into().ok())?;
                 offset += 16;
                 let id = format_uuid_bytes(raw);
-                if !is_null_uuid(&id) {
-                    if let Some(entry) = avatars.get_mut(idx) {
-                        entry.agent_id = Some(id);
-                    }
+                if !is_null_uuid(&id)
+                    && let Some(entry) = avatars.get_mut(idx)
+                {
+                    entry.agent_id = Some(id);
                 }
             }
         }
@@ -5032,9 +5016,7 @@ fn decode_legacy_avatar_properties_reply(
     let mut offset = 0usize;
     offset += 16; // AgentID
     let avatar_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && avatar_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !avatar_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5112,9 +5094,7 @@ fn decode_legacy_avatar_groups_reply(
     let mut offset = 0usize;
     offset += 16; // AgentID
     let avatar_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && avatar_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !avatar_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5159,9 +5139,7 @@ fn decode_legacy_avatar_notes_reply(payload: &[u8], expected_avatar_id: &str) ->
     let mut offset = 0usize;
     offset += 16; // AgentID
     let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && target_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !target_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5184,9 +5162,7 @@ fn decode_legacy_avatar_picks_reply(
     let mut offset = 0usize;
     offset += 16; // AgentID
     let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && target_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !target_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5223,9 +5199,7 @@ fn decode_legacy_pick_info_reply(
     let pick_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
     offset += 16;
     let creator_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && creator_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !creator_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5281,9 +5255,7 @@ fn decode_legacy_avatar_classifieds_reply(
     let mut offset = 0usize;
     offset += 16; // AgentID
     let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && target_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !target_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5322,9 +5294,7 @@ fn decode_legacy_classified_info_reply(
     let classified_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
     offset += 16;
     let creator_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty()
-        && creator_id.to_ascii_lowercase() != expected_avatar_id.to_ascii_lowercase()
-    {
+    if !expected_avatar_id.is_empty() && !creator_id.eq_ignore_ascii_case(expected_avatar_id) {
         return None;
     }
     offset += 16;
@@ -5450,10 +5420,10 @@ fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInb
     let text = String::from_utf8_lossy(payload);
     let lowered = text.to_ascii_lowercase();
 
-    if let Ok(json) = serde_json::from_slice::<Value>(payload) {
-        if let Some(kind) = classify_first_simulator_inbound_from_json(&json) {
-            return kind;
-        }
+    if let Ok(json) = serde_json::from_slice::<Value>(payload)
+        && let Some(kind) = classify_first_simulator_inbound_from_json(&json)
+    {
+        return kind;
     }
 
     if lowered.contains("agentmovementcomplete") {
@@ -5632,10 +5602,11 @@ fn event_queue_retry_backoff_ms(
     if !retryable || attempt >= MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS {
         return None;
     }
-    if let Some(status) = status {
-        if !status.is_server_error() && !matches!(status.as_u16(), 499 | 502 | 503 | 504) {
-            return None;
-        }
+    if let Some(status) = status
+        && !status.is_server_error()
+        && !matches!(status.as_u16(), 499 | 502 | 503 | 504)
+    {
+        return None;
     }
     let exp = attempt.saturating_sub(1) as u32;
     let multiplier = 1u128 << exp.min(8);
@@ -6691,10 +6662,10 @@ fn normalize_login_response(raw: Value) -> Value {
             .and_then(Value::as_object)
             .and_then(|data| data.get("reason"))
             .cloned();
-        if obj.get("reason").is_none() {
-            if let Some(reason) = data_reason {
-                obj.insert(String::from("reason"), reason);
-            }
+        if obj.get("reason").is_none()
+            && let Some(reason) = data_reason
+        {
+            obj.insert(String::from("reason"), reason);
         }
 
         let data_message = obj
@@ -6702,10 +6673,10 @@ fn normalize_login_response(raw: Value) -> Value {
             .and_then(Value::as_object)
             .and_then(|data| data.get("message"))
             .cloned();
-        if obj.get("message").is_none() {
-            if let Some(message) = data_message {
-                obj.insert(String::from("message"), message);
-            }
+        if obj.get("message").is_none()
+            && let Some(message) = data_message
+        {
+            obj.insert(String::from("message"), message);
         }
 
         let data_message_id = obj
@@ -6713,10 +6684,10 @@ fn normalize_login_response(raw: Value) -> Value {
             .and_then(Value::as_object)
             .and_then(|data| data.get("message_id"))
             .cloned();
-        if obj.get("message_id").is_none() {
-            if let Some(message_id) = data_message_id {
-                obj.insert(String::from("message_id"), message_id);
-            }
+        if obj.get("message_id").is_none()
+            && let Some(message_id) = data_message_id
+        {
+            obj.insert(String::from("message_id"), message_id);
         }
     }
 
@@ -7563,7 +7534,6 @@ mod tests {
             endpoint: format!("{}/login", server.uri()),
             connect_timeout: Duration::from_secs(5),
             wire_format: LoginWireFormat::Llsd,
-            ..Default::default()
         });
         let adapter = SecondLifeAdapter;
 

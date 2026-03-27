@@ -4,19 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 pub mod material;
 pub use material::{MaterialDescriptor, PbrDescriptor, TextureAnim, TextureEntry};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MaterialSet {
     pub default: MaterialDescriptor,
     pub by_face: BTreeMap<u16, MaterialDescriptor>,
-}
-
-impl Default for MaterialSet {
-    fn default() -> Self {
-        Self {
-            default: MaterialDescriptor::default(),
-            by_face: BTreeMap::new(),
-        }
-    }
 }
 
 impl MaterialSet {
@@ -45,7 +36,9 @@ impl AssetID {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum AssetPriority {
     /// Highest priority: Assets in the currently active region.
     Active,
@@ -54,13 +47,8 @@ pub enum AssetPriority {
     /// Medium priority: Assets from direct neighbors of the active region.
     Neighbor,
     /// Low priority: All other assets.
+    #[default]
     Normal,
-}
-
-impl Default for AssetPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -762,19 +750,14 @@ impl Default for SessionUxStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ChatConnectionState {
+    #[default]
     Disabled,
     Connecting,
     Connected,
     Reconnecting,
     Failed(String),
-}
-
-impl Default for ChatConnectionState {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1089,7 +1072,9 @@ impl WorldAvatarPlaceholder {
     }
 }
 
-const R08_ATTACHMENT_SLOT_DEFINITIONS: [(&str, u32, [f32; 3], [f32; 3], [f32; 4]); 10] = [
+type AttachmentSlotDefinition = (&'static str, u32, [f32; 3], [f32; 3], [f32; 4]);
+
+const R08_ATTACHMENT_SLOT_DEFINITIONS: [AttachmentSlotDefinition; 10] = [
     (
         "back",
         0,
@@ -1292,20 +1277,15 @@ pub fn project_nearby_people(
     entries
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum AvatarProfileTab {
+    #[default]
     SecondLife,
     Feed,
     Picks,
     Classifieds,
     FirstLife,
     Notes,
-}
-
-impl Default for AvatarProfileTab {
-    fn default() -> Self {
-        Self::SecondLife
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2425,15 +2405,15 @@ impl Scene {
         let transform = world_object_feed_proxy_transform(item, coarse_anchor_pos);
         let color = world_object_feed_proxy_color(local_id);
 
-        if let Some(&instance_id) = self.world_object_feed_map.get(&local_id) {
-            if let Some(instance) = self.instances.get_mut(&instance_id) {
-                if instance.transform != transform || instance.color != color {
-                    instance.transform = transform;
-                    instance.color = color;
-                    instance.dirty_spatial = true;
-                }
-                return;
+        if let Some(&instance_id) = self.world_object_feed_map.get(&local_id)
+            && let Some(instance) = self.instances.get_mut(&instance_id)
+        {
+            if instance.transform != transform || instance.color != color {
+                instance.transform = transform;
+                instance.color = color;
+                instance.dirty_spatial = true;
             }
+            return;
         }
 
         let id = self.insert_instance(
@@ -3070,23 +3050,23 @@ impl Scene {
             let color = attachment.color;
             let geometry = GeometrySource::Diagnostic(MeshKind::AvatarProxy);
 
-            if let Some(&id) = self.avatar_attachment_map.get(&key) {
-                if let Some(inst) = self.instances.get_mut(&id) {
-                    if inst.transform != transform
-                        || inst.color != color
-                        || inst.geometry != geometry
-                        || inst.alpha_mode != attachment.alpha_mode
-                        || inst.materials != attachment.materials
-                    {
-                        inst.transform = transform;
-                        inst.color = color;
-                        inst.geometry = geometry;
-                        inst.alpha_mode = attachment.alpha_mode;
-                        inst.materials = attachment.materials.clone();
-                        inst.dirty_spatial = true;
-                    }
-                    continue;
+            if let Some(&id) = self.avatar_attachment_map.get(&key)
+                && let Some(inst) = self.instances.get_mut(&id)
+            {
+                if inst.transform != transform
+                    || inst.color != color
+                    || inst.geometry != geometry
+                    || inst.alpha_mode != attachment.alpha_mode
+                    || inst.materials != attachment.materials
+                {
+                    inst.transform = transform;
+                    inst.color = color;
+                    inst.geometry = geometry;
+                    inst.alpha_mode = attachment.alpha_mode;
+                    inst.materials = attachment.materials.clone();
+                    inst.dirty_spatial = true;
                 }
+                continue;
             }
 
             let id = self.insert_instance(
@@ -3136,12 +3116,12 @@ fn remove_instance(scene: &mut Scene, role: InstanceRole) {
         .iter()
         .find(|(_, i)| i.role == role)
         .map(|(id, _)| *id);
-    if let Some(id) = id {
-        if let Some(inst) = scene.instances.remove(&id) {
-            scene.octree.remove(id, inst.world_aabb);
-            if let Some(ref agent_id) = inst.stable_id {
-                scene.instance_map.remove(agent_id);
-            }
+    if let Some(id) = id
+        && let Some(inst) = scene.instances.remove(&id)
+    {
+        scene.octree.remove(id, inst.world_aabb);
+        if let Some(ref agent_id) = inst.stable_id {
+            scene.instance_map.remove(agent_id);
         }
     }
 }
@@ -6579,7 +6559,7 @@ mod tests {
         assert_eq!(a, "5s");
         let (_, a) = compute_profile_freshness(now, Some(now - 120_000), ttl);
         assert_eq!(a, "2m");
-        let (_, a) = compute_profile_freshness(now, Some(now - 7200_000), ttl);
+        let (_, a) = compute_profile_freshness(now, Some(now - 7_200_000), ttl);
         assert_eq!(a, "2h");
         let (_, a) = compute_profile_freshness(now, Some(now - 86400_u64 * 3 * 1000), ttl);
         assert_eq!(a, "3d");

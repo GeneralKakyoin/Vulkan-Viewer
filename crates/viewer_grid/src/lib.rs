@@ -113,7 +113,7 @@ pub struct FirstSimulator {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GridLoginResult {
-    Success(SessionBootstrap),
+    Success(Box<SessionBootstrap>),
     Redirect {
         next_url: String,
         next_method: String,
@@ -228,7 +228,9 @@ impl GridLoginAdapter for SecondLifeAdapter {
         response: &GridLoginResponse,
     ) -> Result<GridLoginResult, GridAdapterError> {
         if response.login == Some(true) {
-            return Ok(GridLoginResult::Success(extract_bootstrap(response)?));
+            return Ok(GridLoginResult::Success(Box::new(extract_bootstrap(
+                response,
+            )?)));
         }
 
         let reason = response.reason.as_deref().unwrap_or_default();

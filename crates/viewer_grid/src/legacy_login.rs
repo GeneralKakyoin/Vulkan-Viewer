@@ -18,10 +18,11 @@ pub fn classify_legacy_login_name(raw: &str) -> LegacyLoginName {
         return LegacyLoginName::new(String::new(), String::new());
     }
 
-    if let Some((first, last)) = trimmed.split_once('.') {
-        if !first.is_empty() && !last.is_empty() {
-            return LegacyLoginName::new(first.to_string(), last.to_string());
-        }
+    if let Some((first, last)) = trimmed.split_once('.')
+        && !first.is_empty()
+        && !last.is_empty()
+    {
+        return LegacyLoginName::new(first.to_string(), last.to_string());
     }
 
     let mut parts = trimmed.split_whitespace();
@@ -41,10 +42,11 @@ pub fn split_legacy_name(username: &str) -> Option<(String, String)> {
         return None;
     }
 
-    if let Some((first, last)) = trimmed.split_once('.') {
-        if !first.is_empty() && !last.is_empty() {
-            return Some((first.to_string(), last.to_string()));
-        }
+    if let Some((first, last)) = trimmed.split_once('.')
+        && !first.is_empty()
+        && !last.is_empty()
+    {
+        return Some((first.to_string(), last.to_string()));
     }
 
     let mut parts = trimmed.split_whitespace();

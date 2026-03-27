@@ -32,6 +32,12 @@ impl DefaultTextureProvider {
     }
 }
 
+impl Default for DefaultTextureProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextureProvider for DefaultTextureProvider {
     fn get_texture(&self, _id: &AssetID) -> PendingTexture {
         if _id.is_empty() {
