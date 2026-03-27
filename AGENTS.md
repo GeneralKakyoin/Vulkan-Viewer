@@ -66,7 +66,8 @@ Meaningful implementation must follow this sequence:
 6. Validate the result with required checks
 7. Write a completion report in `docs/reports/`
 8. Update continuity docs
-9. Leave a precise handoff in `docs/HANDOFF.md`
+9. Perform mandatory `docs/LEARNINGS.md` delta review (add/update entry, or explicitly record why no durable learning was found)
+10. Leave a precise handoff in `docs/HANDOFF.md`
 
 Planning and implementation are separate phases.
 Do not skip planning for meaningful work.
@@ -227,6 +228,11 @@ It should contain:
 ### `docs/LEARNINGS.md`
 Store durable lessons, recurring traps, and known dead ends.
 Do not use it for disposable task notes.
+`LEARNINGS.md` interaction is mandatory for every meaningful task:
+
+- planner/reviewer/implementer must check whether the task produced a durable lesson
+- if yes, add or update a numbered learning entry
+- if no, state "No durable learning identified" with a one-line reason in the review/report artifact
 
 ### `docs/TASKS.md`
 Keep this focused on process guidance and active priorities.
@@ -261,6 +267,7 @@ A plan should include:
 - validation plan
 - risks and open questions
 - deferred-too-early candidates captured (and synced to `docs/plans/DEFERRED_FEATURES.md` when present)
+- learnings pre-check (which existing learning entries constrain this plan)
 - exact completion criteria
 
 ### Required for reviews
@@ -272,6 +279,7 @@ A review should include:
 - modularity and maintainability concerns
 - validation adequacy
 - risks and open questions
+- learnings delta verdict (`add` / `update` / `none` with reason)
 - required revisions or approval status
 
 ### Required for execution reports
@@ -282,6 +290,7 @@ A report should include:
 - validation run
 - result status
 - risks or follow-up items
+- learnings delta (`added` / `updated` / `none` with reason)
 - continuity updates performed
 
 ## 15. Research rules
