@@ -1,43 +1,36 @@
-# HANDOFF: Milestone N07 Region Continuity Baseline
+# HANDOFF: Milestone R08 Avatar Appearance and Attachment Foundation
 
 ## What Changed
-- Added typed continuity state in `viewer_net`:
-  - `HandoffPhase` (`None`, `Crossed`, `Confirming`, `Completed`)
-  - `RegionContinuitySummary` with active/previous region coords and bounded neighbor list
-  - continuity reset/init wiring on login/disconnect/bootstrap paths
-  - bounded transition-control observation retention (`MAX_CONTINUITY_OBSERVATIONS`)
-- Extended `viewer_core::LiveVisualSnapshot` with `continuity` (`#[serde(default)]`).
-- Added continuity seam lane and payload:
-  - `WorldObjectIngestionLane::ContinuityPayload`
-  - seam emission from snapshot continuity signal
-  - seam-owned continuity visualization role lifecycle in `Scene::apply_world_object_ingestion_seam(...)`
-- Bridged continuity mapping in `viewer_app` (`viewer_net` -> `viewer_core` conversion).
-- Added continuity diagnostics lines in `viewer_ui` (phase/region summary).
-- Updated `viewer_net` example snapshot init for new continuity field.
+- Added bounded avatar appearance contracts in `viewer_core`:
+  - `AvatarAppearanceSummary`
+  - `AvatarAttachmentProxy`
+  - `MAX_R08_ATTACHMENTS_PER_AVATAR = 8`
+- Added `InstanceRole::WorldAvatarAttachmentProxy` and attachment lifecycle handling in `Scene::apply_world_object_ingestion_seam(...)`.
+- Added seam-side attachment payload collection on `WorldObjectIngestionSeam::avatar_attachments` so attachment lifecycle remains seam-owned.
+- Added deterministic attachment projection in `viewer_app` from the existing avatar samples into the seam path.
+- Extended `viewer_ui` diagnostics with avatar/attachment proxy counts.
+- Added `viewer_core` tests for bounded deterministic attachment projection and seam create/remove lifecycle.
 
 ## Validation Run
 - `cargo fmt --all`: PASSED
 - `cargo check --workspace`: PASSED
-- `cargo test -p viewer_net`: PASSED
 - `cargo test -p viewer_core`: PASSED
+- `cargo test -p viewer_app`: PASSED
 - `cargo test -p viewer_ui`: PASSED
-- `cargo test -p viewer_app`: FAILED
-  - failing tests are pre-existing `social_cache` tests using `/tmp/...` paths on Windows:
-    - `social_cache::tests::schema_init_is_idempotent`
-    - `social_cache::tests::name_cache_newer_value_wins`
-    - `social_cache::tests::im_dedupe_and_prune_keeps_recent_messages`
-- `cargo test --workspace`: FAILED for the same `viewer_app` `social_cache` tests above.
-- `VIEWER_APP_LIVE_STARTUP=off cargo run -p viewer_app`: INCONCLUSIVE (process started successfully, command timed out due interactive runtime loop).
+- `cargo test -p viewer_render`: PASSED
+- `cargo test --workspace`: PASSED
+- `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot VIEWER_TEST_SCREENSHOT_DIR=artifacts/screenshots_r08_smoke VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES=1 VIEWER_TEST_SCREENSHOT_MAX_FRAMES=1 cargo run -p viewer_app`: PASSED, produced `artifacts/screenshots_r08_smoke/viewer_test_0001.png`
 
 ## Exact Current State
-- N07 continuity contract is implemented and connected across `viewer_net` -> `viewer_app` -> `viewer_core` seam -> `viewer_ui` diagnostics.
-- Seam ownership rule is preserved: continuity visualization create/remove is only in seam apply path.
-- Repository has other in-progress docs/planning edits unrelated to N07 implementation (already present before this handoff update).
+- R08 is implemented and validated on the current workspace baseline.
+- Avatar body proxies continue to use the existing `MeshKind::AvatarProxy` path.
+- Attachment proxies are deterministic, bounded, and removed when the seam payload disappears.
+- `viewer_app` now projects attachment proxies from the current avatar samples before applying the seam.
+- `viewer_ui` shows avatar and attachment proxy counts in diagnostics.
 
 ## Exact Next Step
-- Start `R08` planning/implementation from the new continuity baseline.
-- Optional stabilization task: fix `viewer_app` `social_cache` tests to use cross-platform temp paths so full workspace tests can pass on Windows.
+- Begin `U09` planning/implementation from the validated R08 baseline.
 
 ## Blockers / Risks
-- **Validation blocker**: full `viewer_app`/workspace test pass is blocked by existing cross-platform temp-path assumptions in `social_cache` tests.
-- **Runtime verification risk**: no bounded live transition-control observation run was completed in this pass (offline runtime start only, timed command).
+- No active blockers remain from the R08 implementation.
+- Live online worker verification was not run in this pass; validation was offline/bounded only.

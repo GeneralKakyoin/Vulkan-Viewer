@@ -257,3 +257,17 @@ more than one session to establish correctly.
 **Rule for future plans:** Always use `white_view` as the fallback for empty or unassigned texture slots in `create_material_bind_group`. Reserve `loading_view` and `missing_view` for cases where an ID is present but the asset is not yet available.
 
 **Files affected:** `viewer_render::RenderBackend`.
+
+---
+
+## L17 — Attachments that are derived from app-local avatar samples fit better as seam payloads than snapshot fields
+
+**Category:** Architecture / `viewer_core` / `viewer_app`
+
+**Learned when:** Implementing R08 attachment proxies on top of the existing avatar sample path.
+
+**What happened:** The attachment data was derived from the app's current avatar sample list, not from the live worker snapshot itself. Extending `WorldObjectIngestionItem` would have forced every snapshot lane constructor to grow new fields even though the payload was orthogonal to the existing snapshot decode data.
+
+**Rule for future plans:** When a bounded visual payload is derived from app-side state rather than the live snapshot, prefer a seam-side payload collection on `WorldObjectIngestionSeam` and keep the snapshot item constructors unchanged unless the worker truly owns the new data.
+
+**Files affected:** `viewer_core::WorldObjectIngestionSeam`, `viewer_app` avatar-to-seam mapping.

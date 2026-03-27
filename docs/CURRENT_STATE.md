@@ -3,6 +3,13 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (R08)
+- **Avatar Appearance Contracts**: Added `AvatarAppearanceSummary` and bounded `AvatarAttachmentProxy` scene-facing contracts in `viewer_core`.
+- **Attachment Lifecycle**: Added `WorldAvatarAttachmentProxy` scene roles plus seam-owned attachment proxy lifecycle management in `Scene::apply_world_object_ingestion_seam(...)`.
+- **Deterministic Attachment Projection**: `viewer_app` now projects bounded attachment proxies from existing avatar samples and feeds them into the seam path.
+- **Attachment Diagnostics**: `viewer_ui` now shows avatar and attachment proxy counts in the diagnostics panel.
+- **R08 Coverage**: Added deterministic attachment projection and seam create/remove tests in `viewer_core`; validated app, UI, renderer, and workspace test passes plus offline screenshot smoke.
+
 ## Latest Notable Changes (N07)
 - **Bounded Region Continuity Model**: Added typed continuity state (`None`, `Crossed`, `Confirming`, `Completed`) in `viewer_net` and propagated it through `viewer_app` into `LiveVisualSnapshot`.
 - **Continuity Snapshot Contract**: Extended `viewer_core::LiveVisualSnapshot` with `RegionContinuitySummary` (active/previous region coords + bounded neighbors, serde-defaulted).
@@ -33,8 +40,8 @@ The Vulkan-Viewer is a high-performance Second Life compatible viewer built in R
 - **Crate Modernization**: Resolved all `wgpu` deprecation warnings in `viewer_render`.
 
 ## Active Milestone
-**R08: Avatar appearance and attachment render foundation** (Next Planned)
-Focus: bounded avatar/attachment render contracts on top of the N07 continuity baseline.
+**U09: Workflow depth and product usability expansion** (Next Planned)
+Focus: build on the bounded R08 avatar/attachment foundation with clearer workflow and diagnostics depth.
 
 ## System Components
 - `viewer_app`: Orchestration and worker state mapping (UI-agnostic).
@@ -43,4 +50,4 @@ Focus: bounded avatar/attachment render contracts on top of the N07 continuity b
 - `viewer_render`: Wgpu-driven rendering backend.
 - `viewer_net`/`viewer_grid`: Protocol and asset transport layers.
 
-- **Verification Status**: N07 continuity path builds and targeted continuity tests pass. Full workspace tests remain blocked by existing `viewer_app::social_cache` temp-path test failures on Windows (`/tmp/...` path assumptions).
+- **Verification Status**: `cargo fmt --all`, `cargo check --workspace`, targeted crate tests, `cargo test --workspace`, and offline screenshot smoke all pass on the current R08 baseline.

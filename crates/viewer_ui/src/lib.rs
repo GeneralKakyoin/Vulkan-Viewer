@@ -536,6 +536,21 @@ impl UiSystem {
                             ui.label(format!("Visible: {}", visible_proxies));
                         });
 
+                    egui::CollapsingHeader::new("Avatar Surface")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            let total_attachment_proxies: usize = world_avatars
+                                .iter()
+                                .map(|avatar| avatar.attachments.len())
+                                .sum();
+                            ui.label(format!("Avatars: {}", world_avatars.len()));
+                            ui.label(format!(
+                                "Attachment proxies: {} (cap {} per avatar)",
+                                total_attachment_proxies,
+                                viewer_core::MAX_R08_ATTACHMENTS_PER_AVATAR
+                            ));
+                        });
+
                     egui::CollapsingHeader::new("Camera")
                         .default_open(false)
                         .show(ui, |ui| {

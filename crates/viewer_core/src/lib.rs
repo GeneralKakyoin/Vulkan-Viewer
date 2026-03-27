@@ -89,6 +89,39 @@ pub enum AvatarRenderMode {
     FallbackBox,
 }
 
+pub const MAX_R08_ATTACHMENTS_PER_AVATAR: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AvatarAppearanceSummary {
+    pub display_label: String,
+    pub sim_name: Option<String>,
+    pub is_self: bool,
+    pub stale: bool,
+    pub last_update_unix_ms: u64,
+    pub attachment_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AvatarAttachmentProxy {
+    pub avatar_id: String,
+    pub attachment_id: String,
+    pub local_id: u32,
+    pub display_label: String,
+    pub transform: Transform,
+    pub color: [f32; 4],
+    pub materials: MaterialSet,
+    pub alpha_mode: AlphaMode,
+}
+
+impl AvatarAttachmentProxy {
+    pub fn key(&self) -> String {
+        format!(
+            "{}::{}::{}",
+            self.avatar_id, self.attachment_id, self.local_id
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ProfileType {
     Square,
@@ -172,10 +205,13 @@ pub enum MeshKind {
     AvatarProxy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum AlphaMode {
+    #[default]
     Opaque,
-    AlphaTest { cutoff: f32 },
+    AlphaTest {
+        cutoff: f32,
+    },
     Blend,
 }
 
@@ -245,6 +281,7 @@ pub enum InstanceRole {
     WorldSemanticContextRing,
     WorldAvatarPlaceholderSelf,
     WorldAvatarPlaceholderOther,
+    WorldAvatarAttachmentProxy,
     WorldIngestionContinuityPayload,
 }
 
@@ -518,7 +555,8 @@ pub struct Scene {
     pub octree: crate::spatial::Octree,
     pub next_id: usize,
     pub instance_map: BTreeMap<String, usize>, // agent_id -> instance_id
-    pub world_object_feed_map: BTreeMap<u32, usize>, // local_id -> instance_id
+    pub avatar_attachment_map: BTreeMap<String, usize>, // avatar_id::attachment_id::local_id -> instance_id
+    pub world_object_feed_map: BTreeMap<u32, usize>,    // local_id -> instance_id
 }
 
 impl Default for Scene {
@@ -528,6 +566,7 @@ impl Default for Scene {
             octree: crate::spatial::Octree::new(1024.0), // Large enough for current diagnostics
             next_id: 0,
             instance_map: BTreeMap::new(),
+            avatar_attachment_map: BTreeMap::new(),
             world_object_feed_map: BTreeMap::new(),
         }
     }
@@ -1002,12 +1041,154 @@ pub struct WorldAvatarPlaceholder {
     pub is_self: bool,
     pub last_update_unix_ms: u64,
     pub stale: bool,
+    pub appearance: AvatarAppearanceSummary,
+    pub attachments: Vec<AvatarAttachmentProxy>,
 }
 
 impl WorldAvatarPlaceholder {
     pub fn short_agent_id(&self) -> String {
         short_uuid(&self.agent_id)
     }
+}
+
+const R08_ATTACHMENT_SLOT_DEFINITIONS: [(&str, u32, [f32; 3], [f32; 3], [f32; 4]); 10] = [
+    (
+        "back",
+        0,
+        [0.0, 1.25, -0.14],
+        [0.18, 0.18, 0.18],
+        [0.48, 0.34, 0.82, 1.0],
+    ),
+    (
+        "belt",
+        1,
+        [0.0, 0.88, 0.03],
+        [0.16, 0.16, 0.16],
+        [0.78, 0.66, 0.26, 1.0],
+    ),
+    (
+        "foot_left",
+        2,
+        [-0.16, 0.16, 0.02],
+        [0.12, 0.12, 0.12],
+        [0.30, 0.74, 0.98, 1.0],
+    ),
+    (
+        "foot_right",
+        3,
+        [0.16, 0.16, 0.02],
+        [0.12, 0.12, 0.12],
+        [0.30, 0.74, 0.98, 1.0],
+    ),
+    (
+        "hat",
+        4,
+        [0.0, 1.82, 0.0],
+        [0.20, 0.20, 0.20],
+        [0.92, 0.75, 0.34, 1.0],
+    ),
+    (
+        "hand_left",
+        5,
+        [-0.36, 0.96, 0.10],
+        [0.14, 0.14, 0.14],
+        [0.24, 0.82, 0.56, 1.0],
+    ),
+    (
+        "hand_right",
+        6,
+        [0.36, 0.96, 0.10],
+        [0.14, 0.14, 0.14],
+        [0.24, 0.82, 0.56, 1.0],
+    ),
+    (
+        "hip",
+        7,
+        [0.0, 1.02, -0.04],
+        [0.17, 0.17, 0.17],
+        [0.82, 0.46, 0.28, 1.0],
+    ),
+    (
+        "shoulder_left",
+        8,
+        [-0.22, 1.48, 0.04],
+        [0.15, 0.15, 0.15],
+        [0.82, 0.46, 0.82, 1.0],
+    ),
+    (
+        "shoulder_right",
+        9,
+        [0.22, 1.48, 0.04],
+        [0.15, 0.15, 0.15],
+        [0.82, 0.46, 0.82, 1.0],
+    ),
+];
+
+fn attachment_display_label(avatar: &WorldAvatarPlaceholder, attachment_id: &str) -> String {
+    if avatar.display_name.trim().is_empty() {
+        format!("{}:{}", attachment_id, avatar.short_agent_id())
+    } else {
+        format!("{}:{}", attachment_id, avatar.display_name)
+    }
+}
+
+pub fn project_avatar_attachments(
+    avatars: &[WorldAvatarPlaceholder],
+) -> Vec<AvatarAttachmentProxy> {
+    let mut attachments = Vec::new();
+
+    for avatar in avatars {
+        let mut per_avatar: Vec<AvatarAttachmentProxy> = R08_ATTACHMENT_SLOT_DEFINITIONS
+            .iter()
+            .map(
+                |(attachment_id, local_id, offset, scale, color)| AvatarAttachmentProxy {
+                    avatar_id: avatar.agent_id.clone(),
+                    attachment_id: (*attachment_id).to_string(),
+                    local_id: *local_id,
+                    display_label: attachment_display_label(avatar, attachment_id),
+                    transform: Transform {
+                        position: [
+                            avatar.world_position[0] + offset[0],
+                            avatar.world_position[1] + offset[1],
+                            avatar.world_position[2] + offset[2],
+                        ],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: *scale,
+                    },
+                    color: if avatar.stale {
+                        [color[0] * 0.7, color[1] * 0.7, color[2] * 0.7, color[3]]
+                    } else if avatar.is_self {
+                        [
+                            (color[0] + 0.10).min(1.0),
+                            (color[1] + 0.04).min(1.0),
+                            (color[2] + 0.02).min(1.0),
+                            color[3],
+                        ]
+                    } else {
+                        *color
+                    },
+                    materials: MaterialSet::default(),
+                    alpha_mode: AlphaMode::Opaque,
+                },
+            )
+            .collect();
+
+        per_avatar.sort_by(|a, b| {
+            a.attachment_id
+                .cmp(&b.attachment_id)
+                .then_with(|| a.local_id.cmp(&b.local_id))
+        });
+        per_avatar.truncate(MAX_R08_ATTACHMENTS_PER_AVATAR);
+        attachments.extend(per_avatar);
+    }
+
+    attachments.sort_by(|a, b| {
+        a.avatar_id
+            .cmp(&b.avatar_id)
+            .then_with(|| a.attachment_id.cmp(&b.attachment_id))
+            .then_with(|| a.local_id.cmp(&b.local_id))
+    });
+    attachments
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1469,9 +1650,10 @@ pub struct WorldObjectIngestionItem {
     pub continuity: Option<RegionContinuitySummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WorldObjectIngestionSeam {
     pub items: Vec<WorldObjectIngestionItem>,
+    pub avatar_attachments: Vec<AvatarAttachmentProxy>,
 }
 
 impl WorldObjectIngestionSeam {
@@ -1533,7 +1715,10 @@ impl WorldObjectIngestionSeam {
                 continuity: None,
             });
         }
-        Self { items }
+        Self {
+            items,
+            avatar_attachments: Vec::new(),
+        }
     }
 
     pub fn from_live_snapshot(snapshot: Option<&LiveVisualSnapshot>) -> Self {
@@ -2017,6 +2202,50 @@ impl WorldObjectIngestionSeam {
         }
         seam
     }
+
+    pub fn with_avatar_attachments(mut self, avatars: &[WorldAvatarPlaceholder]) -> Self {
+        let mut attachments = Vec::new();
+        for avatar in avatars {
+            if avatar.attachments.is_empty() {
+                attachments.extend(project_avatar_attachments(std::slice::from_ref(avatar)));
+            } else {
+                attachments.extend(avatar.attachments.iter().cloned());
+            }
+        }
+        self.avatar_attachments = normalize_avatar_attachments(attachments);
+        self
+    }
+}
+
+fn normalize_avatar_attachments(
+    attachments: Vec<AvatarAttachmentProxy>,
+) -> Vec<AvatarAttachmentProxy> {
+    let mut grouped: BTreeMap<String, Vec<AvatarAttachmentProxy>> = BTreeMap::new();
+    for attachment in attachments {
+        grouped
+            .entry(attachment.avatar_id.clone())
+            .or_default()
+            .push(attachment);
+    }
+
+    let mut normalized = Vec::new();
+    for (_avatar_id, mut per_avatar) in grouped {
+        per_avatar.sort_by(|a, b| {
+            a.attachment_id
+                .cmp(&b.attachment_id)
+                .then_with(|| a.local_id.cmp(&b.local_id))
+        });
+        per_avatar.truncate(MAX_R08_ATTACHMENTS_PER_AVATAR);
+        normalized.extend(per_avatar);
+    }
+
+    normalized.sort_by(|a, b| {
+        a.avatar_id
+            .cmp(&b.avatar_id)
+            .then_with(|| a.attachment_id.cmp(&b.attachment_id))
+            .then_with(|| a.local_id.cmp(&b.local_id))
+    });
+    normalized
 }
 
 fn continuity_has_signal(continuity: &RegionContinuitySummary) -> bool {
@@ -2704,6 +2933,8 @@ impl Scene {
             remove_instance(self, InstanceRole::WorldObjectStateEntityPulse);
             remove_instance(self, InstanceRole::WorldObjectStateEntityStability);
         }
+
+        self.apply_avatar_attachment_proxies(&seam.avatar_attachments);
     }
 
     pub fn apply_world_avatar_placeholders(
@@ -2783,6 +3014,65 @@ impl Scene {
         }
         for (agent_id, id) in to_remove {
             self.instance_map.remove(&agent_id);
+            if let Some(inst) = self.instances.remove(&id) {
+                self.octree.remove(id, inst.world_aabb);
+            }
+        }
+    }
+
+    pub fn apply_avatar_attachment_proxies(&mut self, attachments: &[AvatarAttachmentProxy]) {
+        let mut current_keys = HashSet::new();
+
+        for attachment in attachments {
+            let key = attachment.key();
+            current_keys.insert(key.clone());
+
+            let transform = attachment.transform;
+            let color = attachment.color;
+            let geometry = GeometrySource::Diagnostic(MeshKind::AvatarProxy);
+
+            if let Some(&id) = self.avatar_attachment_map.get(&key) {
+                if let Some(inst) = self.instances.get_mut(&id) {
+                    if inst.transform != transform
+                        || inst.color != color
+                        || inst.geometry != geometry
+                        || inst.alpha_mode != attachment.alpha_mode
+                        || inst.materials != attachment.materials
+                    {
+                        inst.transform = transform;
+                        inst.color = color;
+                        inst.geometry = geometry;
+                        inst.alpha_mode = attachment.alpha_mode;
+                        inst.materials = attachment.materials.clone();
+                        inst.dirty_spatial = true;
+                    }
+                    continue;
+                }
+            }
+
+            let id = self.insert_instance(
+                geometry,
+                InstanceRole::WorldAvatarAttachmentProxy,
+                transform,
+                color,
+                attachment.alpha_mode,
+            );
+            if let Some(inst) = self.instances.get_mut(&id) {
+                inst.materials = attachment.materials.clone();
+                inst.stable_id = Some(key.clone());
+            }
+            self.avatar_attachment_map.insert(key, id);
+        }
+
+        let mut to_remove = Vec::new();
+        for (key, &id) in &self.avatar_attachment_map {
+            if !current_keys.contains(key) {
+                to_remove.push((key.clone(), id));
+            }
+        }
+
+        for (key, id) in to_remove {
+            self.avatar_attachment_map.remove(&key);
             if let Some(inst) = self.instances.remove(&id) {
                 self.octree.remove(id, inst.world_aabb);
             }
@@ -5773,6 +6063,8 @@ mod tests {
                 is_self: true,
                 last_update_unix_ms: 10,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("other-id"),
@@ -5783,6 +6075,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 10,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
         ];
 
@@ -5825,6 +6119,8 @@ mod tests {
             is_self: false,
             last_update_unix_ms: 10,
             stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
         }];
 
         scene.apply_world_avatar_placeholders(&avatars, AvatarRenderMode::FallbackBox);
@@ -5837,6 +6133,67 @@ mod tests {
         assert_eq!(avatar.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
         assert_eq!(avatar.color, [0.30, 0.74, 0.98, 1.0]);
         assert_eq!(avatar.transform.scale, [0.30, 1.10, 0.30]);
+    }
+
+    #[test]
+    fn project_avatar_attachments_is_bounded_and_sorted() {
+        let avatar = WorldAvatarPlaceholder {
+            agent_id: String::from("avatar-id"),
+            world_position: [4.0, 1.0, 2.0],
+            local_position: Some([10, 20, 30]),
+            sim_name: Some(String::from("TestSim")),
+            display_name: String::from("Avatar"),
+            is_self: false,
+            last_update_unix_ms: 99,
+            stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
+        };
+
+        let attachments = project_avatar_attachments(&[avatar]);
+        assert_eq!(attachments.len(), MAX_R08_ATTACHMENTS_PER_AVATAR);
+        assert_eq!(attachments[0].attachment_id, "back");
+        assert_eq!(attachments[0].local_id, 0);
+        assert_eq!(attachments[7].attachment_id, "hip");
+        assert_eq!(attachments[7].local_id, 7);
+    }
+
+    #[test]
+    fn scene_applies_and_removes_avatar_attachment_proxies() {
+        let mut scene = Scene::prototype();
+        let avatar = WorldAvatarPlaceholder {
+            agent_id: String::from("avatar-id"),
+            world_position: [4.0, 1.0, 2.0],
+            local_position: Some([10, 20, 30]),
+            sim_name: Some(String::from("TestSim")),
+            display_name: String::from("Avatar"),
+            is_self: false,
+            last_update_unix_ms: 99,
+            stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
+        };
+        let seam = WorldObjectIngestionSeam::default().with_avatar_attachments(&[avatar]);
+
+        scene.apply_world_object_ingestion_seam(&seam);
+
+        let attachment_instances: Vec<_> = scene
+            .instances
+            .values()
+            .filter(|instance| instance.role == InstanceRole::WorldAvatarAttachmentProxy)
+            .collect();
+        assert_eq!(attachment_instances.len(), MAX_R08_ATTACHMENTS_PER_AVATAR);
+        assert!(attachment_instances.iter().all(|instance| {
+            instance.geometry == GeometrySource::Diagnostic(MeshKind::AvatarProxy)
+        }));
+
+        scene.apply_world_object_ingestion_seam(&WorldObjectIngestionSeam::default());
+        assert!(
+            scene
+                .instances
+                .values()
+                .all(|instance| instance.role != InstanceRole::WorldAvatarAttachmentProxy)
+        );
     }
 
     #[test]
@@ -5864,6 +6221,8 @@ mod tests {
                 is_self: true,
                 last_update_unix_ms: 1,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("friend-a"),
@@ -5874,6 +6233,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 2,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("nearby-b"),
@@ -5884,6 +6245,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 3,
                 stale: true,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
         ];
 
@@ -5910,6 +6273,8 @@ mod tests {
                 is_self: true,
                 last_update_unix_ms: 100,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("22222222-2222-2222-2222-222222222222"),
@@ -5920,6 +6285,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 100,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("33333333-3333-3333-3333-333333333333"),
@@ -5930,6 +6297,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 100,
                 stale: true,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
         ];
 

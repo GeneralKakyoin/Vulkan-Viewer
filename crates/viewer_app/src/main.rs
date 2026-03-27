@@ -13,13 +13,13 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
 use viewer_core::{
-    AlphaMode, AssetID, AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera,
-    ChatConnectionState, ChatMessage, ChatSendStatus, ChatState, DirectImMessage, FirstLifeProfile,
-    FriendEntry, GeometrySource, LiveVisualSnapshot, MeshKind, ProfileClassifiedDetails,
-    ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes, ProfilePickDetails,
-    ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene, SecondLifeProfile,
-    SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter, WorldObjectIngestionSeam,
-    compute_p2p_session_id,
+    AlphaMode, AssetID, AvatarAppearanceSummary, AvatarProfileState, AvatarProfileTab,
+    AvatarRenderMode, Camera, ChatConnectionState, ChatMessage, ChatSendStatus, ChatState,
+    DirectImMessage, FirstLifeProfile, FriendEntry, GeometrySource, LiveVisualSnapshot, MeshKind,
+    ProfileClassifiedDetails, ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes,
+    ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene,
+    SecondLifeProfile, SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter,
+    WorldObjectIngestionSeam, compute_p2p_session_id,
 };
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
@@ -2396,6 +2396,18 @@ fn merge_world_avatar_samples(
             existing.is_self = sample.is_self;
             existing.last_update_unix_ms = observed_at_unix_ms;
             existing.stale = false;
+            let updated_avatar = existing.clone();
+            let attachments =
+                viewer_core::project_avatar_attachments(std::slice::from_ref(&updated_avatar));
+            existing.appearance = AvatarAppearanceSummary {
+                display_label: display_name.clone(),
+                sim_name: Some(resolved_sim_name.clone()),
+                is_self: sample.is_self,
+                stale: existing.stale,
+                last_update_unix_ms: observed_at_unix_ms,
+                attachment_count: attachments.len(),
+            };
+            existing.attachments = attachments;
             if moved {
                 relay_events.push((String::from("avatar_updated"), format!("{agent_id} moved")));
             }
@@ -2415,7 +2427,25 @@ fn merge_world_avatar_samples(
                 is_self: sample.is_self,
                 last_update_unix_ms: observed_at_unix_ms,
                 stale: false,
+                appearance: AvatarAppearanceSummary {
+                    display_label: display_name.clone(),
+                    sim_name: Some(resolve_avatar_sim_name(
+                        sample.sim_name.as_deref(),
+                        decoded_world_sim_name,
+                        startup_sim_name_fallback,
+                    )),
+                    is_self: sample.is_self,
+                    stale: false,
+                    last_update_unix_ms: observed_at_unix_ms,
+                    attachment_count: 0,
+                },
+                attachments: Vec::new(),
             });
+            let last_index = current.len() - 1;
+            let attachments =
+                viewer_core::project_avatar_attachments(std::slice::from_ref(&current[last_index]));
+            current[last_index].appearance.attachment_count = attachments.len();
+            current[last_index].attachments = attachments;
             relay_events.push((
                 String::from("avatar_seen"),
                 format!("{agent_id} {display_name}"),
@@ -3403,7 +3433,8 @@ impl AppState {
         self.live_visual_state.refresh();
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
         let next_world_ingestion_seam =
-            WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref());
+            WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref())
+                .with_avatar_attachments(&self.world_avatars);
         let scene_update_start = Instant::now();
         if should_apply_live_visual_snapshot(
             self.last_applied_live_visual_snapshot.as_ref(),
@@ -4426,6 +4457,8 @@ mod tests {
             is_self: false,
             last_update_unix_ms: 1,
             stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
         }];
 
         apply_avatar_render_mode(&mut scene, &mut social, &avatars, AvatarRenderMode::Proxy);
