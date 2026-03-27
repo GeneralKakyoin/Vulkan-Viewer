@@ -1,10 +1,14 @@
+mod draw_helpers;
+
 use anyhow::{Context, Result};
+use draw_helpers::build_draw_list;
+// use std::collections::{BTreeMap, HashMap}; // Removed unused imports
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use viewer_core::{
-    AssetID, AvatarRenderMode, Camera, GeometrySource, MeshKind, Scene, Vertex, flatten_mat4,
-    look_to_rh, mat4_mul, perspective_rh_zo,
+    AlphaMode, AssetID, AvatarRenderMode, Camera, GeometrySource, MaterialDescriptor, MeshKind,
+    Scene, Vertex, flatten_mat4, look_to_rh, mat4_mul, perspective_rh_zo,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -31,11 +35,17 @@ pub struct RenderBackend {
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     scene_pipeline: RenderPipeline,
+    alpha_test_pipeline: RenderPipeline,
+    transparent_pipeline: RenderPipeline,
     axis_pipeline: RenderPipeline,
     camera_buffer: Buffer,
     camera_bind_group: wgpu::BindGroup,
     object_buffer: Buffer,
     object_bind_group: wgpu::BindGroup,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    loading_view: wgpu::TextureView,
+    missing_view: wgpu::TextureView,
     object_uniform_stride: u64,
     max_objects: usize,
     axis_vertex_buffer: Buffer,
@@ -131,10 +141,10 @@ impl RenderBackend {
             mapped_at_creation: false,
         });
 
-        let object_uniform_size = 80_u64;
+        let object_uniform_size = 144_u64;
         let min_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         let object_uniform_stride = align_up(object_uniform_size, min_alignment);
-        let max_objects = 256_usize;
+        let max_objects = 2048_usize; // Note: max_objects is effectively the cap on total uniform slots (submeshes)
 
         let object_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("object_uniform_buffer"),
@@ -167,10 +177,63 @@ impl RenderBackend {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: NonZeroU64::new(80),
+                        min_binding_size: NonZeroU64::new(144),
                     },
                     count: None,
                 }],
+            });
+
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
             });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -190,7 +253,7 @@ impl RenderBackend {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: &object_buffer,
                     offset: 0,
-                    size: NonZeroU64::new(80),
+                    size: NonZeroU64::new(144),
                 }),
             }],
         });
@@ -202,7 +265,11 @@ impl RenderBackend {
 
         let scene_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("scene_pipeline_layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &object_bind_group_layout],
+            bind_group_layouts: &[
+                &camera_bind_group_layout,
+                &object_bind_group_layout,
+                &texture_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -216,7 +283,7 @@ impl RenderBackend {
                 buffers: &[VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
                 }],
             },
             fragment: Some(FragmentState {
@@ -237,6 +304,84 @@ impl RenderBackend {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let alpha_test_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("alpha_test_pipeline"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: PipelineCompilationOptions::default(),
+                buffers: &[VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                }],
+            },
+            fragment: Some(FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: PipelineCompilationOptions::default(),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..PrimitiveState::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let transparent_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("transparent_pipeline"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: PipelineCompilationOptions::default(),
+                buffers: &[VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                }],
+            },
+            fragment: Some(FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: PipelineCompilationOptions::default(),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState {
+                cull_mode: None,
+                ..PrimitiveState::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -363,6 +508,22 @@ impl RenderBackend {
             }],
         );
 
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("default_sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let loading_view =
+            create_fallback_texture(&device, &queue, "loading", [1.0, 1.0, 0.0, 1.0]); // Yellow
+        let missing_view =
+            create_fallback_texture(&device, &queue, "missing", [1.0, 0.0, 1.0, 1.0]); // Magenta
+
         let avatar_proxy_mesh = if avatar_proxy_fallback_forced() {
             None
         } else {
@@ -414,11 +575,17 @@ impl RenderBackend {
             _depth_texture,
             depth_view,
             scene_pipeline,
+            alpha_test_pipeline,
+            transparent_pipeline,
             axis_pipeline,
             camera_buffer,
             camera_bind_group,
             object_buffer,
             object_bind_group,
+            texture_bind_group_layout,
+            sampler,
+            loading_view,
+            missing_view,
             object_uniform_stride,
             max_objects,
             axis_vertex_buffer,
@@ -533,14 +700,14 @@ impl RenderBackend {
 
         let bytes_per_row = 4 * width;
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             rgba,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(height),
@@ -570,6 +737,7 @@ impl RenderBackend {
         camera: &Camera,
         scene: &Scene,
         visibility_list: &[usize],
+        time: f32,
         capture_path: Option<&Path>,
         draw_overlay: F,
     ) -> Result<()>
@@ -598,7 +766,13 @@ impl RenderBackend {
             .create_view(&TextureViewDescriptor::default());
 
         self.update_camera_uniform(camera);
-        let object_offsets = self.upload_object_uniforms(scene, visibility_list);
+        let sorted_visibility = build_draw_list(
+            &scene.instances,
+            visibility_list,
+            camera.position,
+            self.max_objects,
+        );
+        let object_offsets = self.upload_object_uniforms(scene, &sorted_visibility, time);
 
         let mut encoder = self
             .device
@@ -637,7 +811,7 @@ impl RenderBackend {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             let mut object_offset_index = 0usize;
 
-            for &id in visibility_list {
+            for &id in &sorted_visibility {
                 let Some(instance) = scene.instances.get(&id) else {
                     continue;
                 };
@@ -672,28 +846,44 @@ impl RenderBackend {
                             }
                         };
 
-                        render_pass.set_pipeline(&self.scene_pipeline);
+                        let pipeline = match instance.alpha_mode {
+                            AlphaMode::Opaque => &self.scene_pipeline,
+                            AlphaMode::AlphaTest { .. } => &self.alpha_test_pipeline,
+                            AlphaMode::Blend => &self.transparent_pipeline,
+                        };
+
+                        render_pass.set_pipeline(pipeline);
                         render_pass.set_vertex_buffer(0, mesh_buffers.vertex_buffer.slice(..));
                         render_pass.set_index_buffer(
                             mesh_buffers.index_buffer.slice(..),
                             wgpu::IndexFormat::Uint32,
                         );
-                        render_pass.set_bind_group(
-                            1,
-                            &self.object_bind_group,
-                            &[object_offsets[object_offset_index]],
-                        );
 
-                        // Draw all submeshes for now
+                        // Draw each submesh with its specific material and uniform slot
                         for submesh in &mesh_buffers.submeshes {
+                            if object_offset_index >= object_offsets.len() {
+                                break;
+                            }
+
+                            render_pass.set_bind_group(
+                                1,
+                                &self.object_bind_group,
+                                &[object_offsets[object_offset_index]],
+                            );
+
+                            // Bind textures for this submesh
+                            let mat = instance.materials.material_for_face(submesh.face_id);
+                            let bind_group = self.create_material_bind_group(mat);
+                            render_pass.set_bind_group(2, &bind_group, &[]);
+
                             render_pass.draw_indexed(
                                 submesh.index_start..submesh.index_start + submesh.index_count,
                                 0,
                                 0..1,
                             );
-                        }
 
-                        object_offset_index += 1;
+                            object_offset_index += 1;
+                        }
                     }
                 }
             }
@@ -746,15 +936,15 @@ impl RenderBackend {
         });
 
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: surface_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),
@@ -850,7 +1040,12 @@ impl RenderBackend {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
     }
 
-    fn upload_object_uniforms(&self, scene: &Scene, visibility_list: &[usize]) -> Vec<u32> {
+    fn upload_object_uniforms(
+        &self,
+        scene: &Scene,
+        visibility_list: &[usize],
+        time: f32,
+    ) -> Vec<u32> {
         let mut dynamic_offsets = Vec::new();
         let mut object_index = 0_usize;
 
@@ -866,27 +1061,191 @@ impl RenderBackend {
                 continue;
             }
 
-            if object_index >= self.max_objects {
-                break;
-            }
+            // Get submesh count to reserve uniform slots
+            let submesh_count = match &instance.geometry {
+                GeometrySource::Diagnostic(kind) => match kind {
+                    MeshKind::AxisMarker => 0,
+                    _ => 1,
+                },
+                source => self
+                    .dynamic_geometries
+                    .get(source)
+                    .map(|m| m.submeshes.len())
+                    .unwrap_or(1),
+            };
 
-            let byte_offset = self.object_uniform_stride * object_index as u64;
-            if let Ok(dynamic_offset) = u32::try_from(byte_offset) {
-                self.update_object_uniform(byte_offset, instance.world_matrix, instance.color);
-                dynamic_offsets.push(dynamic_offset);
+            for sub_idx in 0..submesh_count {
+                if object_index >= self.max_objects {
+                    break;
+                }
+
+                let byte_offset = self.object_uniform_stride * object_index as u64;
+                if let Ok(dynamic_offset) = u32::try_from(byte_offset) {
+                    // Identify face_id for this submesh slot
+                    let face_id = match &instance.geometry {
+                        source => self
+                            .dynamic_geometries
+                            .get(source)
+                            .and_then(|m| m.submeshes.get(sub_idx))
+                            .map(|s| s.face_id)
+                            .unwrap_or(0),
+                    };
+
+                    let mat = instance.materials.material_for_face(face_id);
+                    let (uv_matrix, material_tint) = match mat {
+                        MaterialDescriptor::Legacy(entry) => (
+                            viewer_core::material::animation::compute_texture_matrix(
+                                entry,
+                                &instance.texture_anim,
+                                time,
+                            ),
+                            entry.rgba,
+                        ),
+                        MaterialDescriptor::Pbr(pbr) => (
+                            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                            pbr.base_color_tint,
+                        ),
+                    };
+                    let final_tint = multiply_rgba(instance.color, material_tint);
+
+                    // Keep instance-level modulation while applying per-material tint semantics.
+                    self.update_object_uniform(
+                        byte_offset,
+                        instance.world_matrix,
+                        final_tint,
+                        uv_matrix,
+                        instance.alpha_mode,
+                    );
+                    dynamic_offsets.push(dynamic_offset);
+                }
+                object_index += 1;
             }
-            object_index += 1;
         }
 
         dynamic_offsets
     }
 
-    fn update_object_uniform(&self, byte_offset: u64, model: [[f32; 4]; 4], color: [f32; 3]) {
+    fn create_material_bind_group(&self, mat: &MaterialDescriptor) -> wgpu::BindGroup {
+        let (base, normal, mr, emissive) = match mat {
+            MaterialDescriptor::Legacy(entry) => {
+                let view = if entry.texture_id.is_empty() {
+                    Arc::new(self.missing_view.clone())
+                } else {
+                    match self.texture_provider.get_texture(&entry.texture_id) {
+                        PendingTexture::Ready(v) => v,
+                        PendingTexture::Loading => Arc::new(self.loading_view.clone()),
+                        PendingTexture::Missing => Arc::new(self.missing_view.clone()),
+                    }
+                };
+                (
+                    view.clone(),
+                    Arc::new(self.missing_view.clone()),
+                    Arc::new(self.missing_view.clone()),
+                    Arc::new(self.missing_view.clone()),
+                )
+            }
+            MaterialDescriptor::Pbr(pbr) => {
+                let get_v = |id: &AssetID| {
+                    if id.is_empty() {
+                        Arc::new(self.missing_view.clone())
+                    } else {
+                        match self.texture_provider.get_texture(id) {
+                            PendingTexture::Ready(v) => v,
+                            PendingTexture::Loading => Arc::new(self.loading_view.clone()),
+                            PendingTexture::Missing => Arc::new(self.missing_view.clone()),
+                        }
+                    }
+                };
+                (
+                    get_v(&pbr.base_color_id),
+                    get_v(&pbr.normal_id),
+                    get_v(&pbr.metallic_roughness_id),
+                    get_v(&pbr.emissive_id),
+                )
+            }
+        };
+
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material_bind_group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&base),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&mr),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&emissive),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        })
+    }
+
+    fn update_object_uniform(
+        &self,
+        byte_offset: u64,
+        model: [[f32; 4]; 4],
+        color: [f32; 4],
+        uv_matrix: [[f32; 3]; 3],
+        alpha_mode: AlphaMode,
+    ) {
+        let (mode_index, cutoff) = match alpha_mode {
+            AlphaMode::Opaque => (0u32, 0.0f32),
+            AlphaMode::AlphaTest { cutoff } => (1u32, cutoff),
+            AlphaMode::Blend => (2u32, 0.0f32),
+        };
         let flat = flatten_mat4(model);
-        let object_uniform: [f32; 20] = [
-            flat[0], flat[1], flat[2], flat[3], flat[4], flat[5], flat[6], flat[7], flat[8],
-            flat[9], flat[10], flat[11], flat[12], flat[13], flat[14], flat[15], color[0],
-            color[1], color[2], 1.0,
+        // mat3x3 in WGSL is 3 columns of vec4 (16 byte alignment per column)
+        let m = uv_matrix;
+        let object_uniform: [f32; 36] = [
+            flat[0],
+            flat[1],
+            flat[2],
+            flat[3],
+            flat[4],
+            flat[5],
+            flat[6],
+            flat[7],
+            flat[8],
+            flat[9],
+            flat[10],
+            flat[11],
+            flat[12],
+            flat[13],
+            flat[14],
+            flat[15],
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            m[0][0],
+            m[0][1],
+            m[0][2],
+            0.0,
+            m[1][0],
+            m[1][1],
+            m[1][2],
+            0.0,
+            m[2][0],
+            m[2][1],
+            m[2][2],
+            0.0,
+            mode_index as f32,
+            cutoff,
+            0.0,
+            0.0,
         ];
         self.queue.write_buffer(
             &self.object_buffer,
@@ -942,6 +1301,63 @@ fn create_depth_resources(
     (texture, view)
 }
 
+fn create_fallback_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    color: [f32; 4],
+) -> wgpu::TextureView {
+    let rgba = [
+        (color[0] * 255.0) as u8,
+        (color[1] * 255.0) as u8,
+        (color[2] * 255.0) as u8,
+        (color[3] * 255.0) as u8,
+    ];
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(&format!("{}_fallback_texture", label)),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn multiply_rgba(lhs: [f32; 4], rhs: [f32; 4]) -> [f32; 4] {
+    [
+        lhs[0] * rhs[0],
+        lhs[1] * rhs[1],
+        lhs[2] * rhs[2],
+        lhs[3] * rhs[3],
+    ]
+}
+
 // model_matrix removed, using pre-computed world_matrix from Scene instead
 
 // Internal math helpers removed, using viewer_core instead
@@ -958,34 +1374,55 @@ struct CameraUniform {
 struct ObjectUniform {
     model: mat4x4<f32>,
     color: vec4<f32>,
+    uv_matrix: mat3x3<f32>,
+    alpha_mode: u32,
+    alpha_cutoff: f32,
+    _padding: vec2<f32>,
 };
 
-@group(0) @binding(0)
-var<uniform> camera: CameraUniform;
+@group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(1) @binding(0) var<uniform> object: ObjectUniform;
 
-@group(1) @binding(0)
-var<uniform> object: ObjectUniform;
+@group(2) @binding(0) var t_base: texture_2d<f32>;
+@group(2) @binding(1) var t_normal: texture_2d<f32>;
+@group(2) @binding(2) var t_mr: texture_2d<f32>;
+@group(2) @binding(3) var t_emissive: texture_2d<f32>;
+@group(2) @binding(4) var s_base: sampler;
 
 struct VsInput {
     @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) tex_coord: vec2<f32>,
 };
 
 struct VsOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) tex_coord: vec2<f32>,
+    @location(1) color: vec4<f32>,
 };
 
 @vertex
 fn vs_main(in: VsInput) -> VsOutput {
     var out: VsOutput;
     out.clip_position = camera.view_projection * object.model * vec4<f32>(in.position, 1.0);
-    out.color = object.color.rgb;
+    
+    // Apply UV matrix
+    let uv3 = object.uv_matrix * vec3<f32>(in.tex_coord, 1.0);
+    out.tex_coord = uv3.xy;
+    
+    out.color = object.color;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    let base_color = textureSample(t_base, s_base, in.tex_coord);
+    let final_color = base_color * in.color;
+    
+    if (object.alpha_mode == 1u && final_color.a < object.alpha_cutoff) {
+        discard;
+    }
+    return final_color;
 }
 "#;
 
@@ -1043,5 +1480,45 @@ fn create_mesh_buffers(
         vertex_buffer,
         index_buffer,
         submeshes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use viewer_core::{AssetID, MaterialDescriptor, MaterialSet, TextureEntry};
+
+    #[test]
+    fn test_material_slot_mapping_respects_face_id() {
+        let mut mat_set = MaterialSet::default();
+        mat_set.default = MaterialDescriptor::Legacy(TextureEntry {
+            texture_id: AssetID::new("default_tex"),
+            ..TextureEntry::default()
+        });
+
+        let face_1_mat = MaterialDescriptor::Legacy(TextureEntry {
+            texture_id: AssetID::new("face_1_tex"),
+            ..TextureEntry::default()
+        });
+        mat_set.by_face.insert(1, face_1_mat.clone());
+
+        // Face 0 should fallback to default
+        let mat_0 = mat_set.material_for_face(0);
+        assert_eq!(mat_0.texture_ids()[0], AssetID::new("default_tex"));
+
+        // Face 1 should use specific override
+        let mat_1 = mat_set.material_for_face(1);
+        assert_eq!(mat_1.texture_ids()[0], AssetID::new("face_1_tex"));
+
+        // Face 2 should fallback to default
+        let mat_2 = mat_set.material_for_face(2);
+        assert_eq!(mat_2.texture_ids()[0], AssetID::new("default_tex"));
+    }
+
+    #[test]
+    fn test_multiply_rgba_is_componentwise() {
+        let lhs = [0.5, 0.25, 1.0, 0.8];
+        let rhs = [0.2, 1.0, 0.5, 0.25];
+        assert_eq!(multiply_rgba(lhs, rhs), [0.1, 0.25, 0.5, 0.2]);
     }
 }

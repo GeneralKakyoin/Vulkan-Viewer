@@ -13,12 +13,13 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
 use viewer_core::{
-    AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatMessage, ChatSendStatus, ChatState, DirectImMessage, FirstLifeProfile, FriendEntry,
-    GeometrySource, LiveVisualSnapshot, ProfileClassifiedDetails, ProfileClassifiedSummary,
-    ProfileLoadStatus, ProfileNotes, ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent,
-    RuntimeRelayLevel, Scene, SecondLifeProfile, SocialState, WorldAvatarPlaceholder,
-    WorldObjectIngestionAdapter, WorldObjectIngestionSeam, compute_p2p_session_id,
+    AlphaMode, AssetID, AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera,
+    ChatConnectionState, ChatMessage, ChatSendStatus, ChatState, DirectImMessage, FirstLifeProfile,
+    FriendEntry, GeometrySource, LiveVisualSnapshot, MeshKind, ProfileClassifiedDetails,
+    ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes, ProfilePickDetails,
+    ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene, SecondLifeProfile,
+    SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter, WorldObjectIngestionSeam,
+    compute_p2p_session_id,
 };
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
@@ -259,6 +260,61 @@ enum LiveStartupStatus {
     Failed(LiveStartupFailure),
 }
 
+impl LiveStartupStatus {
+    fn to_ux_status(
+        &self,
+        chat_connection: &viewer_core::ChatConnectionState,
+    ) -> viewer_core::SessionUxStatus {
+        use viewer_core::{SessionUxReason, SessionUxStatus};
+
+        if matches!(
+            chat_connection,
+            viewer_core::ChatConnectionState::Reconnecting
+        ) {
+            return SessionUxStatus::Reconnecting { reason: None };
+        }
+
+        match self {
+            LiveStartupStatus::DisabledByConfig => SessionUxStatus::Disabled {
+                reason: Some(SessionUxReason::DisabledByConfig),
+            },
+            LiveStartupStatus::DisabledMissingConfig => SessionUxStatus::Disabled {
+                reason: Some(SessionUxReason::MissingConfig),
+            },
+            LiveStartupStatus::Starting => SessionUxStatus::Starting,
+            LiveStartupStatus::Connected => SessionUxStatus::Connected,
+            LiveStartupStatus::Failed(failure) => {
+                let reason = match failure.class {
+                    LiveStartupFailureClass::MissingConfig => SessionUxReason::MissingConfig,
+                    LiveStartupFailureClass::ConnectTransport => SessionUxReason::ConnectTransport,
+                    LiveStartupFailureClass::LoginRequestTransport => {
+                        SessionUxReason::LoginTransport
+                    }
+                    LiveStartupFailureClass::LoginRequestShape => SessionUxReason::LoginTransport,
+                    LiveStartupFailureClass::LoginAuth => SessionUxReason::LoginAuth,
+                    LiveStartupFailureClass::LoginRequiresTos => SessionUxReason::LoginRequiresTos,
+                    LiveStartupFailureClass::LoginRequiresMfa => SessionUxReason::LoginRequiresMfa,
+                    LiveStartupFailureClass::LoginUpdateRequired => {
+                        SessionUxReason::LoginUpdateRequired
+                    }
+                    LiveStartupFailureClass::LoginOther => SessionUxReason::Other,
+                    LiveStartupFailureClass::ConnectionLostReconnecting => {
+                        SessionUxReason::ConnectionLost
+                    }
+                };
+
+                if failure.class == LiveStartupFailureClass::ConnectionLostReconnecting {
+                    SessionUxStatus::Reconnecting {
+                        reason: Some(reason),
+                    }
+                } else {
+                    SessionUxStatus::Failed { reason }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiveStartupFailureClass {
     MissingConfig,
@@ -485,23 +541,6 @@ impl LiveVisualState {
     fn refresh_avatar_profile(&self, avatar_id: String, tab: Option<AvatarProfileTab>) {
         if let Some(tx) = &self.in_process_tx {
             let _ = tx.send(LiveFeedCommand::RefreshAvatarProfile { avatar_id, tab });
-        }
-    }
-
-    fn startup_status_line(&self) -> String {
-        match &self.startup_status {
-            LiveStartupStatus::DisabledByConfig => {
-                String::from("disabled (VIEWER_APP_LIVE_STARTUP=off)")
-            }
-            LiveStartupStatus::DisabledMissingConfig => {
-                String::from("disabled (missing login env); using fallback snapshot path")
-            }
-            LiveStartupStatus::Starting => String::from("starting"),
-            LiveStartupStatus::Connected => String::from("connected"),
-            LiveStartupStatus::Failed(failure) => {
-                let class = startup_failure_class_label(failure.class);
-                format!("failed ({class}: {})", failure.message)
-            }
         }
     }
 }
@@ -2921,7 +2960,8 @@ impl AppState {
                     GeometrySource::Procedural(params, 1.0),
                     InstanceRole::SceneStatic,
                     transform,
-                    [0.2 + i as f32 * 0.1, 0.4 + j as f32 * 0.1, 0.7],
+                    [0.2 + i as f32 * 0.1, 0.4 + j as f32 * 0.1, 0.7, 1.0],
+                    AlphaMode::Opaque,
                 );
             }
         }
@@ -2934,17 +2974,52 @@ impl AppState {
             GeometrySource::Sculpt("dummy-sculpt".to_string(), viewer_core::SculptType::Sphere),
             InstanceRole::SceneStatic,
             sculpt_trans,
-            [0.8, 0.2, 0.2],
+            [0.8, 0.2, 0.2, 1.0],
+            AlphaMode::Opaque,
         );
 
-        // Add a glTF Mesh
+        // Add a glTF Mesh (Animation Test)
         let mut mesh_trans = Transform::default();
         mesh_trans.position = [5.0, 15.0, 5.0];
-        self.scene.insert_instance(
+        let inst_id = self.scene.insert_instance(
             GeometrySource::Mesh("dummy-mesh".to_string(), 0),
             InstanceRole::SceneStatic,
             mesh_trans,
-            [0.2, 0.8, 0.2],
+            [1.0, 1.0, 1.0, 1.0],
+            AlphaMode::Opaque,
+        );
+
+        if let Some(instance) = self.scene.get_instance_mut(inst_id) {
+            // Apply water texture to the first fixture ID
+            if let Some(water_id) = self.fixture_texture_ids.first() {
+                instance.materials.default =
+                    viewer_core::MaterialDescriptor::Legacy(viewer_core::TextureEntry {
+                        texture_id: water_id.clone(),
+                        ..viewer_core::TextureEntry::default()
+                    });
+            }
+
+            // Apply smooth horizontal scroll
+            instance.texture_anim = viewer_core::TextureAnim {
+                mode: viewer_core::material::animation::ANIM_ON
+                    | viewer_core::material::animation::SMOOTH
+                    | viewer_core::material::animation::LOOP,
+                rate: 0.2, // 20% scroll per second
+                length: 1.0,
+                ..viewer_core::TextureAnim::default()
+            };
+        }
+
+        // Add a Transparent Validation Cube
+        let mut trans_cube_trans = Transform::default();
+        trans_cube_trans.position = [0.0, 18.0, 0.0];
+        trans_cube_trans.scale = [3.0, 3.0, 3.0];
+        self.scene.insert_instance(
+            GeometrySource::Diagnostic(MeshKind::Cube),
+            InstanceRole::SceneStatic,
+            trans_cube_trans,
+            [0.2, 0.4, 1.0, 0.5], // Semi-transparent blue
+            AlphaMode::Blend,
         );
     }
 
@@ -2959,7 +3034,8 @@ impl AppState {
                         GeometrySource::Diagnostic(MeshKind::Cube),
                         InstanceRole::SceneStatic,
                         transform,
-                        [0.2, 0.5, 0.8],
+                        [0.2, 0.5, 0.8, 1.0],
+                        AlphaMode::Opaque,
                     );
                 }
             }
@@ -2970,7 +3046,8 @@ impl AppState {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 InstanceRole::SceneStatic,
                 sun_trans,
-                [1.0, 0.8, 0.1],
+                [1.0, 0.8, 0.1, 1.0],
+                AlphaMode::Opaque,
             );
         }
 
@@ -2986,7 +3063,8 @@ impl AppState {
                         rotation: [0.0, 0.0, 0.0, 1.0],
                         scale: [1.0, 1.0, 1.0],
                     },
-                    [0.8, 0.8, 0.2],
+                    [0.8, 0.8, 0.2, 1.0],
+                    AlphaMode::Opaque,
                 );
 
                 // Add 4 moons to each planet
@@ -3002,7 +3080,8 @@ impl AppState {
                         GeometrySource::Diagnostic(MeshKind::Cube),
                         InstanceRole::WorldIngestionProxy,
                         moon_transform,
-                        [0.2, 0.6, 0.9],
+                        [0.2, 0.6, 0.9, 1.0],
+                        AlphaMode::Opaque,
                     );
                     self.scene.get_instance_mut(moon_id).unwrap().parent_id = Some(parent_id);
                 }
@@ -3295,7 +3374,6 @@ impl AppState {
             }
         }
         self.live_visual_state.refresh();
-        self.tick_fixture_textures()?;
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
         let next_world_ingestion_seam =
             WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref());
@@ -3328,11 +3406,21 @@ impl AppState {
         self.world_ingestion_seam = next_world_ingestion_seam;
         let screenshot_path = self.next_screenshot_path()?;
 
+        self.scene.sync_spatial();
+
+        let aspect = self.renderer.aspect_ratio();
+        let frustum = self.camera.frustum(aspect);
+        let visibility_list = self.scene.query_frustum(&frustum);
+        self.tick_fixture_textures(&visibility_list)?;
+
         let window = self.window.clone();
         let ui = &mut self.ui;
         let camera = self.camera;
         let live_visual = next_live_visual_snapshot;
-        let live_startup_status = self.live_visual_state.startup_status_line();
+        let session_status = self
+            .live_visual_state
+            .startup_status
+            .to_ux_status(&self.live_visual_state.chat_connection);
         let chat_state = &mut self.chat_state;
         let social_state = &mut self.social_state;
         let world_avatars = &self.world_avatars;
@@ -3346,12 +3434,6 @@ impl AppState {
         let mut pending_profile_tab_select: Option<(String, AvatarProfileTab)> = None;
         let mut pending_profile_refresh: Option<(String, Option<AvatarProfileTab>)> = None;
         let mut pending_open_external_url: Option<String> = None;
-
-        self.scene.sync_spatial();
-
-        let aspect = self.renderer.aspect_ratio();
-        let frustum = self.camera.frustum(aspect);
-        let visibility_list = self.scene.query_frustum(&frustum);
 
         // Prepare dynamic geometry
         for &id in &visibility_list {
@@ -3422,6 +3504,7 @@ impl AppState {
             &camera,
             &self.scene,
             &visibility_list,
+            self.app_start_time.elapsed().as_secs_f32(),
             screenshot_path.as_deref(),
             |device, queue, encoder, target_view, surface_size| {
                 let actions = ui.render(
@@ -3433,7 +3516,7 @@ impl AppState {
                     surface_size,
                     &camera,
                     live_visual.as_ref(),
-                    &live_startup_status,
+                    session_status,
                     chat_state,
                     social_state,
                     world_avatars,
@@ -3441,6 +3524,8 @@ impl AppState {
                     world_self_location,
                     profile_state,
                     profile_image_bytes,
+                    now_unix_ms(),
+                    self.live_visual_state.profile_cache_ttl_secs,
                     self.smoothed_fps,
                     self.smoothed_frame_ms,
                     self.avg_scene_update_ms,
@@ -3528,14 +3613,28 @@ impl AppState {
         Ok(Some(config.output_dir.join(filename)))
     }
 
-    fn tick_fixture_textures(&mut self) -> Result<()> {
+    fn tick_fixture_textures(&mut self, visibility_list: &[usize]) -> Result<()> {
         if self.fixture_texture_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut ids_to_request = self.fixture_texture_ids.clone();
+
+        // Also extract visible texture IDs from the scene (capped at 64)
+        let visible_ids = extract_visible_texture_ids_from_scene(&self.scene, visibility_list, 64);
+        for id in visible_ids {
+            if !ids_to_request.contains(&id) {
+                ids_to_request.push(id);
+            }
+        }
+
+        if ids_to_request.is_empty() {
             return Ok(());
         }
 
         let _attempted = self.fixture_texture_cache.poll_png_rgba8(2)?;
 
-        for id in &self.fixture_texture_ids {
+        for id in &ids_to_request {
             if self.renderer.has_texture(id) {
                 continue;
             }
@@ -3559,6 +3658,10 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    fn extract_visible_texture_ids(&self, visibility_list: &[usize], cap: usize) -> Vec<AssetID> {
+        extract_visible_texture_ids_from_scene(&self.scene, visibility_list, cap)
     }
 
     fn handle_input_event(&mut self, event: &WindowEvent) {
@@ -3592,6 +3695,45 @@ impl AppState {
             .as_mut()
             .expect("profile state should be initialized")
     }
+}
+
+fn extract_visible_texture_ids_from_scene(
+    scene: &Scene,
+    visibility_list: &[usize],
+    cap: usize,
+) -> Vec<AssetID> {
+    if cap == 0 {
+        return Vec::new();
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    'instance_loop: for &id in visibility_list {
+        if let Some(instance) = scene.instances.get(&id) {
+            // Default material
+            let default_ids: Vec<AssetID> = instance.materials.default.texture_ids();
+            for texture_id in default_ids {
+                if !texture_id.is_empty() {
+                    ids.insert(texture_id);
+                    if ids.len() >= cap {
+                        break 'instance_loop;
+                    }
+                }
+            }
+            // Per-face materials
+            for mat in instance.materials.by_face.values() {
+                let face_ids: Vec<AssetID> = mat.texture_ids();
+                for texture_id in face_ids {
+                    if !texture_id.is_empty() {
+                        ids.insert(texture_id);
+                        if ids.len() >= cap {
+                            break 'instance_loop;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ids.into_iter().collect()
 }
 
 impl InputState {
@@ -3827,6 +3969,10 @@ fn fixture_texture_ids_from_env() -> Vec<viewer_core::AssetID> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use viewer_core::{
+        AlphaMode, AssetID, GeometrySource, InstanceRole, MaterialDescriptor, MaterialSet,
+        MeshKind, RenderableInstance, TextureEntry, Transform,
+    };
     use viewer_grid::{GridLoginError, GridLoginErrorClass};
 
     #[test]
@@ -4361,5 +4507,75 @@ mod tests {
             Some(&viewer_time_second)
         ));
         assert!(should_apply_live_visual_snapshot(Some(&first), None));
+    }
+
+    #[test]
+    fn test_extract_visible_texture_ids_is_deterministic_and_capped() {
+        let mut scene = Scene::prototype();
+
+        // Instance 1: tex_b, tex_c
+        let mut mat1 = MaterialSet::default();
+        mat1.default = MaterialDescriptor::Legacy(TextureEntry {
+            texture_id: AssetID::new("tex_b"),
+            ..TextureEntry::default()
+        });
+        mat1.by_face.insert(
+            1,
+            MaterialDescriptor::Legacy(TextureEntry {
+                texture_id: AssetID::new("tex_c"),
+                ..TextureEntry::default()
+            }),
+        );
+        scene.instances.insert(
+            1,
+            RenderableInstance::new(
+                GeometrySource::Diagnostic(MeshKind::Cube),
+                InstanceRole::SceneStatic,
+                Transform::default(),
+                [1.0, 1.0, 1.0, 1.0],
+                AlphaMode::Opaque,
+            )
+            .with_materials(mat1),
+        );
+
+        // Instance 2: tex_a
+        let mut mat2 = MaterialSet::default();
+        mat2.default = MaterialDescriptor::Legacy(TextureEntry {
+            texture_id: AssetID::new("tex_a"),
+            ..TextureEntry::default()
+        });
+        scene.instances.insert(
+            2,
+            RenderableInstance::new(
+                GeometrySource::Diagnostic(MeshKind::Cube),
+                InstanceRole::SceneStatic,
+                Transform::default(),
+                [1.0, 1.0, 1.0, 1.0],
+                AlphaMode::Opaque,
+            )
+            .with_materials(mat2),
+        );
+
+        // Test determinism (BTreeSet should sort tex_a, tex_b, tex_c regardless of discovery order)
+        let ids = extract_visible_texture_ids_from_scene(&scene, &[1, 2], 10);
+        assert_eq!(
+            ids,
+            vec![
+                AssetID::new("tex_a"),
+                AssetID::new("tex_b"),
+                AssetID::new("tex_c")
+            ]
+        );
+
+        // Test capping
+        let ids_capped = extract_visible_texture_ids_from_scene(&scene, &[1, 2], 2);
+        // tex_b and tex_c are found in instance 1. tex_a in instance 2.
+        // If cap is 2, it should stop after finding tex_b and tex_c from instance 1.
+        // Then BTreeSet sorts them -> tex_b, tex_c.
+        assert_eq!(ids_capped.len(), 2);
+        assert_eq!(
+            ids_capped,
+            vec![AssetID::new("tex_b"), AssetID::new("tex_c")]
+        );
     }
 }
