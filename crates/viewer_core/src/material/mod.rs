@@ -88,6 +88,30 @@ pub enum MaterialDescriptor {
     Pbr(PbrDescriptor),
 }
 
+impl MaterialDescriptor {
+    pub fn texture_ids(&self) -> Vec<crate::AssetID> {
+        match self {
+            Self::Legacy(entry) => vec![entry.texture_id.clone()],
+            Self::Pbr(pbr) => {
+                let mut ids = Vec::with_capacity(4);
+                if !pbr.base_color_id.is_empty() {
+                    ids.push(pbr.base_color_id.clone());
+                }
+                if !pbr.normal_id.is_empty() {
+                    ids.push(pbr.normal_id.clone());
+                }
+                if !pbr.metallic_roughness_id.is_empty() {
+                    ids.push(pbr.metallic_roughness_id.clone());
+                }
+                if !pbr.emissive_id.is_empty() {
+                    ids.push(pbr.emissive_id.clone());
+                }
+                ids
+            }
+        }
+    }
+}
+
 impl Default for MaterialDescriptor {
     fn default() -> Self {
         Self::Legacy(TextureEntry::default())

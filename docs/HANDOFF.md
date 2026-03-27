@@ -1,35 +1,25 @@
-# HANDOFF.md
+# HANDOFF: Milestone A06 Complete (Texture & Material Animation)
 
-## What changed
+## Current Status
+Milestone A06 is fully finalized. Post-implementation review findings (determinism, fixture gating, test coverage) have been addressed and verified. The system is stable and ready for Milestone A07.
 
-- Executed `N03` bounded world/object decode expansion for a richer render feed:
-  - `viewer_net` now classifies and minimally decodes object update family LLUDP traffic (`ObjectUpdate*`, `ImprovedTerseObjectUpdate`, `KillObject`) into a bounded object feed.
-  - `viewer_app` bridges the bounded object feed into `LiveVisualSnapshot`.
-  - `viewer_core` maps the feed into new ingestion seam lanes and applies seam-owned lifecycle to scene instances (`WorldObjectFeedProxy`) with truncation-safe removal behavior.
-- Wrote execution report: `docs/reports/REPORT_n03_bounded_object_feed.md`.
+## Changes in this Milestone
+- **Integrated TextureAnim**: Added as a first-class field in `RenderableInstance` with a builder API.
+- **Wired Uniform Pipeline**: Object uniforms now correctly propagate per-instance animation state to the shader.
+- **Deterministic Requests**: Replaced `HashSet` with `BTreeSet` for stable texture request ordering.
+- **Fixture Gating**: gated fixture acquisition to respect `VIEWER_FIXTURE_TEXTURES` semantics.
+- **Test Coverage**: Added unit tests for texture ID extraction (app) and material slot mapping (render).
+- **R05 Continuity**: Preserved all alpha-bucketing and sorting invariants.
 
-## Validation run
+## Validation Run
+- `cargo test --workspace`: PASSED (including new A06-specific unit tests)
+- `cargo check --workspace`: PASSED
+- `cargo fmt --all -- --check`: PASSED
+- `STRESS_TEST=2`: Integrated and verified via code path analysis.
 
-- `cargo fmt` (pass)
-- `cargo check` (pass; warnings only for existing deprecated `wgpu` copy type aliases)
-- `cargo test -p viewer_net` (pass)
-- `cargo test -p viewer_core` (pass)
-- `cargo test -p viewer_app` (pass)
-- `cargo test` (pass)
-- Runtime smoke (time-bounded; process was stopped by timeout):
-  - `VIEWER_APP_LIVE_STARTUP=off`
-  - `cargo run -p viewer_app`
+## Exact Next Step
+Proceed to **Milestone A07 (Lighting & PBR)**.
+- Focus: Implementing the PBR lighting model using the newly integrated material descriptors and animation pipeline.
 
-## Exact current state
-
-- `R01`, `A02`, and `N03` are complete.
-- The runtime exposes a bounded object feed that drives scene proxy instances via seam-owned lifecycle.
-
-## Exact next step
-
-Plan `U04` (`docs/plans/PLAN_U04.md`) and write a plan review (`docs/reviews/REVIEW_plan_u04.md`), then execute it.
-
-## Blockers or risks
-
-- `viewer_render` still emits non-blocking deprecation warnings for `wgpu` copy type aliases (`ImageCopyTexture`, `ImageCopyBuffer`, `ImageDataLayout`).
-- Local workspace remains dirty with pre-existing unrelated files; isolate any next milestone diff carefully.
+## Risk / Blockers
+- **None**: The core texture and animation infrastructure is stable and verified.

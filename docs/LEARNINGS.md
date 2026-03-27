@@ -243,3 +243,17 @@ more than one session to establish correctly.
 **Rule for future plans:** All procedural geometry generators must emit `SubMesh` units that map to these canonical SL face IDs. Never merge distinct SL faces into a single mesh without preserving the ID-based look-up path.
 
 **Files affected:** `viewer_core::geometry::llvolume`.
+
+---
+
+## L16 — `white_view` fallback for empty texture IDs ensures valid bind groups
+
+**Category:** Rendering / `viewer_render`
+
+**Learned when:** Implementing Milestone A06 (Texture & Material Integration).
+
+**What happened:** When a `MaterialDescriptor` has an empty `AssetID` for a texture slot, the renderer must still provide a valid `wgpu::TextureView` to the bind group. Using the loading (yellow) or missing (magenta) views for "legally empty" slots (like an unassigned normal map) would produce visual noise. An opaque white 1x1 texture is used instead to ensure the shader's multiplication (`base_color * mesh_color`) remains identity when no texture is intended.
+
+**Rule for future plans:** Always use `white_view` as the fallback for empty or unassigned texture slots in `create_material_bind_group`. Reserve `loading_view` and `missing_view` for cases where an ID is present but the asset is not yet available.
+
+**Files affected:** `viewer_render::RenderBackend`.
