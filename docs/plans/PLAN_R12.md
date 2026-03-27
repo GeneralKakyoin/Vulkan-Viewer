@@ -43,19 +43,38 @@ Introduce a bounded environment rendering baseline (ambient/sky/fog/time-of-day 
 
 ## Files and components touched
 - `crates/viewer_core/src/lib.rs`
-  - `EnvironmentState` structs/enums/defaults
-  - serialization-safe additive fields where required
-  - tests
+  - extend `EnvironmentState` with bounded atmosphere controls:
+    - `time_of_day_normalized: f32` (0.0..=1.0)
+    - `fog_enabled: bool`
+    - `sky_enabled: bool`
+  - add `impl EnvironmentState { fn sanitized(self) -> Self }` to clamp/normalize values before renderer use
+  - serialization-safe additive fields (`#[serde(default)]` on all new fields)
+  - tests for defaults + serde backward compatibility + clamping behavior
 - `crates/viewer_render/src/lib.rs`
-  - environment uniform structs/buffer updates
-  - shader updates for ambient/fog/sky influence
-  - tests
+  - extend `EnvironmentUniform` packing:
+    - `flags: vec4<f32>` where x=`fog_enabled`, y=`sky_enabled`, z/w reserved
+    - `time_params: vec4<f32>` where x=`time_of_day_normalized`, y/z/w reserved
+  - update `upload_environment_uniforms(...)` to consume `env.sanitized()`
+  - shader updates:
+    - use deterministic ambient mix (no unbounded brighten)
+    - fog blend guarded by `fog_enabled`
+    - keep alpha test/discard semantics unchanged
+  - tests:
+    - uniform packing/flags
+    - clamped fog behavior
+    - alpha path unaffected by environment toggles
 - `crates/viewer_app/src/main.rs`
-  - wiring and fallback mapping for environment state
-  - tests
+  - keep `AppState.environment` as source of truth
+  - add `fn derive_environment_from_snapshot(snapshot: Option<&LiveVisualSnapshot>) -> EnvironmentState`
+  - call derivation only when snapshot meaningfully changes (preserve dirty-only behavior)
+  - tests for deterministic fallback when snapshot is absent or partial
 - `crates/viewer_ui/src/lib.rs` (if touched)
-  - read-only diagnostics display for environment values
-  - tests
+  - add read-only diagnostics lines in existing Diagnostics window:
+    - `env.time_of_day_normalized`
+    - `env.fog_enabled`
+    - `env.sky_enabled`
+    - fog start/end/density
+  - tests for deterministic line formatting
 
 ## Boundary check
 - `viewer_core` owns environment domain contracts.
@@ -65,30 +84,53 @@ Introduce a bounded environment rendering baseline (ambient/sky/fog/time-of-day 
 - No environment policy in `viewer_net`/`viewer_grid` unless and until live source integration is explicitly planned.
 
 ## Step sequence
-1. Define typed environment contract in core
-   - add structs/enums with deterministic defaults
-   - keep additive and backward-compatible.
-2. Add renderer environment uniform path
-   - create/update uniform buffers in existing frame update path
-   - keep pipeline creation at startup only.
-3. Integrate shader logic (bounded)
-   - ambient modulation
-   - fog influence with clamped parameters
-   - bounded sky tint path for background/readability.
-4. Wire app mapping/fallback
-   - map current state to environment defaults
-   - ensure deterministic behavior when no live environment source exists.
-5. Add optional diagnostics lines
-   - show environment state values in diagnostics for smoke verification.
-6. Add tests
-   - `viewer_core`: default/serialization tests
-   - `viewer_render`: uniform packing, clamp behavior, fallback path tests
-   - `viewer_app`: mapping/fallback tests
-   - `viewer_ui` (if touched): deterministic line rendering helpers.
-7. Runtime verification
-   - offline smoke with screenshot mode
-   - verify deterministic visual effect with fixed camera path.
-8. Closeout continuity artifacts.
+1. **Core contract hardening (`viewer_core`)**
+   - Extend `EnvironmentState` with the three additive fields listed above.
+   - Add `#[serde(default)]` for each new field so old snapshots deserialize.
+   - Add `sanitized()` that:
+     - clamps `time_of_day_normalized` to `[0.0, 1.0]`
+     - clamps `fog.density` to `[0.0, 1.0]`
+     - guarantees `fog.end >= fog.start + 0.001`
+   - Keep existing defaults visually neutral (no dramatic tint shift).
+2. **Core tests**
+   - Add `environment_state_defaults_are_deterministic`.
+   - Add `environment_state_deserializes_from_pre_r12_payload`.
+   - Add `environment_state_sanitized_clamps_invalid_values`.
+3. **Renderer uniform expansion (`viewer_render`)**
+   - Extend WGSL `EnvironmentUniform` and matching Rust `#[repr(C)]` struct with `flags` and `time_params`.
+   - Preserve uniform alignment and `bytemuck::Pod` validity.
+   - Update bind/write path only; do not add new runtime-created pipelines.
+4. **Renderer upload path**
+   - In `upload_environment_uniforms`, call `let env = env.sanitized();`.
+   - Convert booleans to `0.0/1.0` in `flags`.
+   - Keep all writes in existing per-frame uniform update flow.
+5. **Shader behavior adjustments**
+   - Ambient: replace additive brighten with bounded mix, e.g. `mix(final_color.rgb, final_color.rgb + env.ambient_color.rgb, 0.35)`.
+   - Fog: apply only when `env.flags.x > 0.5`.
+   - Sky: if `env.flags.y <= 0.5`, skip sky gradient influence and use current fallback.
+   - Keep alpha-test and blend ordering exactly as current R05/A06 behavior.
+6. **Renderer tests**
+   - Add unit test for `EnvironmentUniform` packing and flag encoding.
+   - Add regression test ensuring fog-disabled path is visually no-op in shader math helpers (or CPU-side precompute helper if used).
+7. **App mapping (`viewer_app`)**
+   - Add `derive_environment_from_snapshot(...)` near snapshot mapping helpers.
+   - Derivation rules:
+     - `None` snapshot => `EnvironmentState::default()`
+     - missing/partial fields => defaults for missing pieces
+     - continuity degraded/stalled may slightly increase fog density, but clamp via `sanitized()`
+   - Assign `self.environment` only when derived value changed.
+8. **App tests**
+   - Add `derive_environment_from_snapshot_uses_defaults_when_absent`.
+   - Add `derive_environment_from_snapshot_clamps_and_is_deterministic`.
+9. **UI diagnostics (`viewer_ui`)**
+   - In Diagnostics panel, add four to six read-only lines in the existing environment section (or create a small subsection under Performance & Metrics).
+   - Do not add mutating controls in R12.
+10. **UI tests (if UI touched)**
+   - Add deterministic text-line test similar to existing `live_visual_lines_*` tests.
+11. **Runtime verification**
+   - Run screenshot smoke with fixed camera path and compare two sequential captures for deterministic environment output.
+12. **Continuity closeout**
+   - Update report/handoff/current-state with exact field additions and validation outcomes.
 
 ## Validation plan
 - Always:
@@ -128,4 +170,3 @@ Introduce a bounded environment rendering baseline (ambient/sky/fog/time-of-day 
 - No crate boundary violations introduced.
 - Validation commands pass (or blockers are documented).
 - Continuity docs updated with exact state and next step.
-
