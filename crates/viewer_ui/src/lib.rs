@@ -4,8 +4,9 @@ use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileFreshness, ProfileLoadStatus,
-    RuntimeRelayLevel, SessionUxReason, SessionUxStatus, SocialState, WorldAvatarPlaceholder,
+    ChatSendStatus, ChatState, HandoffOutcome, HandoffReason, LiveVisualSnapshot, ProfileFreshness,
+    ProfileLoadStatus, RuntimeRelayLevel, SessionUxReason, SessionUxStatus, SocialState,
+    WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -46,7 +47,13 @@ fn live_visual_lines(snapshot: Option<&LiveVisualSnapshot>) -> Vec<String> {
                 lines.push(String::from("Traffic summary: unavailable"));
             }
 
-            lines.push(format!("Continuity Phase: {:?}", snapshot.continuity.phase));
+            lines.push(format!(
+                "Continuity Phase: {:?} ({:?}, {}, {}ms)",
+                snapshot.continuity.phase,
+                snapshot.continuity.outcome,
+                handoff_reason_label(snapshot.continuity.reason),
+                snapshot.continuity.phase_age_ms
+            ));
             if let Some([x, y]) = snapshot.continuity.active_region_coords {
                 lines.push(format!("Active Region: {}, {}", x, y));
             }
@@ -269,6 +276,7 @@ pub struct RenderInput<'a> {
     pub total_instances: usize,
     pub visible_proxies: usize,
     pub fixture_texture_metrics: viewer_core::AssetContinuityMetrics,
+    pub environment: &'a viewer_core::EnvironmentState,
     pub show_chat_window: bool,
 }
 
@@ -328,6 +336,24 @@ fn session_status_chip(
             ("reconnecting", egui::Color32::YELLOW, *reason)
         }
         SessionUxStatus::Failed { reason } => ("failed", egui::Color32::RED, Some(*reason)),
+    }
+}
+
+fn handoff_outcome_chip(outcome: HandoffOutcome) -> (&'static str, egui::Color32) {
+    match outcome {
+        HandoffOutcome::Normal => ("normal", egui::Color32::GREEN),
+        HandoffOutcome::Degraded => ("degraded", egui::Color32::YELLOW),
+        HandoffOutcome::Stalled => ("STALLED", egui::Color32::RED),
+    }
+}
+
+fn handoff_reason_label(reason: HandoffReason) -> &'static str {
+    match reason {
+        HandoffReason::None => "none",
+        HandoffReason::LateConfirmation => "late_confirmation",
+        HandoffReason::StaleWindowExceeded => "stale_window",
+        HandoffReason::MissingCrossedRegion => "missing_crossed",
+        HandoffReason::NetworkJitter => "jitter",
     }
 }
 
@@ -478,6 +504,7 @@ impl UiSystem {
             total_instances,
             visible_proxies,
             fixture_texture_metrics,
+            environment,
             show_chat_window: _show_chat_window,
         } = input;
         if surface_size.width == 0 || surface_size.height == 0 {
@@ -587,6 +614,41 @@ impl UiSystem {
                             ));
                         });
 
+                    egui::CollapsingHeader::new("Environment")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label(format!(
+                                "Time of day: {:.3}",
+                                environment.time_of_day_normalized
+                            ));
+                            ui.label(format!(
+                                "Sky/Fog enabled: {}/{}",
+                                environment.sky_enabled, environment.fog_enabled
+                            ));
+                            ui.label(format!(
+                                "Ambient: [{:.2}, {:.2}, {:.2}]",
+                                environment.ambient.color[0],
+                                environment.ambient.color[1],
+                                environment.ambient.color[2]
+                            ));
+                            ui.label(format!(
+                                "Sky Top: [{:.2}, {:.2}, {:.2}]",
+                                environment.sky.top_color[0],
+                                environment.sky.top_color[1],
+                                environment.sky.top_color[2]
+                            ));
+                            ui.label(format!(
+                                "Sky Bottom: [{:.2}, {:.2}, {:.2}]",
+                                environment.sky.bottom_color[0],
+                                environment.sky.bottom_color[1],
+                                environment.sky.bottom_color[2]
+                            ));
+                            ui.label(format!(
+                                "Fog: density={:.3}, start={:.1}, end={:.1}",
+                                environment.fog.density, environment.fog.start, environment.fog.end
+                            ));
+                        });
+
                     egui::CollapsingHeader::new("Camera")
                         .default_open(false)
                         .show(ui, |ui| {
@@ -616,6 +678,14 @@ impl UiSystem {
                                 ui.label("Focus: Presence & Continuity");
                                 ui.scroll_to_cursor(Some(egui::Align::TOP));
                                 focus_continuity = false;
+                            }
+                            if let Some(snapshot) = live_visual {
+                                let (outcome_text, outcome_color) =
+                                    handoff_outcome_chip(snapshot.continuity.outcome);
+                                ui.horizontal(|ui| {
+                                    ui.label("Handoff health:");
+                                    ui.colored_label(outcome_color, outcome_text);
+                                });
                             }
                             for line in live_visual_lines(live_visual) {
                                 ui.label(line);

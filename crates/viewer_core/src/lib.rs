@@ -84,7 +84,7 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub fn frustum(&self, aspect: f32) -> Frustum {
+    pub fn view_projection(&self, aspect: f32) -> [[f32; 4]; 4] {
         let forward = [
             self.pitch.cos() * self.yaw.cos(),
             self.pitch.sin(),
@@ -92,8 +92,157 @@ impl Camera {
         ];
         let view = look_to_rh(self.position, forward, [0.0, 1.0, 0.0]);
         let projection = perspective_rh_zo(60.0f32.to_radians(), aspect, 0.1, 1000.0);
-        let view_projection = mat4_mul(projection, view);
-        Frustum::from_view_projection(view_projection)
+        mat4_mul(projection, view)
+    }
+
+    pub fn frustum(&self, aspect: f32) -> Frustum {
+        Frustum::from_view_projection(self.view_projection(aspect))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AmbientState {
+    pub color: [f32; 4],
+}
+
+impl Default for AmbientState {
+    fn default() -> Self {
+        Self {
+            color: [0.1, 0.1, 0.1, 1.0], // Neutral dark-gray ambient
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SkyState {
+    pub top_color: [f32; 4],
+    pub bottom_color: [f32; 4],
+}
+
+impl Default for SkyState {
+    fn default() -> Self {
+        Self {
+            top_color: [0.1, 0.2, 0.4, 1.0],    // Dark blue/evening sky top
+            bottom_color: [0.2, 0.3, 0.5, 1.0], // Slightly lighter horizon
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FogState {
+    pub color: [f32; 4],
+    pub density: f32,
+    pub start: f32,
+    pub end: f32,
+}
+
+impl Default for FogState {
+    fn default() -> Self {
+        Self {
+            color: [0.2, 0.3, 0.5, 1.0], // Same as sky bottom for atmosphere
+            density: 0.01,
+            start: 10.0,
+            end: 1000.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentState {
+    pub ambient: AmbientState,
+    pub sky: SkyState,
+    pub fog: FogState,
+    #[serde(default = "default_environment_time_of_day_normalized")]
+    pub time_of_day_normalized: f32,
+    #[serde(default = "default_environment_sky_enabled")]
+    pub sky_enabled: bool,
+    #[serde(default = "default_environment_fog_enabled")]
+    pub fog_enabled: bool,
+}
+
+fn default_environment_time_of_day_normalized() -> f32 {
+    0.5
+}
+
+const fn default_environment_sky_enabled() -> bool {
+    true
+}
+
+const fn default_environment_fog_enabled() -> bool {
+    true
+}
+
+impl EnvironmentState {
+    pub fn sanitized(self) -> Self {
+        let mut sanitized = self;
+        sanitized.time_of_day_normalized = sanitized.time_of_day_normalized.clamp(0.0, 1.0);
+        sanitized.fog.density = sanitized.fog.density.clamp(0.0, 1.0);
+        sanitized.fog.start = sanitized.fog.start.max(0.0);
+        sanitized.fog.end = sanitized.fog.end.max(sanitized.fog.start + 0.001);
+        for channel in &mut sanitized.ambient.color {
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        for channel in &mut sanitized.sky.top_color {
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        for channel in &mut sanitized.sky.bottom_color {
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        for channel in &mut sanitized.fog.color {
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        sanitized
+    }
+}
+
+impl Default for EnvironmentState {
+    fn default() -> Self {
+        Self {
+            ambient: AmbientState::default(),
+            sky: SkyState::default(),
+            fog: FogState::default(),
+            time_of_day_normalized: default_environment_time_of_day_normalized(),
+            sky_enabled: default_environment_sky_enabled(),
+            fog_enabled: default_environment_fog_enabled(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod environment_state_tests {
+    use super::*;
+
+    #[test]
+    fn environment_state_defaults_are_deterministic() {
+        let env = EnvironmentState::default();
+        assert_eq!(env.time_of_day_normalized, 0.5);
+        assert!(env.sky_enabled);
+        assert!(env.fog_enabled);
+        assert_eq!(env.fog.start, 10.0);
+        assert_eq!(env.fog.end, 1000.0);
+    }
+
+    #[test]
+    fn environment_state_sanitized_clamps_invalid_values() {
+        let env = EnvironmentState {
+            fog: FogState {
+                density: 99.0,
+                start: -10.0,
+                end: -5.0,
+                ..FogState::default()
+            },
+            time_of_day_normalized: -3.0,
+            ambient: AmbientState {
+                color: [2.0, -1.0, 0.5, 2.0],
+            },
+            ..EnvironmentState::default()
+        };
+        let sanitized = env.sanitized();
+        assert_eq!(sanitized.time_of_day_normalized, 0.0);
+        assert_eq!(sanitized.fog.density, 1.0);
+        assert_eq!(sanitized.fog.start, 0.0);
+        assert!(sanitized.fog.end >= sanitized.fog.start + 0.001);
+        assert_eq!(sanitized.ambient.color, [1.0, 0.0, 0.5, 1.0]);
     }
 }
 
@@ -613,6 +762,35 @@ pub enum HandoffPhase {
     Completed,
 }
 
+impl HandoffPhase {
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Crossed => 1,
+            Self::Confirming => 2,
+            Self::Completed => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HandoffOutcome {
+    #[default]
+    Normal,
+    Degraded,
+    Stalled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HandoffReason {
+    #[default]
+    None,
+    LateConfirmation,
+    StaleWindowExceeded,
+    MissingCrossedRegion,
+    NetworkJitter,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct BoundedNeighborSummary {
     pub region_handle: u64,
@@ -623,6 +801,9 @@ pub struct BoundedNeighborSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RegionContinuitySummary {
     pub phase: HandoffPhase,
+    pub outcome: HandoffOutcome,
+    pub reason: HandoffReason,
+    pub phase_age_ms: u64,
     pub active_region_coords: Option<[u32; 2]>,
     pub previous_region_coords: Option<[u32; 2]>,
     pub neighbors: Vec<BoundedNeighborSummary>,
@@ -4750,6 +4931,9 @@ mod tests {
         let mut snapshot = sample_snapshot(true, true);
         snapshot.continuity = RegionContinuitySummary {
             phase: HandoffPhase::Confirming,
+            outcome: HandoffOutcome::Normal,
+            reason: HandoffReason::None,
+            phase_age_ms: 0,
             active_region_coords: Some([1024, 2048]),
             previous_region_coords: Some([1023, 2048]),
             neighbors: vec![BoundedNeighborSummary {

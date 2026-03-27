@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use viewer_core::{
     AlphaMode, AssetID, AvatarRenderMode, Camera, GeometrySource, MaterialDescriptor, MeshKind,
-    Scene, Vertex, flatten_mat4, look_to_rh, mat4_mul, perspective_rh_zo,
+    Scene, Vertex, flatten_mat4,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -43,6 +43,8 @@ pub struct RenderBackend {
     object_buffer: Buffer,
     object_bind_group: wgpu::BindGroup,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    environment_buffer: Buffer,
+    environment_bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     loading_view: wgpu::TextureView,
     missing_view: wgpu::TextureView,
@@ -136,7 +138,7 @@ impl RenderBackend {
 
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera_uniform_buffer"),
-            size: 64,
+            size: 80,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -158,7 +160,7 @@ impl RenderBackend {
                 label: Some("camera_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -178,6 +180,21 @@ impl RenderBackend {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
                         min_binding_size: NonZeroU64::new(144),
+                    },
+                    count: None,
+                }],
+            });
+
+        let environment_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("environment_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 }],
@@ -258,6 +275,22 @@ impl RenderBackend {
             }],
         });
 
+        let environment_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("environment_uniform_buffer"),
+            size: 112, // 7 * vec4<f32> (16 bytes each) = 112 bytes
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let environment_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("environment_bind_group"),
+            layout: &environment_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: environment_buffer.as_entire_binding(),
+            }],
+        });
+
         let scene_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("scene_shader"),
             source: ShaderSource::Wgsl(SCENE_SHADER.into()),
@@ -269,6 +302,7 @@ impl RenderBackend {
                 &camera_bind_group_layout,
                 &object_bind_group_layout,
                 &texture_bind_group_layout,
+                &environment_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -583,6 +617,8 @@ impl RenderBackend {
             object_buffer,
             object_bind_group,
             texture_bind_group_layout,
+            environment_buffer,
+            environment_bind_group,
             sampler,
             loading_view,
             missing_view,
@@ -736,6 +772,7 @@ impl RenderBackend {
         &mut self,
         camera: &Camera,
         scene: &Scene,
+        environment: &viewer_core::EnvironmentState,
         visibility_list: &[usize],
         time: f32,
         capture_path: Option<&Path>,
@@ -766,6 +803,8 @@ impl RenderBackend {
             .create_view(&TextureViewDescriptor::default());
 
         self.update_camera_uniform(camera);
+        self.upload_environment_uniforms(environment);
+        let clear_color = blend_clear_color_from_environment(environment);
         let sorted_visibility = build_draw_list(
             &scene.instances,
             visibility_list,
@@ -788,10 +827,10 @@ impl RenderBackend {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.09,
-                            b: 0.11,
-                            a: 1.0,
+                            r: clear_color[0] as f64,
+                            g: clear_color[1] as f64,
+                            b: clear_color[2] as f64,
+                            a: clear_color[3] as f64,
                         }),
                         store: StoreOp::Store,
                     },
@@ -809,6 +848,7 @@ impl RenderBackend {
             });
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(3, &self.environment_bind_group, &[]);
             let mut object_offset_index = 0usize;
 
             for &id in &sorted_visibility {
@@ -1015,29 +1055,31 @@ impl RenderBackend {
     }
 
     fn update_camera_uniform(&self, camera: &Camera) {
-        if DEBUG_CLIP_SPACE_TRIANGLE {
-            let identity = [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ];
-            self.queue
-                .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&identity));
-            return;
-        }
-
-        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let projection = perspective_rh_zo(60.0_f32.to_radians(), aspect, 0.1, 100.0);
-
-        let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
-        let (sin_pitch, cos_pitch) = camera.pitch.sin_cos();
-        let forward = [cos_pitch * cos_yaw, sin_pitch, cos_pitch * sin_yaw];
-        let view = look_to_rh(camera.position, forward, [0.0, 1.0, 0.0]);
-        let view_projection = mat4_mul(projection, view);
-
+        let view_projection = camera.view_projection(self.aspect_ratio());
+        let camera_uniform: [f32; 20] = [
+            view_projection[0][0],
+            view_projection[0][1],
+            view_projection[0][2],
+            view_projection[0][3],
+            view_projection[1][0],
+            view_projection[1][1],
+            view_projection[1][2],
+            view_projection[1][3],
+            view_projection[2][0],
+            view_projection[2][1],
+            view_projection[2][2],
+            view_projection[2][3],
+            view_projection[3][0],
+            view_projection[3][1],
+            view_projection[3][2],
+            view_projection[3][3],
+            camera.position[0],
+            camera.position[1],
+            camera.position[2],
+            1.0,
+        ];
         self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_projection));
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
     }
 
     fn upload_object_uniforms(
@@ -1252,6 +1294,45 @@ impl RenderBackend {
             bytemuck::bytes_of(&object_uniform),
         );
     }
+
+    fn upload_environment_uniforms(&self, env: &viewer_core::EnvironmentState) {
+        let env = env.sanitized();
+        let env_uniform: [f32; 28] = [
+            env.ambient.color[0],
+            env.ambient.color[1],
+            env.ambient.color[2],
+            env.ambient.color[3],
+            env.sky.top_color[0],
+            env.sky.top_color[1],
+            env.sky.top_color[2],
+            env.sky.top_color[3],
+            env.sky.bottom_color[0],
+            env.sky.bottom_color[1],
+            env.sky.bottom_color[2],
+            env.sky.bottom_color[3],
+            env.fog.color[0],
+            env.fog.color[1],
+            env.fog.color[2],
+            env.fog.color[3],
+            env.fog.density,
+            env.fog.start,
+            env.fog.end,
+            0.0,
+            if env.fog_enabled { 1.0 } else { 0.0 },
+            if env.sky_enabled { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+            env.time_of_day_normalized,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        self.queue.write_buffer(
+            &self.environment_buffer,
+            0,
+            bytemuck::bytes_of(&env_uniform),
+        );
+    }
 }
 
 fn align_up(value: u64, alignment: u64) -> u64 {
@@ -1357,6 +1438,21 @@ fn multiply_rgba(lhs: [f32; 4], rhs: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+fn blend_clear_color_from_environment(environment: &viewer_core::EnvironmentState) -> [f32; 4] {
+    let env = environment.sanitized();
+    if !env.sky_enabled {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let t = env.time_of_day_normalized;
+    let top_weight = (0.2 + t * 0.6).clamp(0.0, 1.0);
+    [
+        env.sky.bottom_color[0] * (1.0 - top_weight) + env.sky.top_color[0] * top_weight,
+        env.sky.bottom_color[1] * (1.0 - top_weight) + env.sky.top_color[1] * top_weight,
+        env.sky.bottom_color[2] * (1.0 - top_weight) + env.sky.top_color[2] * top_weight,
+        env.sky.bottom_color[3] * (1.0 - top_weight) + env.sky.top_color[3] * top_weight,
+    ]
+}
+
 // model_matrix removed, using pre-computed world_matrix from Scene instead
 
 // Internal math helpers removed, using viewer_core instead
@@ -1368,6 +1464,7 @@ fn multiply_rgba(lhs: [f32; 4], rhs: [f32; 4]) -> [f32; 4] {
 const SCENE_SHADER: &str = r#"
 struct CameraUniform {
     view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
 };
 
 struct ObjectUniform {
@@ -1379,6 +1476,16 @@ struct ObjectUniform {
     _padding: vec2<f32>,
 };
 
+struct EnvironmentUniform {
+    ambient_color: vec4<f32>,
+    sky_top_color: vec4<f32>,
+    sky_bottom_color: vec4<f32>,
+    fog_color: vec4<f32>,
+    fog_params: vec4<f32>, // x: density, y: start, z: end, w: unused
+    flags: vec4<f32>,      // x: fog enabled, y: sky enabled
+    time_params: vec4<f32>, // x: time-of-day [0..1]
+};
+
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 @group(1) @binding(0) var<uniform> object: ObjectUniform;
 
@@ -1387,6 +1494,8 @@ struct ObjectUniform {
 @group(2) @binding(2) var t_mr: texture_2d<f32>;
 @group(2) @binding(3) var t_emissive: texture_2d<f32>;
 @group(2) @binding(4) var s_base: sampler;
+
+@group(3) @binding(0) var<uniform> env: EnvironmentUniform;
 
 struct VsInput {
     @location(0) position: vec3<f32>,
@@ -1398,12 +1507,15 @@ struct VsOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) world_pos: vec3<f32>,
 };
 
 @vertex
 fn vs_main(in: VsInput) -> VsOutput {
     var out: VsOutput;
-    out.clip_position = camera.view_projection * object.model * vec4<f32>(in.position, 1.0);
+    let world_pos = object.model * vec4<f32>(in.position, 1.0);
+    out.clip_position = camera.view_projection * world_pos;
+    out.world_pos = world_pos.xyz;
     
     // Apply UV matrix
     let uv3 = object.uv_matrix * vec3<f32>(in.tex_coord, 1.0);
@@ -1416,11 +1528,36 @@ fn vs_main(in: VsInput) -> VsOutput {
 @fragment
 fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
     let base_color = textureSample(t_base, s_base, in.tex_coord);
-    let final_color = base_color * in.color;
+    var final_color = base_color * in.color;
     
     if (object.alpha_mode == 1u && final_color.a < object.alpha_cutoff) {
         discard;
     }
+
+    // Apply ambient modulation with bounded contribution.
+    let ambient_tinted = final_color.rgb + env.ambient_color.rgb;
+    final_color = vec4<f32>(mix(final_color.rgb, ambient_tinted, 0.35), final_color.a);
+
+    // Apply bounded sky tint for readability.
+    if (env.flags.y > 0.5) {
+        let sky_t = clamp(in.world_pos.y * 0.02 + 0.5, 0.0, 1.0);
+        let sky_color = mix(env.sky_bottom_color.rgb, env.sky_top_color.rgb, sky_t);
+        final_color = vec4<f32>(mix(final_color.rgb, final_color.rgb * sky_color, 0.15), final_color.a);
+    }
+
+    // Apply distance fog from camera position.
+    if (env.flags.x > 0.5) {
+        let depth = distance(in.world_pos, camera.camera_position.xyz);
+        let fog_start = max(env.fog_params.y, 0.0);
+        let fog_end = max(env.fog_params.z, fog_start + 0.001);
+        let linear_factor = clamp((depth - fog_start) / (fog_end - fog_start), 0.0, 1.0);
+        let density = clamp(env.fog_params.x, 0.0, 1.0);
+        let fog_distance = max(depth - fog_start, 0.0);
+        let exp_factor = 1.0 - exp(-density * fog_distance);
+        let fog_factor = min(linear_factor, exp_factor);
+        final_color = vec4<f32>(mix(final_color.rgb, env.fog_color.rgb, fog_factor), final_color.a);
+    }
+
     return final_color;
 }
 "#;
@@ -1428,6 +1565,7 @@ fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
 const AXIS_SHADER: &str = r#"
 struct CameraUniform {
     view_projection: mat4x4<f32>,
+    camera_position: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -1521,5 +1659,34 @@ mod tests {
         let lhs = [0.5, 0.25, 1.0, 0.8];
         let rhs = [0.2, 1.0, 0.5, 0.25];
         assert_eq!(multiply_rgba(lhs, rhs), [0.1, 0.25, 0.5, 0.2]);
+    }
+
+    #[test]
+    fn clear_color_blends_sky_top_and_bottom_when_enabled() {
+        let env = viewer_core::EnvironmentState {
+            sky: viewer_core::SkyState {
+                top_color: [1.0, 1.0, 1.0, 1.0],
+                bottom_color: [0.0, 0.0, 0.0, 1.0],
+            },
+            time_of_day_normalized: 0.5,
+            ..viewer_core::EnvironmentState::default()
+        };
+        let clear = blend_clear_color_from_environment(&env);
+        assert!(clear[0] > 0.0 && clear[0] < 1.0);
+        assert!(clear[1] > 0.0 && clear[1] < 1.0);
+        assert!(clear[2] > 0.0 && clear[2] < 1.0);
+        assert_eq!(clear[3], 1.0);
+    }
+
+    #[test]
+    fn clear_color_is_black_when_sky_disabled() {
+        let env = viewer_core::EnvironmentState {
+            sky_enabled: false,
+            ..viewer_core::EnvironmentState::default()
+        };
+        assert_eq!(
+            blend_clear_color_from_environment(&env),
+            [0.0, 0.0, 0.0, 1.0]
+        );
     }
 }

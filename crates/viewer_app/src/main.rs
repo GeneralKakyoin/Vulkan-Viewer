@@ -81,6 +81,7 @@ struct AppState {
     profile_state: Option<AvatarProfileState>,
     profile_image_bytes: BTreeMap<String, Vec<u8>>,
     social_cache: Option<SocialCache>,
+    environment: viewer_core::EnvironmentState,
     last_frame_time: Instant,
     app_start_time: Instant,
     smoothed_fps: f32,
@@ -2119,31 +2120,46 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
         })
         .collect();
     snapshot.decoded_object_feed_recent_kills = decoded.object_feed_recent_kills.clone();
-    snapshot.continuity = map_net_continuity_to_core(connection.continuity_summary());
+    let continuity_summary = connection.continuity_summary();
+    snapshot.continuity = map_net_continuity_to_core(&continuity_summary);
 }
 
 fn map_net_continuity_to_core(
-    summary: &viewer_net::RegionContinuitySummary,
+    summary: &viewer_core::RegionContinuitySummary,
 ) -> viewer_core::RegionContinuitySummary {
-    viewer_core::RegionContinuitySummary {
-        phase: match summary.phase {
-            viewer_net::HandoffPhase::None => viewer_core::HandoffPhase::None,
-            viewer_net::HandoffPhase::Crossed => viewer_core::HandoffPhase::Crossed,
-            viewer_net::HandoffPhase::Confirming => viewer_core::HandoffPhase::Confirming,
-            viewer_net::HandoffPhase::Completed => viewer_core::HandoffPhase::Completed,
-        },
-        active_region_coords: summary.active_region_coords,
-        previous_region_coords: summary.previous_region_coords,
-        neighbors: summary
-            .neighbors
-            .iter()
-            .map(|n| viewer_core::BoundedNeighborSummary {
-                region_handle: n.region_handle,
-                region_x: n.region_x,
-                region_y: n.region_y,
-            })
-            .collect(),
+    let mut mapped = summary.clone();
+    let (outcome, reason) = viewer_grid::continuity::classify_handoff_diagnostics(&mapped);
+    mapped.outcome = outcome;
+    mapped.reason = reason;
+    mapped
+}
+
+fn derive_environment_from_snapshot(
+    snapshot: Option<&LiveVisualSnapshot>,
+) -> viewer_core::EnvironmentState {
+    let mut env = viewer_core::EnvironmentState::default();
+    let Some(snapshot) = snapshot else {
+        return env.sanitized();
+    };
+
+    let seconds_of_day = (snapshot.observed_at_unix_ms / 1000) % 86_400;
+    env.time_of_day_normalized = seconds_of_day as f32 / 86_400.0;
+
+    match snapshot.continuity.outcome {
+        viewer_core::HandoffOutcome::Normal => {}
+        viewer_core::HandoffOutcome::Degraded => {
+            env.fog.density = (env.fog.density + 0.05).min(1.0);
+            env.fog.start = (env.fog.start * 0.8).max(0.0);
+            env.fog.end *= 0.85;
+        }
+        viewer_core::HandoffOutcome::Stalled => {
+            env.fog.density = (env.fog.density + 0.1).min(1.0);
+            env.fog.start = (env.fog.start * 0.5).max(0.0);
+            env.fog.end *= 0.7;
+        }
     }
+
+    env.sanitized()
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -3007,6 +3023,7 @@ impl ViewerApp {
             stress_test_mode,
             auto_camera_config,
             screenshot_config,
+            environment: viewer_core::EnvironmentState::default(),
             frame_counter: 0,
             captured_screenshots: 0,
         };
@@ -3497,6 +3514,10 @@ impl AppState {
         }
         self.live_visual_state.refresh();
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
+        let next_environment = derive_environment_from_snapshot(next_live_visual_snapshot.as_ref());
+        if self.environment != next_environment {
+            self.environment = next_environment;
+        }
         let next_world_ingestion_seam =
             WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref())
                 .with_avatar_attachments(&self.world_avatars);
@@ -3626,6 +3647,7 @@ impl AppState {
         let render_result = self.renderer.render_frame(
             &camera,
             &self.scene,
+            &self.environment,
             &visibility_list,
             self.app_start_time.elapsed().as_secs_f32(),
             screenshot_path.as_deref(),
@@ -3655,6 +3677,7 @@ impl AppState {
                     total_instances: metrics.total_instances,
                     visible_proxies: metrics.visible_proxies,
                     fixture_texture_metrics: self.fixture_texture_cache.metrics,
+                    environment: &self.environment,
                     show_chat_window: self.stress_test_mode != StressTestMode::Screenshot,
                 });
                 pending_chat_send = actions.nearby_chat_send;
@@ -4736,11 +4759,14 @@ mod tests {
 
     #[test]
     fn map_net_continuity_to_core_maps_all_fields() {
-        let mapped = map_net_continuity_to_core(&viewer_net::RegionContinuitySummary {
-            phase: viewer_net::HandoffPhase::Confirming,
+        let mapped = map_net_continuity_to_core(&viewer_core::RegionContinuitySummary {
+            phase: viewer_core::HandoffPhase::Confirming,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
             active_region_coords: Some([1024, 2048]),
             previous_region_coords: Some([1023, 2048]),
-            neighbors: vec![viewer_net::BoundedNeighborSummary {
+            neighbors: vec![viewer_core::BoundedNeighborSummary {
                 region_handle: 0x0000040000000800,
                 region_x: 1024,
                 region_y: 2048,
@@ -4751,6 +4777,24 @@ mod tests {
         assert_eq!(mapped.previous_region_coords, Some([1023, 2048]));
         assert_eq!(mapped.neighbors.len(), 1);
         assert_eq!(mapped.neighbors[0].region_x, 1024);
+    }
+
+    #[test]
+    fn derive_environment_from_snapshot_uses_defaults_when_absent() {
+        let env = derive_environment_from_snapshot(None);
+        assert_eq!(env, viewer_core::EnvironmentState::default().sanitized());
+    }
+
+    #[test]
+    fn derive_environment_from_snapshot_adjusts_fog_for_degraded_outcome() {
+        let mut snapshot = offline_snapshot();
+        snapshot.observed_at_unix_ms = 43_200_000; // noon UTC
+        snapshot.continuity.outcome = viewer_core::HandoffOutcome::Degraded;
+
+        let env = derive_environment_from_snapshot(Some(&snapshot));
+        assert!(env.fog.density > viewer_core::EnvironmentState::default().fog.density);
+        assert!(env.fog.end > env.fog.start);
+        assert!((env.time_of_day_normalized - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -5032,6 +5076,9 @@ mod tests {
         let visible = vec![AssetID::new("a")];
         let continuity = RegionContinuitySummary {
             phase: viewer_core::HandoffPhase::Confirming,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
             active_region_coords: Some([1024, 2048]),
             previous_region_coords: Some([1023, 2048]),
             neighbors: vec![viewer_core::BoundedNeighborSummary {
@@ -5063,6 +5110,9 @@ mod tests {
         let visible = vec![AssetID::new("a")];
         let continuity = RegionContinuitySummary {
             phase: viewer_core::HandoffPhase::Confirming,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
             active_region_coords: Some([1024, 2048]),
             previous_region_coords: None,
             neighbors: vec![viewer_core::BoundedNeighborSummary {

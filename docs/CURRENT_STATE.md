@@ -3,6 +3,23 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (R12 Gap Fix)
+- **Environment Contract Hardening**: Extended `viewer_core::EnvironmentState` with additive, serde-defaulted controls (`time_of_day_normalized`, `sky_enabled`, `fog_enabled`) and added `EnvironmentState::sanitized()` clamping.
+- **Fog Correctness Fix**: Updated `viewer_render` fog depth source to use camera-to-fragment world-space distance instead of `clip_position.w`.
+- **Fog Density Activation**: Wired `fog.density` into the shader fog factor so the field is no longer inert.
+- **Sky Baseline Improvement**: Added bounded sky-top/sky-bottom influence to both clear-color derivation and fragment tinting so both sky colors are used.
+- **App Mapping Path**: Added `derive_environment_from_snapshot(...)` in `viewer_app` and per-frame environment refresh from live snapshot continuity state.
+- **Diagnostics Expansion**: `viewer_ui` environment panel now shows time-of-day and sky/fog enabled flags plus sky top/bottom and fog values.
+- **R12 Gap-Fix Validation**: Verified with `cargo fmt --all`, `cargo check -p viewer_core -p viewer_render -p viewer_app -p viewer_ui`, `cargo test -p viewer_core -p viewer_render -p viewer_app -p viewer_ui`, and screenshot smoke (`VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot ... cargo run -p viewer_app`).
+
+## Latest Notable Changes (R12)
+- **Environment Rendering Baseline**: Introduced `EnvironmentState` (ambient, sky, fog) to `viewer_core` and `viewer_render` to improve scene readability and visual continuity.
+- **GPU Environment Uniforms**: Added `EnvironmentUniform` (Group 3, Binding 0) to `SCENE_SHADER` to drive ambient modulation and linear fog parameters on the GPU.
+- **Deterministic Atmospheric clear**: Updated `RenderBackend` to clear the color attachment using the `sky_bottom_color`, ensuring a stable horizon background.
+- **Linear Fog Integration**: Implemented distance-based linear fog in the fragment shader, using `clip_position.w` as a depth proxy for R12.
+- **Environment Diagnostics**: Integrated environment parameter visualization (ambient, sky, fog) into the `viewer_ui` diagnostics panel.
+- **R12 Validation**: Verified with `cargo fmt`, `cargo check --workspace`, and full test passes for `viewer_core` and `viewer_render`.
+
 ## Latest Notable Changes (Clippy Workspace Cleanup)
 - **Workspace Clippy Cleanup**: Resolved warning classes across `viewer_ui`, `viewer_app`, `viewer_core`, `viewer_asset`, `viewer_render`, `viewer_grid`, and `viewer_net` so `cargo clippy --workspace --all-targets -- -D warnings` now passes.
 - **UI Render API Hardening**: Replaced `UiSystem::render`’s long argument list with `RenderInput` to remove argument-count lint pressure and reduce callsite fragility.
@@ -65,8 +82,8 @@ The Vulkan-Viewer is a high-performance Second Life compatible viewer built in R
 - **Crate Modernization**: Resolved all `wgpu` deprecation warnings in `viewer_render`.
 
 ## Active Milestone
-**Finalizing A10 / Resuming U09 Path**
-Focus: Wrap A10 continuity-aware streaming and resume the workflow/usability depth of U09.
+**Finalizing N11 / Resuming U09 Path**
+Focus: Wrap N11 continuity-aware handoff hardening and resume the workflow/usability depth of U09.
 
 ## System Components
 - `viewer_app`: Orchestration and worker state mapping (UI-agnostic).

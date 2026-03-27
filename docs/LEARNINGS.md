@@ -299,3 +299,18 @@ more than one session to establish correctly.
 **Rule for future plans:** Any cache eviction policy must include a deterministic fallback (like `AssetID` or a creation-sequencer) to break ties between items of equal priority or age.
 
 **Files affected:** `viewer_asset::texture_fixture`.
+---
+ 
+ ---
+ 
+## L21 — Fragment fog should use explicit camera-to-world distance, not `clip_position.w`
+ 
+ **Category:** Rendering / `viewer_render`
+ 
+ **Learned when:** Implementing Milestone R12 (Environment and Atmospheric Baseline).
+ 
+**What happened:** The initial R12 implementation used `clip_position.w` in the fragment path as a fog-depth proxy. In practice, this produced weak/incorrect fog behavior against baseline start/end defaults and made tuning less predictable. Switching to `distance(in.world_pos, camera.camera_position.xyz)` restored deterministic, physically-intuitive fog control while remaining bounded and inexpensive.
+ 
+**Rule for future plans:** For bounded distance fog in this codebase, prefer explicit camera-to-world distance in shader math. Treat `clip_position.w` as an optimization candidate only if validated with render tests and default-environment visual checks.
+ 
+ **Files affected:** `viewer_render` SCENE_SHADER WGSL.
