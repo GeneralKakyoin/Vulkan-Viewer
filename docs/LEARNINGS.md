@@ -314,3 +314,17 @@ more than one session to establish correctly.
 **Rule for future plans:** For bounded distance fog in this codebase, prefer explicit camera-to-world distance in shader math. Treat `clip_position.w` as an optimization candidate only if validated with render tests and default-environment visual checks.
  
  **Files affected:** `viewer_render` SCENE_SHADER WGSL.
+
+---
+
+## L22 — Screenshot smoke is only valid after manual image review
+
+**Category:** Validation / Process
+
+**Learned when:** A13 completion review and screenshot-smoke verification.
+
+**What happened:** A `cargo run` screenshot smoke can succeed while still producing visually incorrect output (wrong camera framing, fallback colors, or obvious scene corruption). Treating command success as complete visual validation risks shipping regressions.
+
+**Rule for future plans:** Any validation step that captures screenshots must include manual review of at least one produced image and must report the reviewed file path plus a one-line visual verdict in handoff/report artifacts.
+
+**Files affected:** `docs/TESTING_REFERENCE.md`, milestone reports/handoffs that claim visual verification.

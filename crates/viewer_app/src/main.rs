@@ -7,8 +7,8 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
@@ -92,6 +92,11 @@ struct AppState {
     screenshot_config: Option<ScreenshotConfig>,
     frame_counter: u64,
     captured_screenshots: u32,
+    live_texture_results: Arc<
+        std::sync::Mutex<
+            BTreeMap<AssetID, viewer_asset::AssetFetchOutcome<viewer_asset::DecodedRgbaImage>>,
+        >,
+    >,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +106,13 @@ enum StressTestMode {
     GeometryTorture,
     AutoCamera,
     Screenshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetSourceMode {
+    Fixture,
+    Auto,
+    Live,
 }
 
 impl StressTestMode {
@@ -288,6 +300,7 @@ struct InProcessLiveFeedConfig {
     nearby_send_receive_timeout_ms: u64,
     nearby_send_receive_packets: usize,
     profile_cache_ttl_secs: u64,
+    asset_live_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +452,14 @@ enum LiveFeedUpdate {
     },
     ProfileImageFailed,
     Relay(RuntimeRelayEvent),
+    TextureAsset {
+        id: String,
+        bytes: Vec<u8>,
+    },
+    TextureAssetFailed {
+        id: String,
+        reason: viewer_asset::AssetFetchFailureReason,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -471,6 +492,10 @@ enum LiveFeedCommand {
         avatar_id: String,
         tab: Option<AvatarProfileTab>,
     },
+    RequestTexture {
+        id: AssetID,
+        priority: viewer_core::AssetPriority,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -478,6 +503,34 @@ struct LiveStartupPlan {
     config: Option<InProcessLiveFeedConfig>,
     enabled: bool,
     startup_status: LiveStartupStatus,
+}
+
+pub struct AppLiveTextureProvider {
+    command_tx: Sender<LiveFeedCommand>,
+    results: Arc<
+        std::sync::Mutex<
+            BTreeMap<AssetID, viewer_asset::AssetFetchOutcome<viewer_asset::DecodedRgbaImage>>,
+        >,
+    >,
+}
+
+impl viewer_asset::LiveTextureProvider for AppLiveTextureProvider {
+    fn request_texture(&mut self, request: &viewer_asset::AssetFetchRequest) -> Result<()> {
+        self.command_tx
+            .send(LiveFeedCommand::RequestTexture {
+                id: request.id.clone(),
+                priority: request.priority,
+            })
+            .map_err(|e| anyhow::anyhow!("failed to send texture request to worker: {}", e))
+    }
+
+    fn poll_texture(
+        &mut self,
+        id: &AssetID,
+    ) -> Result<Option<viewer_asset::AssetFetchOutcome<viewer_asset::DecodedRgbaImage>>> {
+        let mut results = self.results.lock().unwrap();
+        Ok(results.remove(id))
+    }
 }
 
 impl LiveVisualState {
@@ -684,6 +737,10 @@ where
     let profile_cache_ttl_secs = lookup("VIEWER_APP_PROFILE_CACHE_TTL_SECS")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120);
+    let asset_live_timeout_ms = lookup("VIEWER_ASSET_LIVE_TIMEOUT_MS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10_000)
+        .clamp(250, 120_000);
 
     Some(InProcessLiveFeedConfig {
         endpoint,
@@ -713,6 +770,7 @@ where
         nearby_send_receive_timeout_ms,
         nearby_send_receive_packets,
         profile_cache_ttl_secs,
+        asset_live_timeout_ms,
     })
 }
 
@@ -721,6 +779,14 @@ fn parse_live_startup_mode(value: Option<&str>) -> LiveStartupMode {
         "on" | "enabled" | "true" | "1" => LiveStartupMode::On,
         "off" | "disabled" | "false" | "0" => LiveStartupMode::Off,
         _ => LiveStartupMode::Auto,
+    }
+}
+
+fn parse_asset_source_mode(value: Option<&str>) -> AssetSourceMode {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "fixture" => AssetSourceMode::Fixture,
+        "live" => AssetSourceMode::Live,
+        _ => AssetSourceMode::Auto,
     }
 }
 
@@ -789,6 +855,20 @@ fn spawn_in_process_live_feed(
         });
     });
     (command_tx, update_rx)
+}
+
+fn classify_asset_fetch_failure_reason(
+    error: &viewer_net::ConnectionError,
+) -> viewer_asset::AssetFetchFailureReason {
+    match error {
+        viewer_net::ConnectionError::Http(err) if err.is_timeout() => {
+            viewer_asset::AssetFetchFailureReason::Timeout
+        }
+        viewer_net::ConnectionError::MissingCapability(_) => {
+            viewer_asset::AssetFetchFailureReason::MissingCapability
+        }
+        _ => viewer_asset::AssetFetchFailureReason::Transport,
+    }
 }
 
 async fn run_in_process_live_feed(
@@ -1438,6 +1518,73 @@ async fn run_in_process_live_feed(
                                 );
                             }
                         }
+                    }
+                    LiveFeedCommand::RequestTexture {
+                        id,
+                        priority: _priority,
+                    } => {
+                        let tx = tx.clone();
+                        let caps = capabilities.clone();
+                        let fetch_timeout =
+                            std::time::Duration::from_millis(config.asset_live_timeout_ms);
+                        tokio::spawn(async move {
+                            let id_str = id.to_string();
+                            if let Some(caps) = caps {
+                                if let Some(url) =
+                                    viewer_grid::AssetCapabilityPolicy::select_texture_url(
+                                        &caps.entries,
+                                        &id,
+                                    )
+                                {
+                                    match viewer_net::fetch_asset_bytes(&url, fetch_timeout).await {
+                                        Ok(bytes) => {
+                                            let _ = tx.send(LiveFeedUpdate::TextureAsset {
+                                                id: id_str,
+                                                bytes,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
+                                                id: id_str.clone(),
+                                                reason: classify_asset_fetch_failure_reason(&e),
+                                            });
+                                            emit_relay(
+                                                &tx,
+                                                RuntimeRelayLevel::Warn,
+                                                "texture_fetch",
+                                                &format!("Failed to fetch texture {id_str}: {e}"),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
+                                        id: id_str.clone(),
+                                        reason:
+                                            viewer_asset::AssetFetchFailureReason::MissingCapability,
+                                    });
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Warn,
+                                        "texture_fetch",
+                                        &format!("No texture capability found for {id_str}"),
+                                    );
+                                }
+                            } else {
+                                let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
+                                    id: id_str.clone(),
+                                    reason:
+                                        viewer_asset::AssetFetchFailureReason::MissingCapability,
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "texture_fetch",
+                                    &format!(
+                                        "No active session capabilities to fetch texture {id_str}"
+                                    ),
+                                );
+                            }
+                        });
                     }
                 }
             }
@@ -2990,17 +3137,29 @@ impl ViewerApp {
         let screenshot_config =
             screenshot_config_from_lookup(|key| std::env::var(key).ok(), stress_test_mode);
 
+        let live_visual_state = LiveVisualState::from_env();
+        let asset_source_mode =
+            parse_asset_source_mode(std::env::var("VIEWER_ASSET_SOURCE_MODE").ok().as_deref());
+        let live_texture_results = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut fixture_texture_cache = viewer_asset::FixtureTextureCache::new();
+        let allow_live_provider = match asset_source_mode {
+            AssetSourceMode::Fixture => false,
+            AssetSourceMode::Auto | AssetSourceMode::Live => true,
+        };
+        if allow_live_provider && let Some(tx) = &live_visual_state.in_process_tx {
+            let provider = AppLiveTextureProvider {
+                command_tx: tx.clone(),
+                results: Arc::clone(&live_texture_results),
+            };
+            fixture_texture_cache = fixture_texture_cache.with_live_provider(Box::new(provider));
+        }
+
         let mut state = AppState {
             window,
             renderer,
             ui,
-            camera: Camera::default(),
-            scene: Scene::prototype(),
-            world_ingestion_seam: WorldObjectIngestionSeam::default(),
-            last_applied_live_visual_snapshot: None,
-            last_applied_world_ingestion_seam: None,
             input: InputState::default(),
-            live_visual_state: LiveVisualState::from_env(),
+            live_visual_state,
             chat_state: ChatState::default(),
             social_state,
             world_avatars: Vec::new(),
@@ -3010,22 +3169,28 @@ impl ViewerApp {
             world_self_location: None,
             profile_state: None,
             profile_image_bytes: BTreeMap::new(),
+            live_texture_results,
             social_cache: social_cache.take(),
             geometry_cache: viewer_asset::GeometryCache::new(),
-            fixture_texture_cache: viewer_asset::FixtureTextureCache::new(),
+            fixture_texture_cache,
             fixture_texture_ids,
             fixture_texture_missing_logged: HashSet::new(),
+            camera: Camera::default(),
+            scene: Scene::prototype(),
+            world_ingestion_seam: WorldObjectIngestionSeam::default(),
+            last_applied_live_visual_snapshot: None,
+            last_applied_world_ingestion_seam: None,
+            smoothed_fps: 60.0,
+            smoothed_frame_ms: 16.6,
+            avg_scene_update_ms: 0.0,
             last_frame_time: Instant::now(),
             app_start_time: Instant::now(),
-            smoothed_fps: 0.0,
-            smoothed_frame_ms: 0.0,
-            avg_scene_update_ms: 0.0,
             stress_test_mode,
             auto_camera_config,
             screenshot_config,
-            environment: viewer_core::EnvironmentState::default(),
             frame_counter: 0,
             captured_screenshots: 0,
+            environment: viewer_core::EnvironmentState::default(),
         };
 
         match state.stress_test_mode {
@@ -3510,10 +3675,49 @@ impl AppState {
                 LiveFeedUpdate::Relay(event) => {
                     self.social_state.relay.push(event);
                 }
+                LiveFeedUpdate::TextureAsset { id, bytes } => {
+                    let id = AssetID::new(id);
+                    let mut results = self.live_texture_results.lock().unwrap();
+                    match viewer_asset::decode_png_rgba8(&bytes) {
+                        Ok(img) => {
+                            results.insert(
+                                id,
+                                viewer_asset::AssetFetchOutcome {
+                                    status: viewer_asset::AssetStatus::Ready(img),
+                                    source: viewer_asset::AssetSourceKind::Live,
+                                    failure: None,
+                                },
+                            );
+                        }
+                        Err(_) => {
+                            results.insert(
+                                id,
+                                viewer_asset::AssetFetchOutcome {
+                                    status: viewer_asset::AssetStatus::Missing,
+                                    source: viewer_asset::AssetSourceKind::Live,
+                                    failure: Some(viewer_asset::AssetFetchFailureReason::Decode),
+                                },
+                            );
+                        }
+                    }
+                }
+                LiveFeedUpdate::TextureAssetFailed { id, reason } => {
+                    let id = AssetID::new(id);
+                    let mut results = self.live_texture_results.lock().unwrap();
+                    results.insert(
+                        id,
+                        viewer_asset::AssetFetchOutcome {
+                            status: viewer_asset::AssetStatus::Missing,
+                            source: viewer_asset::AssetSourceKind::Live,
+                            failure: Some(reason),
+                        },
+                    );
+                }
             }
         }
-        self.live_visual_state.refresh();
+
         let next_live_visual_snapshot = self.live_visual_state.snapshot.clone();
+        self.live_visual_state.refresh();
         let next_environment = derive_environment_from_snapshot(next_live_visual_snapshot.as_ref());
         if self.environment != next_environment {
             self.environment = next_environment;
@@ -3555,7 +3759,7 @@ impl AppState {
         let aspect = self.renderer.aspect_ratio();
         let frustum = self.camera.frustum(aspect);
         let visibility_list = self.scene.query_frustum(&frustum);
-        self.tick_fixture_textures(&visibility_list)?;
+        self.tick_scene_textures(&visibility_list)?;
 
         let window = self.window.clone();
         let ui = &mut self.ui;
@@ -3765,7 +3969,7 @@ impl AppState {
         Ok(Some(config.output_dir.join(filename)))
     }
 
-    fn tick_fixture_textures(&mut self, visibility_list: &[usize]) -> Result<()> {
+    fn tick_scene_textures(&mut self, visibility_list: &[usize]) -> Result<()> {
         if self.fixture_texture_ids.is_empty() {
             return Ok(());
         }
@@ -4369,6 +4573,10 @@ mod tests {
             String::from("VIEWER_LOGIN_MFA_TOKEN"),
             String::from("token123"),
         );
+        vars.insert(
+            String::from("VIEWER_ASSET_LIVE_TIMEOUT_MS"),
+            String::from("9000"),
+        );
         let cfg = in_process_live_feed_config_from_lookup(|k| vars.get(k).cloned())
             .expect("config should parse");
         assert_eq!(cfg.wire_format, LoginWireFormat::XmlRpc);
@@ -4379,6 +4587,7 @@ mod tests {
         assert!(cfg.agree_to_tos);
         assert!(!cfg.read_critical);
         assert_eq!(cfg.mfa_token.as_deref(), Some("token123"));
+        assert_eq!(cfg.asset_live_timeout_ms, 9000);
     }
 
     #[test]
@@ -4538,6 +4747,20 @@ mod tests {
         assert_eq!(parse_live_startup_mode(None), LiveStartupMode::Auto);
         assert_eq!(parse_live_startup_mode(Some("on")), LiveStartupMode::On);
         assert_eq!(parse_live_startup_mode(Some("off")), LiveStartupMode::Off);
+    }
+
+    #[test]
+    fn parse_asset_source_mode_defaults_to_auto_and_parses_values() {
+        assert_eq!(parse_asset_source_mode(None), AssetSourceMode::Auto);
+        assert_eq!(
+            parse_asset_source_mode(Some("fixture")),
+            AssetSourceMode::Fixture
+        );
+        assert_eq!(parse_asset_source_mode(Some("live")), AssetSourceMode::Live);
+        assert_eq!(
+            parse_asset_source_mode(Some("unknown")),
+            AssetSourceMode::Auto
+        );
     }
 
     #[test]

@@ -1,5 +1,8 @@
 # Plan: A13 Live Asset Transport Bridge and Cache Integration Slice
 
+## Status
+- Completed on 2026-03-27 after implementation, validation, and continuity updates.
+
 ## Summary
 Implement a bounded live asset bridge that routes selected texture/mesh asset fetches from SL capabilities into `viewer_asset` while preserving A10 cache discipline, deterministic fallback rendering, and strict transport/policy boundaries.
 
@@ -45,25 +48,42 @@ Implement a bounded live asset bridge that routes selected texture/mesh asset fe
 
 ## Files and components touched
 - `crates/viewer_asset/src/lib.rs`
-  - provider abstraction additions
-  - live source integration and cache admission path
-  - tests
+  - add source typing:
+    - `enum AssetSourceKind { Fixture, Live }`
+    - `enum AssetFetchFailureReason { Transport, Decode, Unsupported, MissingCapability, Timeout }`
+  - add request/result contracts:
+    - `struct AssetFetchRequest { id: AssetID, priority: AssetPriority }`
+    - `struct AssetFetchOutcome { status: AssetStatus<Arc<DecodedRgbaImage>>, source: AssetSourceKind, failure: Option<AssetFetchFailureReason> }`
+  - add bounded live bridge trait:
+    - `trait LiveTextureProvider { fn request_texture(&mut self, id: &AssetID, priority: AssetPriority) -> anyhow::Result<()>; fn poll_texture(&mut self, id: &AssetID) -> anyhow::Result<Option<DecodedRgbaImage>>; }`
+  - integrate live ingestion into existing cache admission + A10 retention/eviction flow
+  - tests for source selection, failure classification, and deterministic fallback
 - `crates/viewer_asset/src/texture_fixture.rs` (or split modules as needed)
-  - shared cache behavior across source types
-  - metrics/source counters
-  - tests
+  - keep fixture loader as first provider implementation
+  - add source/failure counters to cache metrics update points
+  - tests verifying metrics increment correctness
 - `crates/viewer_net/src/lib.rs`
-  - bounded asset-fetch transport hooks (if not already exposed)
-  - tests
+  - expose transport-only helper for capability asset GET with timeout budget
+  - no cache policy, no source selection logic
+  - tests for request construction + bounded timeout handling
 - `crates/viewer_grid/src/lib.rs` (or adapter modules)
-  - capability meaning mapping for live asset fetch policy
-  - tests
+  - add capability semantic chooser:
+    - prefer `GetTexture`, fallback `ViewerAsset`, else report unavailable
+  - expose typed policy result for app/asset orchestration
+  - tests for mapping order and fallback semantics
 - `crates/viewer_app/src/main.rs`
-  - request wiring and source selection orchestration
-  - tests
+  - replace fixture-only tick path with source-aware path:
+    - rename/expand `tick_fixture_textures` to `tick_scene_textures`
+    - pass `AssetPriorityHint`s from existing continuity mapper
+  - add explicit offline guard: when live startup disabled, force fixture source
+  - tests for deterministic source choice and fallback behavior
 - `crates/viewer_ui/src/lib.rs` (bounded diagnostics)
-  - display source/failure metrics
-  - tests
+  - diagnostics lines:
+    - live asset requests
+    - live asset successes
+    - live asset failures by reason
+    - fixture fallback count
+  - tests for deterministic diagnostics formatting
 - `docs/TESTING_REFERENCE.md`
   - add any new verification knobs/env vars introduced.
 
@@ -76,31 +96,56 @@ Implement a bounded live asset bridge that routes selected texture/mesh asset fe
 - `viewer_ui` is display-only for diagnostics.
 
 ## Step sequence
-1. Define bounded source abstraction
-   - fixture/live provider contract
-   - stable source-state enum for diagnostics.
-2. Implement live fetch path in asset crate
-   - request pipeline with bounded concurrency/caps
-   - decode + cache admission using existing A10 policy.
-3. Wire transport/policy boundary
-   - `viewer_net`: expose fetch method(s)
-   - `viewer_grid`: semantic selection/meaning for capability usage.
-4. Integrate app orchestration
-   - route eligible requests through live path when capability is available
-   - retain fixture fallback path for deterministic offline mode.
-5. Preserve renderer fallback behavior
-   - ensure no semantic change to `Loading`/`Missing` color/fallback conventions.
-6. Add diagnostics
-   - source counts and bounded failure reasons.
-7. Add tests
-   - source selection determinism
-   - live->cache admission correctness
-   - fallback behavior when live source unavailable or failing
-   - boundary tests for net/grid ownership split.
-8. Runtime verification
-   - offline fixture-only baseline
-   - bounded live run when credentials/caps exist.
-9. Closeout docs/review/report.
+1. **Create typed source and failure contracts (`viewer_asset`)**
+   - Add `AssetSourceKind` and `AssetFetchFailureReason`.
+   - Keep them diagnostics-facing only; do not expose transport internals or credentials.
+2. **Add source-aware request/outcome structs (`viewer_asset`)**
+   - Introduce `AssetFetchRequest` and `AssetFetchOutcome`.
+   - Ensure `AssetFetchOutcome.status` remains `AssetStatus` so renderer behavior stays unchanged.
+3. **Implement live provider boundary (`viewer_asset`)**
+   - Add `LiveTextureProvider` trait.
+   - Keep provider strictly async-poll style compatible with current frame tick loop (no blocking calls in render/update loop).
+4. **Keep fixture provider as deterministic fallback (`viewer_asset`)**
+   - Adapt existing fixture cache path to implement/compose with new source contracts.
+   - Preserve existing A10 queue limits and eviction invariants.
+5. **Transport hook (`viewer_net`)**
+   - Add one bounded fetch helper for raw asset bytes through capability URL.
+   - No decode, no retry policy beyond simple bounded transport retry/timeout.
+6. **Capability semantics (`viewer_grid`)**
+   - Add helper that maps available caps to fetch strategy:
+     - `GetTexture` first
+     - `ViewerAsset` second
+     - unavailable state if none
+   - Return typed semantic result; do not call transport directly from `viewer_grid`.
+7. **App orchestration swap (`viewer_app`)**
+   - Replace fixture-only callsite with source-aware `tick_scene_textures`.
+   - Keep existing `build_asset_priority_hints(...)` output as the only priority input.
+   - Rule set:
+     - offline/no caps => fixture only
+     - caps available => try live first, fallback fixture on failure/unavailable
+     - renderer sees only `AssetStatus` behavior as today
+8. **Metrics + diagnostics integration (`viewer_asset` + `viewer_ui`)**
+   - Add counters for:
+     - live enqueued
+     - live ready
+     - live failed transport/decode/timeout
+     - fixture fallback used
+   - Surface counters in Diagnostics panel using existing metrics style.
+9. **Unit/integration tests**
+   - `viewer_asset`: source selection deterministic across repeated frames.
+   - `viewer_asset`: live failure transitions to fixture fallback without permanent poison.
+   - `viewer_grid`: capability mapping preference order.
+   - `viewer_app`: offline mode never attempts live provider.
+   - `viewer_ui`: diagnostics lines include new counters.
+10. **Runtime verification matrix**
+   - Offline run: confirm only fixture counters move.
+   - Live run: confirm live counters move and fallback remains bounded on failures.
+   - Screenshot smoke: confirm no regression to Loading/Missing color semantics.
+11. **Documentation and continuity**
+   - Update testing reference with any new env knobs:
+     - `VIEWER_ASSET_SOURCE_MODE=fixture|auto|live`
+     - `VIEWER_ASSET_LIVE_TIMEOUT_MS=<u64>`
+   - Record final ownership boundaries in report/handoff.
 
 ## Validation plan
 - Always:
@@ -148,4 +193,3 @@ Implement a bounded live asset bridge that routes selected texture/mesh asset fe
 - Source/failure diagnostics are visible and bounded.
 - Validation commands pass (or blockers are documented).
 - Continuity artifacts updated with current state and next step.
-

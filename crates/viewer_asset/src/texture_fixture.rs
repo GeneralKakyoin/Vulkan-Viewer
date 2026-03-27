@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use viewer_core::{AssetContinuityMetrics, AssetID, AssetPriority};
 
-use crate::AssetStatus;
+use crate::{
+    AssetFetchFailureReason, AssetFetchOutcome, AssetFetchRequest, AssetStatus, LiveTextureProvider,
+};
 
 pub const A10_CONTINUITY_WINDOW_MS: u64 = 45_000;
 pub const A10_MAX_NEIGHBOR_SCOPES: usize = 8;
@@ -59,6 +61,9 @@ pub struct FixtureTextureCache {
     // Metrics
     pub metrics: AssetContinuityMetrics,
     promotions_this_tick: usize,
+
+    // Live Bridge (A13)
+    live_provider: Option<Box<dyn LiveTextureProvider>>,
 }
 
 impl Default for FixtureTextureCache {
@@ -90,7 +95,13 @@ impl FixtureTextureCache {
             oversized_cap: 16,
             metrics: AssetContinuityMetrics::default(),
             promotions_this_tick: 0,
+            live_provider: None,
         }
+    }
+
+    pub fn with_live_provider(mut self, provider: Box<dyn LiveTextureProvider>) -> Self {
+        self.live_provider = Some(provider);
+        self
     }
 
     pub fn budget_bytes(&self) -> usize {
@@ -145,7 +156,8 @@ impl FixtureTextureCache {
         };
 
         let path = self.base_dir.join(file);
-        if !path.exists() {
+        let fixture_exists = path.exists();
+        if !fixture_exists && self.live_provider.is_none() {
             self.record_negative(id.clone());
             return Ok(AssetStatus::Missing);
         }
@@ -164,10 +176,27 @@ impl FixtureTextureCache {
         self.pending.push_back((id.clone(), priority));
         self.pending_set.insert(id.clone());
         self.metrics.continuity_requests_enqueued += 1;
+
+        // Trigger live fetch trial if provider exists
+        if let Some(provider) = &mut self.live_provider {
+            let request = AssetFetchRequest {
+                id: id.clone(),
+                priority,
+            };
+            match provider.request_texture(&request) {
+                Ok(()) => {
+                    self.metrics.live_requests_enqueued += 1;
+                }
+                Err(_) => {
+                    self.increment_live_failure(Some(AssetFetchFailureReason::Transport));
+                }
+            }
+        }
+
         Ok(AssetStatus::Loading)
     }
 
-    /// Process queued fixture requests.
+    /// Process queued fixture requests and ingest live results.
     ///
     /// Returns the number of requests that were attempted (success or failure).
     pub fn poll_png_rgba8(&mut self, max_to_process: usize) -> Result<usize> {
@@ -176,6 +205,67 @@ impl FixtureTextureCache {
         self.promotions_this_tick = 0;
         let now = now_unix_ms();
 
+        // 1. Ingest Live Results (A13)
+        if let Some(provider) = &mut self.live_provider {
+            let mut ready_keys = Vec::new();
+            let mut failed_keys = Vec::new();
+            for id in self.pending_set.iter() {
+                match provider.poll_texture(id) {
+                    Ok(Some(AssetFetchOutcome {
+                        status: AssetStatus::Ready(img),
+                        ..
+                    })) => ready_keys.push((id.clone(), img)),
+                    Ok(Some(AssetFetchOutcome {
+                        status: AssetStatus::Missing,
+                        failure,
+                        ..
+                    })) => failed_keys.push((id.clone(), failure)),
+                    Ok(Some(AssetFetchOutcome {
+                        status: AssetStatus::Loading,
+                        ..
+                    })) => {}
+                    Ok(None) => {}
+                    Err(_) => failed_keys.push((id.clone(), Some(AssetFetchFailureReason::Other))),
+                }
+            }
+
+            for (id, decoded) in ready_keys {
+                self.pending_set.remove(&id);
+                self.pending.retain(|(pid, _)| pid != &id);
+
+                let size = decoded.byte_len();
+                let decoded = Arc::new(decoded);
+                if size > self.budget_bytes {
+                    self.record_oversized_ready(id, decoded);
+                } else {
+                    self.ensure_capacity(size);
+                    self.current_bytes += size;
+                    self.entries.insert(id.clone(), Arc::clone(&decoded));
+                    self.metadata.insert(
+                        id.clone(),
+                        CacheEntryMetadata {
+                            priority: AssetPriority::Normal,
+                            last_touched_tick: self.current_tick,
+                            added_at_ms: now,
+                            size_bytes: size,
+                        },
+                    );
+                }
+                self.metrics.live_requests_ready += 1;
+                attempted += 1;
+            }
+
+            for (id, failure) in failed_keys {
+                self.pending_set.remove(&id);
+                self.pending.retain(|(pid, _)| pid != &id);
+                self.increment_live_failure(failure);
+                self.metrics.fixture_fallbacks_used += 1;
+                self.record_negative(id);
+                attempted += 1;
+            }
+        }
+
+        // 2. Process Fixtures
         for _ in 0..max_to_process {
             let Some((id, priority)) = self.pending.pop_front() else {
                 break;
@@ -196,6 +286,16 @@ impl FixtureTextureCache {
             };
             let path = self.base_dir.join(file);
             if !path.exists() {
+                if self.live_provider.is_some() {
+                    // Keep waiting for live transport when fixture file is absent.
+                    if self.pending.len() < A10_REQUESTS_PER_TICK_CAP {
+                        self.pending.push_back((id.clone(), priority));
+                        self.pending_set.insert(id);
+                        continue;
+                    }
+                    self.metrics.continuity_requests_dropped_cap += 1;
+                }
+                self.metrics.fixture_fallbacks_used += 1;
                 self.record_negative(id);
                 continue;
             }
@@ -424,6 +524,17 @@ impl FixtureTextureCache {
         self.touch_oversized_lru(&id);
     }
 
+    fn increment_live_failure(&mut self, reason: Option<AssetFetchFailureReason>) {
+        match reason.unwrap_or(AssetFetchFailureReason::Other) {
+            AssetFetchFailureReason::Transport => self.metrics.live_requests_failed_transport += 1,
+            AssetFetchFailureReason::Decode => self.metrics.live_requests_failed_decode += 1,
+            AssetFetchFailureReason::Timeout => self.metrics.live_requests_failed_timeout += 1,
+            AssetFetchFailureReason::Unsupported
+            | AssetFetchFailureReason::MissingCapability
+            | AssetFetchFailureReason::Other => self.metrics.live_requests_failed_other += 1,
+        }
+    }
+
     #[cfg(test)]
     fn insert_dummy_for_test(&mut self, id: AssetID, bytes: usize) {
         self.current_tick += 1;
@@ -608,5 +719,100 @@ mod tests {
             cache.clamp_priority_to_quota(AssetPriority::Active),
             AssetPriority::Normal
         );
+    }
+
+    struct MockLiveProvider {
+        requested: HashSet<AssetID>,
+        ready: HashMap<AssetID, AssetFetchOutcome<DecodedRgbaImage>>,
+    }
+
+    impl LiveTextureProvider for MockLiveProvider {
+        fn request_texture(&mut self, request: &AssetFetchRequest) -> Result<()> {
+            self.requested.insert(request.id.clone());
+            Ok(())
+        }
+        fn poll_texture(
+            &mut self,
+            id: &AssetID,
+        ) -> Result<Option<AssetFetchOutcome<DecodedRgbaImage>>> {
+            Ok(self.ready.remove(id))
+        }
+    }
+
+    #[test]
+    fn fixture_cache_triggers_live_fetch_on_missing_locally() {
+        let cache = FixtureTextureCache::with_base_dir(PathBuf::from("."), 1024);
+        let provider = MockLiveProvider {
+            requested: HashSet::new(),
+            ready: HashMap::new(),
+        };
+        let id = AssetID::new("missing-locally");
+
+        let mut cache = cache.with_live_provider(Box::new(provider));
+        let _ = cache.request_png_rgba8(&id).unwrap();
+
+        // Access the provider back to verify (since Box<dyn ..> is opaque,
+        // we'd need downcasting or just rely on the side effects in metrics).
+        assert_eq!(cache.metrics.live_requests_enqueued, 1);
+    }
+
+    #[test]
+    fn fixture_cache_ingests_live_results() {
+        let cache = FixtureTextureCache::with_base_dir(PathBuf::from("."), 1024);
+        let mut provider = MockLiveProvider {
+            requested: HashSet::new(),
+            ready: HashMap::new(),
+        };
+        let id = AssetID::new("live-test");
+        provider.ready.insert(
+            id.clone(),
+            AssetFetchOutcome {
+                status: AssetStatus::Ready(DecodedRgbaImage {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![255, 0, 0, 255],
+                }),
+                source: crate::AssetSourceKind::Live,
+                failure: None,
+            },
+        );
+
+        let mut cache = cache.with_live_provider(Box::new(provider));
+        let _ = cache.request_png_rgba8(&id).unwrap();
+
+        cache.poll_png_rgba8(1).unwrap();
+
+        assert_eq!(cache.metrics.live_requests_ready, 1);
+        let status = cache.request_png_rgba8(&id).unwrap();
+        if let AssetStatus::Ready(img) = status {
+            assert_eq!(img.rgba, vec![255, 0, 0, 255]);
+        } else {
+            panic!("Expected Ready from live ingest");
+        }
+    }
+
+    #[test]
+    fn live_failure_reason_timeout_is_accounted() {
+        let cache = FixtureTextureCache::with_base_dir(PathBuf::from("."), 1024);
+        let mut provider = MockLiveProvider {
+            requested: HashSet::new(),
+            ready: HashMap::new(),
+        };
+        let id = AssetID::new("live-timeout");
+        provider.ready.insert(
+            id.clone(),
+            AssetFetchOutcome {
+                status: AssetStatus::Missing,
+                source: crate::AssetSourceKind::Live,
+                failure: Some(AssetFetchFailureReason::Timeout),
+            },
+        );
+
+        let mut cache = cache.with_live_provider(Box::new(provider));
+        let _ = cache.request_png_rgba8(&id).unwrap();
+        cache.poll_png_rgba8(1).unwrap();
+
+        assert_eq!(cache.metrics.live_requests_failed_timeout, 1);
+        assert_eq!(cache.metrics.fixture_fallbacks_used, 1);
     }
 }

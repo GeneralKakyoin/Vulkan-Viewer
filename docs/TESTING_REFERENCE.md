@@ -113,6 +113,19 @@ $env:VIEWER_TEST_SCREENSHOT_MAX_FRAMES='1'
 cargo run -p viewer_app
 ```
 
+### Required screenshot review step
+
+When using `STRESS_TEST=screenshot` (or any screenshot capture path), validation is not complete until
+the produced image files are manually reviewed for expected scene behavior (camera framing, visible
+geometry, fallback colors, fog/sky intent, and obvious corruption/regression).
+
+Command success alone is insufficient for visual verification.
+
+Implementation/report handoff should include:
+- exact screenshot directory used
+- at least one screenshot filename reviewed
+- a one-line visual verdict
+
 ---
 
 ## Offline snapshot vs in-process live worker
@@ -205,6 +218,8 @@ Fixture location:
 Budget tuning:
 - `VIEWER_ASSET_CACHE_BUDGET_MB` (default `512`, clamped `16..4096`)
 - `VIEWER_RENDER_VRAM_BUDGET_MB` (default `512`, clamped `16..4096`)
+- `VIEWER_ASSET_SOURCE_MODE` (`fixture` | `auto` | `live`, default `auto`)
+- `VIEWER_ASSET_LIVE_TIMEOUT_MS` (default `10000`, clamped `250..120000`)
 
 Renderer debug forcing (narrow, verification-only):
 - `VIEWER_RENDER_FORCE_AVATAR_PROXY_FALLBACK` (bool-like; forces avatar proxy fallback path)

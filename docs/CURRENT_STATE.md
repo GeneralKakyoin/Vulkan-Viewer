@@ -3,6 +3,14 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (A13 Completed)
+- **Typed Live Fetch Contracts**: Added `AssetFetchRequest` and wired `LiveTextureProvider` to return `AssetFetchOutcome<DecodedRgbaImage>` so live status/failure semantics stay explicit through the cache boundary.
+- **Source Mode Controls**: Added `VIEWER_ASSET_SOURCE_MODE=fixture|auto|live` handling in `viewer_app` startup wiring to control live-provider attachment without crossing crate boundaries.
+- **Live Timeout Control**: Added `VIEWER_ASSET_LIVE_TIMEOUT_MS` (bounded) and worker wiring so texture fetch timeout policy is configurable and deterministic.
+- **Failure Classification Path**: Added typed failure propagation from worker (`TextureAssetFailed`) through app/provider/cache to metrics (`transport`, `decode`, `timeout`, `other`) and bounded fallback accounting.
+- **A13 Orchestration Path**: Renamed app texture tick lane to `tick_scene_textures(...)` and retained continuity-priority-driven request flow.
+- **A13 Validation**: Confirmed with `cargo fmt --all`, targeted A13 crate tests, `cargo check --workspace`, `cargo test --workspace`, and offline screenshot smoke (`VIEWER_APP_LIVE_STARTUP=off VIEWER_FIXTURE_TEXTURES=1 STRESS_TEST=screenshot ... cargo run -p viewer_app`).
+
 ## Latest Notable Changes (R12 Gap Fix)
 - **Environment Contract Hardening**: Extended `viewer_core::EnvironmentState` with additive, serde-defaulted controls (`time_of_day_normalized`, `sky_enabled`, `fog_enabled`) and added `EnvironmentState::sanitized()` clamping.
 - **Fog Correctness Fix**: Updated `viewer_render` fog depth source to use camera-to-fragment world-space distance instead of `clip_position.w`.

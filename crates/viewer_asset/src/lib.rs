@@ -16,6 +16,43 @@ pub enum AssetStatus<T> {
     Missing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AssetSourceKind {
+    Fixture,
+    Live,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AssetFetchFailureReason {
+    Transport,
+    Decode,
+    Unsupported,
+    MissingCapability,
+    Timeout,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct AssetFetchRequest {
+    pub id: viewer_core::AssetID,
+    pub priority: viewer_core::AssetPriority,
+}
+
+#[derive(Debug, Clone)]
+pub struct AssetFetchOutcome<T> {
+    pub status: AssetStatus<T>,
+    pub source: AssetSourceKind,
+    pub failure: Option<AssetFetchFailureReason>,
+}
+
+pub trait LiveTextureProvider: Send + Sync {
+    fn request_texture(&mut self, request: &AssetFetchRequest) -> anyhow::Result<()>;
+    fn poll_texture(
+        &mut self,
+        id: &viewer_core::AssetID,
+    ) -> anyhow::Result<Option<AssetFetchOutcome<DecodedRgbaImage>>>;
+}
+
 pub struct ProcessedMesh {
     pub vertices: Vec<Vertex>,
     pub submeshes: Vec<SubMesh>,
@@ -141,6 +178,17 @@ fn hash_bytes(data: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut hasher);
     hasher.finish()
+}
+
+pub fn decode_png_rgba8(bytes: &[u8]) -> anyhow::Result<DecodedRgbaImage> {
+    let img = image::load_from_memory(bytes)?;
+    let (width, height) = image::GenericImageView::dimensions(&img);
+    let rgba = img.to_rgba8().into_raw();
+    Ok(DecodedRgbaImage {
+        width,
+        height,
+        rgba,
+    })
 }
 
 #[cfg(test)]

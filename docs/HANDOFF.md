@@ -1,33 +1,38 @@
-# HANDOFF: R12 Environment Gap Fixes Applied
+# HANDOFF: A13 Plan Complete
 
 ## What Changed
-- Fixed R12 fog depth computation in `viewer_render` by switching from `clip_position.w` to world-space camera distance.
-- Activated `fog.density` in shader fog math and kept fog bounded by configured start/end range.
-- Extended `viewer_core::EnvironmentState` with additive controls:
-  - `time_of_day_normalized`
-  - `sky_enabled`
-  - `fog_enabled`
-- Added `EnvironmentState::sanitized()` to clamp invalid environment values before renderer use.
-- Updated `viewer_app` with `derive_environment_from_snapshot(...)` and per-frame environment mapping from live snapshot.
-- Expanded environment diagnostics in `viewer_ui` to show time-of-day, sky/fog flags, sky top/bottom, and fog values.
-- Added targeted tests in `viewer_core`, `viewer_render`, and `viewer_app` for environment defaults/sanitization, clear-color behavior, and mapping determinism.
+- Completed A13 live texture bridge wiring across `viewer_asset`, `viewer_app`, and docs.
+- Added typed request/outcome contracts in `viewer_asset`:
+  - `AssetFetchRequest`
+  - `AssetFetchOutcome<DecodedRgbaImage>` consumption in `LiveTextureProvider::poll_texture(...)`
+- Added typed live failure propagation from worker to app:
+  - new `LiveFeedUpdate::TextureAssetFailed { id, reason }`
+  - decode failures mapped to `AssetFetchFailureReason::Decode`
+  - transport/timeout/missing-capability failures mapped in worker fetch path
+- Added A13 env controls:
+  - `VIEWER_ASSET_SOURCE_MODE=fixture|auto|live`
+  - `VIEWER_ASSET_LIVE_TIMEOUT_MS=<u64>` (clamped)
+- Renamed texture orchestration lane from `tick_fixture_textures(...)` to `tick_scene_textures(...)`.
+- Updated testing reference and continuity/report artifacts for final A13 state.
 
 ## Validation Run
 - `cargo fmt --all`: PASSED
-- `cargo check -p viewer_core -p viewer_render -p viewer_app -p viewer_ui`: PASSED
-- `cargo test -p viewer_core -p viewer_render -p viewer_app -p viewer_ui`: PASSED
-- `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot VIEWER_TEST_SCREENSHOT_DIR=artifacts/screenshots_r12_gapfix_smoke VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES=1 VIEWER_TEST_SCREENSHOT_MAX_FRAMES=2 cargo run -p viewer_app`: PASSED
+- `cargo test -p viewer_asset -p viewer_grid -p viewer_net -p viewer_app -p viewer_render -p viewer_ui`: PASSED
+- `cargo check --workspace`: PASSED
+- `cargo test --workspace`: PASSED
+- `VIEWER_APP_LIVE_STARTUP=off VIEWER_FIXTURE_TEXTURES=1 STRESS_TEST=screenshot VIEWER_TEST_SCREENSHOT_DIR=artifacts/screenshots_a13_smoke VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES=1 VIEWER_TEST_SCREENSHOT_MAX_FRAMES=1 cargo run -p viewer_app`: PASSED
+- Screenshot review: reviewed `artifacts/screenshots_a13_smoke/viewer_test_0001.png`; scene rendered with expected geometry + fallback color behavior for smoke verification.
+- Known warning (pre-existing, unchanged): `viewer_render` dead-code warning for `DEBUG_CLIP_SPACE_TRIANGLE`.
 
 ## Exact Current State
-- R12 environment path now uses bounded, sanitized contracts with explicit enable flags and time-of-day scalar.
-- Fog now responds to distance and density as intended.
-- Sky top and bottom colors are both used in runtime rendering behavior.
+- A13 is complete per plan scope:
+  - bounded live texture fetch bridge is active
+  - source/failure diagnostics counters are wired
+  - cache fallback semantics remain deterministic
+  - source mode and timeout knobs are documented and implemented
 
 ## Exact Next Step
-- Re-run workspace-wide strict lint validation (`cargo clippy --workspace --all-targets -- -D warnings`) and either:
-  - address remaining warnings (including `DEBUG_CLIP_SPACE_TRIANGLE`), or
-  - explicitly defer warning cleanup in a scoped follow-up plan.
+- Optional follow-up: add explicit `viewer_net` unit tests directly covering `fetch_asset_bytes(...)` timeout/status behavior (transport helper currently validated indirectly by app/worker integration tests).
 
 ## Blockers / Risks
-- No functional blocker found.
-- `viewer_render` still emits a dead-code warning for `DEBUG_CLIP_SPACE_TRIANGLE`; not functionally harmful but clippy-strict workflows may fail until cleaned.
+- No blocker for A13 scope completion.
