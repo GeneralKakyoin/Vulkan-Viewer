@@ -13,13 +13,13 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::FmtSubscriber;
 use viewer_core::{
-    AlphaMode, AssetID, AvatarAppearanceSummary, AvatarProfileState, AvatarProfileTab,
-    AvatarRenderMode, Camera, ChatConnectionState, ChatMessage, ChatSendStatus, ChatState,
-    DirectImMessage, FirstLifeProfile, FriendEntry, GeometrySource, LiveVisualSnapshot, MeshKind,
-    ProfileClassifiedDetails, ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes,
-    ProfilePickDetails, ProfilePickSummary, RuntimeRelayEvent, RuntimeRelayLevel, Scene,
-    SecondLifeProfile, SocialState, WorldAvatarPlaceholder, WorldObjectIngestionAdapter,
-    WorldObjectIngestionSeam, compute_p2p_session_id,
+    AlphaMode, AssetID, AssetPriorityHint, AvatarAppearanceSummary, AvatarProfileState,
+    AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState, ChatMessage, ChatSendStatus,
+    ChatState, DirectImMessage, FirstLifeProfile, FriendEntry, GeometrySource, LiveVisualSnapshot,
+    MeshKind, ProfileClassifiedDetails, ProfileClassifiedSummary, ProfileLoadStatus, ProfileNotes,
+    ProfilePickDetails, ProfilePickSummary, RegionContinuitySummary, RuntimeRelayEvent,
+    RuntimeRelayLevel, Scene, SecondLifeProfile, SocialState, WorldAvatarPlaceholder,
+    WorldObjectIngestionAdapter, WorldObjectIngestionSeam, compute_p2p_session_id,
 };
 use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
@@ -125,7 +125,7 @@ impl StressTestMode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct AutoCameraConfig {
     center: [f32; 3],
     radius: f32,
@@ -133,6 +133,20 @@ struct AutoCameraConfig {
     look_height: f32,
     angular_speed_radians: f32,
     phase_radians: f32,
+    path_script: Option<CameraPathScript>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CameraPathWaypoint {
+    time_sec: f32,
+    position: [f32; 3],
+    look_at: [f32; 3],
+}
+
+#[derive(Debug, Clone)]
+struct CameraPathScript {
+    waypoints: Vec<CameraPathWaypoint>,
+    duration_sec: f32,
 }
 
 impl Default for AutoCameraConfig {
@@ -144,6 +158,7 @@ impl Default for AutoCameraConfig {
             look_height: 2.0,
             angular_speed_radians: 0.5,
             phase_radians: 0.0,
+            path_script: None,
         }
     }
 }
@@ -153,7 +168,14 @@ impl AutoCameraConfig {
         auto_camera_config_from_lookup(|key| std::env::var(key).ok())
     }
 
-    fn apply_to_camera(self, camera: &mut Camera, elapsed_seconds: f32) {
+    fn apply_to_camera(&self, camera: &mut Camera, elapsed_seconds: f32) {
+        if let Some(script) = &self.path_script {
+            if let Some((position, target)) = script.sample(elapsed_seconds) {
+                apply_camera_look_at(camera, position, target);
+                return;
+            }
+        }
+
         let angle = elapsed_seconds * self.angular_speed_radians + self.phase_radians;
         let target = [
             self.center[0],
@@ -166,18 +188,41 @@ impl AutoCameraConfig {
             self.center[2] + self.radius * angle.sin(),
         ];
 
-        let to_target = [
-            target[0] - position[0],
-            target[1] - position[1],
-            target[2] - position[2],
-        ];
-        let horizontal = (to_target[0] * to_target[0] + to_target[2] * to_target[2]).sqrt();
-        let yaw = to_target[2].atan2(to_target[0]);
-        let pitch = to_target[1].atan2(horizontal).clamp(-1.553343, 1.553343);
+        apply_camera_look_at(camera, position, target);
+    }
+}
 
-        camera.position = position;
-        camera.yaw = yaw;
-        camera.pitch = pitch;
+impl CameraPathScript {
+    fn sample(&self, elapsed_seconds: f32) -> Option<([f32; 3], [f32; 3])> {
+        if self.waypoints.is_empty() {
+            return None;
+        }
+        if self.waypoints.len() == 1 {
+            let only = self.waypoints[0];
+            return Some((only.position, only.look_at));
+        }
+
+        let duration = self.duration_sec.max(0.001);
+        let mut t = elapsed_seconds.rem_euclid(duration);
+        if !t.is_finite() {
+            t = 0.0;
+        }
+
+        for pair in self.waypoints.windows(2) {
+            let start = pair[0];
+            let end = pair[1];
+            if t < start.time_sec || t > end.time_sec {
+                continue;
+            }
+            let span = (end.time_sec - start.time_sec).max(0.0001);
+            let alpha = ((t - start.time_sec) / span).clamp(0.0, 1.0);
+            let position = lerp_vec3(start.position, end.position, alpha);
+            let look_at = lerp_vec3(start.look_at, end.look_at, alpha);
+            return Some((position, look_at));
+        }
+
+        let fallback = *self.waypoints.last()?;
+        Some((fallback.position, fallback.look_at))
     }
 }
 
@@ -3589,6 +3634,7 @@ impl AppState {
                     self.avg_scene_update_ms,
                     metrics.total_instances,
                     metrics.visible_proxies,
+                    self.fixture_texture_cache.metrics.clone(),
                     self.stress_test_mode != StressTestMode::Screenshot,
                 );
                 pending_chat_send = actions.nearby_chat_send;
@@ -3685,9 +3731,9 @@ impl AppState {
 
         // Also extract visible texture IDs from the scene (capped at 64)
         let visible_ids = extract_visible_texture_ids_from_scene(&self.scene, visibility_list, 64);
-        for id in visible_ids {
-            if !ids_to_request.contains(&id) {
-                ids_to_request.push(id);
+        for id in &visible_ids {
+            if !ids_to_request.contains(id) {
+                ids_to_request.push(id.clone());
             }
         }
 
@@ -3697,12 +3743,24 @@ impl AppState {
 
         let _attempted = self.fixture_texture_cache.poll_png_rgba8(2)?;
 
-        for id in &ids_to_request {
+        let continuity = self
+            .live_visual_state
+            .snapshot
+            .as_ref()
+            .map(|s| &s.continuity);
+        let prioritized_requests =
+            build_asset_priority_hints(&ids_to_request, &visible_ids, continuity);
+
+        for hint in &prioritized_requests {
+            let id = &hint.id;
             if self.renderer.has_texture(id) {
                 continue;
             }
 
-            match self.fixture_texture_cache.request_png_rgba8(id)? {
+            match self
+                .fixture_texture_cache
+                .request_png_rgba8_with_priority(id, hint.priority)?
+            {
                 viewer_asset::AssetStatus::Loading => {}
                 viewer_asset::AssetStatus::Missing => {
                     if self.fixture_texture_missing_logged.insert(id.clone()) {
@@ -3832,6 +3890,55 @@ fn extract_visible_texture_ids_from_scene(
         }
     }
     ids.into_iter().collect()
+}
+
+fn build_asset_priority_hints(
+    ids_to_request: &[AssetID],
+    visible_ids: &[AssetID],
+    continuity: Option<&RegionContinuitySummary>,
+) -> Vec<AssetPriorityHint> {
+    let visible: HashSet<AssetID> = visible_ids.iter().cloned().collect();
+    let has_previous = continuity.and_then(|c| c.previous_region_coords).is_some();
+    let neighbor_scope_count = continuity
+        .map(|c| {
+            c.neighbors
+                .len()
+                .min(viewer_asset::texture_fixture::A10_MAX_NEIGHBOR_SCOPES)
+        })
+        .unwrap_or(0);
+
+    let mut active_assigned = 0usize;
+    let mut previous_assigned = 0usize;
+    let mut neighbor_assigned = 0usize;
+    let mut hints = Vec::with_capacity(ids_to_request.len());
+
+    for id in ids_to_request {
+        let priority = if visible.contains(id)
+            && active_assigned < viewer_asset::texture_fixture::A10_QUOTA_ACTIVE
+        {
+            active_assigned += 1;
+            viewer_core::AssetPriority::Active
+        } else if has_previous
+            && previous_assigned < viewer_asset::texture_fixture::A10_QUOTA_PREVIOUS
+        {
+            previous_assigned += 1;
+            viewer_core::AssetPriority::Previous
+        } else if neighbor_scope_count > 0
+            && neighbor_assigned < viewer_asset::texture_fixture::A10_QUOTA_NEIGHBOR
+        {
+            neighbor_assigned += 1;
+            viewer_core::AssetPriority::Neighbor
+        } else {
+            viewer_core::AssetPriority::Normal
+        };
+
+        hints.push(AssetPriorityHint {
+            id: id.clone(),
+            priority,
+        });
+    }
+
+    hints
 }
 
 impl InputState {
@@ -3989,6 +4096,12 @@ where
     if let Some(value) = lookup("VIEWER_TEST_CAMERA_PHASE").as_deref() {
         config.phase_radians = value.parse::<f32>().ok().unwrap_or(config.phase_radians);
     }
+    if let Some(path_file) = lookup("VIEWER_TEST_CAMERA_PATH_FILE").as_deref() {
+        match load_camera_path_script(PathBuf::from(path_file)) {
+            Ok(script) => config.path_script = Some(script),
+            Err(err) => tracing::warn!("invalid VIEWER_TEST_CAMERA_PATH_FILE ({path_file}): {err}"),
+        }
+    }
     config
 }
 
@@ -4038,6 +4151,100 @@ fn parse_vec3_csv(value: &str) -> Option<[f32; 3]> {
     Some([x, y, z])
 }
 
+fn apply_camera_look_at(camera: &mut Camera, position: [f32; 3], target: [f32; 3]) {
+    let to_target = [
+        target[0] - position[0],
+        target[1] - position[1],
+        target[2] - position[2],
+    ];
+    let horizontal = (to_target[0] * to_target[0] + to_target[2] * to_target[2]).sqrt();
+    let yaw = to_target[2].atan2(to_target[0]);
+    let pitch = to_target[1].atan2(horizontal).clamp(-1.553343, 1.553343);
+    camera.position = position;
+    camera.yaw = yaw;
+    camera.pitch = pitch;
+}
+
+fn lerp_vec3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+fn load_camera_path_script(path: PathBuf) -> Result<CameraPathScript> {
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read camera path file: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse camera path json: {}", path.display()))?;
+    parse_camera_path_script_value(value)
+}
+
+fn parse_camera_path_script_value(value: serde_json::Value) -> Result<CameraPathScript> {
+    let Some(list) = value.as_array() else {
+        anyhow::bail!("camera path must be a JSON array");
+    };
+    if list.len() < 2 {
+        anyhow::bail!("camera path must contain at least 2 waypoints");
+    }
+
+    let mut waypoints = Vec::with_capacity(list.len());
+    for entry in list {
+        let Some(obj) = entry.as_object() else {
+            anyhow::bail!("camera waypoint must be a JSON object");
+        };
+        let time_sec = obj
+            .get("time_sec")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .context("waypoint.time_sec must be finite and >= 0")?;
+        let position = parse_json_vec3(obj.get("position").context("missing waypoint.position")?)
+            .context("invalid waypoint.position")?;
+        let look_at = parse_json_vec3(obj.get("look_at").context("missing waypoint.look_at")?)
+            .context("invalid waypoint.look_at")?;
+        waypoints.push(CameraPathWaypoint {
+            time_sec,
+            position,
+            look_at,
+        });
+    }
+
+    waypoints.sort_by(|a, b| a.time_sec.total_cmp(&b.time_sec));
+    for pair in waypoints.windows(2) {
+        if pair[1].time_sec <= pair[0].time_sec {
+            anyhow::bail!("camera path waypoint time_sec values must be strictly increasing");
+        }
+    }
+
+    let duration_sec = waypoints
+        .last()
+        .map(|w| w.time_sec)
+        .filter(|v| *v > 0.0)
+        .context("camera path duration must be > 0")?;
+
+    Ok(CameraPathScript {
+        waypoints,
+        duration_sec,
+    })
+}
+
+fn parse_json_vec3(value: &serde_json::Value) -> Option<[f32; 3]> {
+    let array = value.as_array()?;
+    if array.len() != 3 {
+        return None;
+    }
+    let x = array[0].as_f64()? as f32;
+    let y = array[1].as_f64()? as f32;
+    let z = array[2].as_f64()? as f32;
+    if x.is_finite() && y.is_finite() && z.is_finite() {
+        Some([x, y, z])
+    } else {
+        None
+    }
+}
+
 fn fixture_texture_ids_from_env() -> Vec<viewer_core::AssetID> {
     let raw = std::env::var("VIEWER_FIXTURE_TEXTURES").ok();
     let Some(raw) = raw else {
@@ -4067,6 +4274,7 @@ fn fixture_texture_ids_from_env() -> Vec<viewer_core::AssetID> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::fs;
     use viewer_core::{
         AlphaMode, AssetID, GeometrySource, InstanceRole, MaterialDescriptor, MaterialSet,
         MeshKind, RenderableInstance, TextureEntry, Transform,
@@ -4214,6 +4422,43 @@ mod tests {
         assert_eq!(config.look_height, 4.5);
         assert_eq!(config.angular_speed_radians, 0.8);
         assert_eq!(config.phase_radians, 1.57);
+    }
+
+    #[test]
+    fn parse_camera_path_script_value_supports_linear_segments() {
+        let value = serde_json::json!([
+            {"time_sec": 0.0, "position": [0.0, 0.0, 0.0], "look_at": [1.0, 0.0, 0.0]},
+            {"time_sec": 2.0, "position": [2.0, 0.0, 0.0], "look_at": [3.0, 0.0, 0.0]}
+        ]);
+        let script = parse_camera_path_script_value(value).expect("script should parse");
+        assert_eq!(script.waypoints.len(), 2);
+        let (position, look_at) = script.sample(1.0).expect("sample should exist");
+        assert_eq!(position, [1.0, 0.0, 0.0]);
+        assert_eq!(look_at, [2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn auto_camera_config_loads_script_file_when_present() {
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push(format!(
+            "viewer_camera_path_{}_{}.json",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let json = r#"
+[
+  {"time_sec": 0.0, "position": [0.0, 0.0, 0.0], "look_at": [1.0, 0.0, 0.0]},
+  {"time_sec": 1.0, "position": [1.0, 0.0, 0.0], "look_at": [2.0, 0.0, 0.0]}
+]
+"#;
+        fs::write(&temp_path, json).expect("temp file write should succeed");
+        let vars = HashMap::<String, String>::from([(
+            String::from("VIEWER_TEST_CAMERA_PATH_FILE"),
+            temp_path.to_string_lossy().to_string(),
+        )]);
+        let config = auto_camera_config_from_lookup(|k| vars.get(k).cloned());
+        assert!(config.path_script.is_some());
+        let _ = fs::remove_file(temp_path);
     }
 
     #[test]
@@ -4750,5 +4995,60 @@ mod tests {
             ids_capped,
             vec![AssetID::new("tex_b"), AssetID::new("tex_c")]
         );
+    }
+
+    #[test]
+    fn continuity_priority_mapping_assigns_active_previous_neighbor() {
+        let ids = vec![
+            AssetID::new("a"),
+            AssetID::new("b"),
+            AssetID::new("c"),
+            AssetID::new("d"),
+        ];
+        let visible = vec![AssetID::new("a")];
+        let continuity = RegionContinuitySummary {
+            phase: viewer_core::HandoffPhase::Confirming,
+            active_region_coords: Some([1024, 2048]),
+            previous_region_coords: Some([1023, 2048]),
+            neighbors: vec![viewer_core::BoundedNeighborSummary {
+                region_handle: 1,
+                region_x: 1025,
+                region_y: 2048,
+            }],
+        };
+
+        let mapped = build_asset_priority_hints(&ids, &visible, Some(&continuity));
+        assert_eq!(mapped[0].priority, viewer_core::AssetPriority::Active);
+        assert_eq!(mapped[1].priority, viewer_core::AssetPriority::Previous);
+        assert_eq!(mapped[2].priority, viewer_core::AssetPriority::Previous);
+        assert_eq!(mapped[3].priority, viewer_core::AssetPriority::Previous);
+    }
+
+    #[test]
+    fn continuity_priority_mapping_falls_back_to_normal_without_continuity() {
+        let ids = vec![AssetID::new("a"), AssetID::new("b")];
+        let visible = vec![AssetID::new("a")];
+        let mapped = build_asset_priority_hints(&ids, &visible, None);
+        assert_eq!(mapped[0].priority, viewer_core::AssetPriority::Active);
+        assert_eq!(mapped[1].priority, viewer_core::AssetPriority::Normal);
+    }
+
+    #[test]
+    fn continuity_priority_mapping_assigns_neighbor_when_previous_absent() {
+        let ids = vec![AssetID::new("a"), AssetID::new("b")];
+        let visible = vec![AssetID::new("a")];
+        let continuity = RegionContinuitySummary {
+            phase: viewer_core::HandoffPhase::Confirming,
+            active_region_coords: Some([1024, 2048]),
+            previous_region_coords: None,
+            neighbors: vec![viewer_core::BoundedNeighborSummary {
+                region_handle: 1,
+                region_x: 1025,
+                region_y: 2048,
+            }],
+        };
+        let mapped = build_asset_priority_hints(&ids, &visible, Some(&continuity));
+        assert_eq!(mapped[0].priority, viewer_core::AssetPriority::Active);
+        assert_eq!(mapped[1].priority, viewer_core::AssetPriority::Neighbor);
     }
 }

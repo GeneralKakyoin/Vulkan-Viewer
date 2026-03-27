@@ -59,6 +59,7 @@ Stress/verification modes:
 - `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=2 cargo run -p viewer_app`
 - `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=camera cargo run -p viewer_app`
 - `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot cargo run -p viewer_app`
+- `cargo run -p viewer_app --bin screenshot_diff -- <baseline_dir> <candidate_dir> [max_mean_abs_error]`
 
 ### Useful `cargo test` runner flags (general Rust)
 
@@ -94,6 +95,7 @@ All defaults are the code defaults in `viewer_app`.
 - `VIEWER_TEST_CAMERA_LOOK_HEIGHT` (float, default `2`)
 - `VIEWER_TEST_CAMERA_SPEED` (float radians/sec, default `0.5`)
 - `VIEWER_TEST_CAMERA_PHASE` (float radians, default `0`)
+- `VIEWER_TEST_CAMERA_PATH_FILE` (path to JSON waypoint script; when set and valid, overrides orbit camera path)
 
 ### Screenshot tuning env vars (`STRESS_TEST=screenshot`)
 

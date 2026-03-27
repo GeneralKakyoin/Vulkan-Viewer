@@ -449,6 +449,7 @@ impl UiSystem {
         avg_scene_update_ms: f32,
         total_instances: usize,
         visible_proxies: usize,
+        fixture_texture_metrics: viewer_core::AssetContinuityMetrics,
         _show_chat_window: bool,
     ) -> UiActions {
         if surface_size.width == 0 || surface_size.height == 0 {
@@ -591,6 +592,48 @@ impl UiSystem {
                             for line in live_visual_lines(live_visual) {
                                 ui.label(line);
                             }
+                        });
+
+                    egui::CollapsingHeader::new("Asset Streaming Continuity")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.label(format!(
+                                "Retained Active: {}",
+                                fixture_texture_metrics.continuity_retained_active
+                            ));
+                            ui.label(format!(
+                                "Retained Previous: {}",
+                                fixture_texture_metrics.continuity_retained_previous
+                            ));
+                            ui.label(format!(
+                                "Retained Neighbor: {}",
+                                fixture_texture_metrics.continuity_retained_neighbor
+                            ));
+                            ui.label(format!(
+                                "Promoted Neighbor: {}",
+                                fixture_texture_metrics.continuity_promoted_neighbor
+                            ));
+                            ui.separator();
+                            ui.label(format!(
+                                "Evicted Expired: {}",
+                                fixture_texture_metrics.continuity_evicted_expired
+                            ));
+                            ui.label(format!(
+                                "Evicted Budget: {}",
+                                fixture_texture_metrics.continuity_evicted_budget
+                            ));
+                            ui.label(format!(
+                                "Requests Enqueued: {}",
+                                fixture_texture_metrics.continuity_requests_enqueued
+                            ));
+                            ui.label(format!(
+                                "Requests Dropped (Cap): {}",
+                                fixture_texture_metrics.continuity_requests_dropped_cap
+                            ));
+                            ui.label(format!(
+                                "Pressure Events: {}",
+                                fixture_texture_metrics.continuity_budget_pressure_events
+                            ));
                         });
 
                     egui::CollapsingHeader::new("Runtime Relay")

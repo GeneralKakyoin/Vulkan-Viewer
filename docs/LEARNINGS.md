@@ -271,3 +271,31 @@ more than one session to establish correctly.
 **Rule for future plans:** When a bounded visual payload is derived from app-side state rather than the live snapshot, prefer a seam-side payload collection on `WorldObjectIngestionSeam` and keep the snapshot item constructors unchanged unless the worker truly owns the new data.
 
 **Files affected:** `viewer_core::WorldObjectIngestionSeam`, `viewer_app` avatar-to-seam mapping.
+
+---
+
+## L18 — Egui window visibility state must be updated outside the window closure
+
+**Category:** Rust / `viewer_ui`
+
+**Learned when:** Implementing U09 visibility toggles for Diagnostics and Social windows.
+
+**What happened:** Attempting to update `self.show_diagnostics = open_state` inside the `egui::Window::show` closure caused a borrow checker error because the closure borrows `self` (or the builder borrows it) and you cannot mutably borrow `self` while the closure is active.
+
+**Rule for future plans:** Use a local mutable boolean for the `open` parameter, and assign its value back to the `self` field *after* the window's `show` call has completed.
+
+**Files affected:** `viewer_ui/src/lib.rs`.
+
+---
+
+## L19 — Priority-based cache eviction requires deterministic tie-breaking for stability
+
+**Category:** Architecture / Asset / `viewer_asset`
+
+**Learned when:** Refactoring `FixtureTextureCache` from LRU to a priority-metadata queue in Milestone A10.
+
+**What happened:** When multiple assets have the same priority (e.g., all `Normal` or all `Active`), a non-deterministic eviction choice can cause "asset thrashing" where the same set of textures are repeatedly loaded and evicted every frame. By strictly ordering by `(priority, last_touched_tick, asset_id)`, we ensure that if someone must be evicted, it's always the same candidate until state changes, providing frame-to-frame stability.
+
+**Rule for future plans:** Any cache eviction policy must include a deterministic fallback (like `AssetID` or a creation-sequencer) to break ties between items of equal priority or age.
+
+**Files affected:** `viewer_asset::texture_fixture`.

@@ -632,27 +632,209 @@ Continuity-critical assets remain stable through bounded transition windows with
 
 ---
 
-## N11 — Region handoff hardening and transition diagnostics (concise)
+## N11 — Region handoff hardening and transition diagnostics
 
-### Dependency notes
+### Goal
 
-Depends on `N07` continuity baseline and `A10` continuity-aware asset policy.
+Harden bounded region handoff behavior so transitions are more reliable under packet delay/loss and produce explicit diagnostics for recovery, without expanding into full teleport/session-parity orchestration.
 
-### Non-goals
+### Why now
 
-Not full teleport/session orchestration parity or unlimited region graph management.
+`A10` establishes bounded continuity-aware asset policy. The next bottleneck is transition robustness and observability when crossing simulators under real network conditions.
+
+### In scope
+
+* tighten handoff state progression and recovery logic around `CrossedRegion` / `ConfirmEnableSimulator`
+* add bounded transition diagnostics with explicit reason classification for stalled or failed handoffs
+* add deterministic transition timers/budgets for retry windows and fallback behavior
+* improve continuity state reporting so `viewer_ui` can distinguish healthy handoff, delayed handoff, and degraded handoff states
+* keep region-neighbor scope bounded and avoid expanding to unlimited graph management
+
+### Out of scope
+
+* full teleport workflow parity
+* cross-grid roaming/session migration
+* unlimited region graph streaming
+* broad protocol expansion outside transition-control packets and diagnostics required by this milestone
+
+### Boundary check
+
+* `viewer_net` owns transition-control transport/decode mechanics and retry/timer plumbing
+* `viewer_grid` owns semantic interpretation/classification of transition outcomes
+* `viewer_core` owns typed continuity state and seam-facing contracts
+* `viewer_ui` presents transition diagnostics only; no transition-policy ownership
+* `viewer_app` orchestrates and maps typed state only; no transport-policy ownership
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_N11.md`
+* review artifact `docs/reviews/REVIEW_plan_n11.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests for transition-state progression and bounded-recovery behavior
+* targeted tests for transition diagnostic classification and continuity reporting
+* `cargo test` when cross-crate transition behavior changes materially
+* `cargo run -p viewer_app` bounded transition smoke with diagnostics verification
+
+### Exit criteria
+
+Region handoffs remain bounded, deterministic, and diagnosable under degraded conditions, with clear typed outcome reporting and no boundary violations.
 
 ---
 
-## R12+ — Environment, polish, and parity expansion (concise)
+## R12 — Environment and atmospheric baseline
 
-### Dependency notes
+### Goal
 
-Begins only after stable world/object/avatar/workflow/asset continuity layers are proven.
+Introduce a bounded environment rendering baseline (sky/ambient/fog/time-of-day influence) that improves world readability without committing to full EEP parity.
 
-### Non-goals
+### Why now
 
-Do not treat parity as a single milestone; split into bounded, reviewed milestones.
+After `N11` transition hardening, visual continuity quality becomes the next usability bottleneck. A bounded environment baseline increases readability while preserving renderer stability.
+
+### In scope
+
+* add a typed environment state contract in `viewer_core` (ambient, sky tint, fog parameters, bounded time-of-day scalar)
+* implement renderer support for environment-driven lighting/fog in `viewer_render`
+* wire bounded environment state from app/runtime inputs into render path
+* add deterministic fallback environment profile when environment inputs are missing
+
+### Out of scope
+
+* full EEP parity (day cycles, water/sky shader parity, advanced atmosphere scattering)
+* cinematic post-processing suites
+* broad material model redesign beyond environment baseline needs
+
+### Boundary check
+
+* `viewer_core` owns environment domain contract
+* `viewer_render` owns shader/pipeline behavior for environment effects
+* `viewer_app` maps/wires environment state only
+* no environment-policy ownership leakage into `viewer_ui`/`viewer_net`
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_R12.md`
+* review artifact `docs/reviews/REVIEW_plan_r12.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted renderer tests for environment uniform mapping/fallback determinism
+* `cargo test` when render behavior changes materially
+* `cargo run -p viewer_app` bounded visual smoke for fog/ambient/sky transitions
+
+### Exit criteria
+
+Environment baseline renders deterministically through typed contracts, improves scene readability, and preserves renderer boundary discipline.
+
+---
+
+## A13 — Live asset transport bridge and cache integration slice
+
+### Goal
+
+Expand from fixture-first asset behavior to a bounded live asset bridge for selected texture/mesh classes while preserving A10 cache discipline and deterministic fallback behavior.
+
+### Why now
+
+`R12` increases dependency on stable live visual inputs. The next highest leverage step is a bounded live asset bridge to reduce fixture dependence without overreaching into full parity.
+
+### In scope
+
+* add bounded live fetch path for selected asset classes (starting with texture IDs already present in scene/material contracts)
+* integrate live fetch results into existing `viewer_asset` cache policy and priority model
+* preserve deterministic `Loading`/`Missing` fallback behavior in `viewer_render`
+* add explicit diagnostics for source (`fixture` vs `live`) and bounded failure classification
+
+### Out of scope
+
+* full asset-class parity across all content types
+* unbounded prefetch or persistent cross-session cache policy
+* invasive transport redesign
+
+### Boundary check
+
+* `viewer_asset` owns asset-source selection, decode, cache admission, and eviction policy
+* `viewer_net` owns capability transport mechanics only
+* `viewer_grid` owns capability semantics/policy interpretation
+* `viewer_render` consumes ready assets/fallback states only
+* `viewer_app` orchestrates request wiring only
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_A13.md`
+* review artifact `docs/reviews/REVIEW_plan_a13.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests for live-vs-fixture source selection and cache policy invariants
+* targeted tests for deterministic fallback under live fetch failure/latency
+* `cargo test` when cross-crate asset behavior changes materially
+* `cargo run -p viewer_app` bounded live-asset smoke (with explicit diagnostics assertions)
+
+### Exit criteria
+
+A bounded set of live assets flows through `viewer_asset` and existing render contracts with deterministic cache/fallback behavior and explicit source diagnostics.
+
+---
+
+## U14 — Workflow resilience and operator recovery controls
+
+### Goal
+
+Improve runtime operator control during degraded states (transition delay, stale assets, reconnect loops) so workflow remains predictable without introducing architecture drift.
+
+### Why now
+
+After `A13`, operators need stronger runtime control and clearer recovery affordances to validate broader live behavior safely.
+
+### In scope
+
+* add bounded recovery controls (retry handoff diagnostics probes, reset bounded asset queues, clear stale workflow indicators)
+* improve degraded-state messaging and callouts for transition/asset health
+* extend diagnostics grouping for transition + asset source health summaries
+* tighten keyboard/action shortcuts for recovery paths where appropriate
+
+### Out of scope
+
+* full UX redesign
+* account/session security workflow overhaul
+* embedding transport or cache policy logic in UI
+
+### Boundary check
+
+* `viewer_ui` owns presentation/action emission
+* `viewer_app` owns action dispatch/orchestration
+* `viewer_core` owns typed state contracts for diagnostics/recovery indicators
+* transport/cache policy remains owned by `viewer_net`/`viewer_asset`
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_U14.md`
+* review artifact `docs/reviews/REVIEW_plan_u14.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted UI/app/core tests for recovery controls and status messaging
+* `cargo test` when workflow behavior changes materially
+* `cargo run -p viewer_app` degraded-state workflow smoke (transition + asset failure scenarios)
+
+### Exit criteria
+
+Operators can diagnose and recover from bounded degraded states through clear, deterministic controls and messaging without boundary violations.
 
 ---
 
@@ -667,7 +849,8 @@ The following order is intentional unless explicitly revised:
 5. `U04` after first stable render+asset+feed triad
 6. `R05` -> `A06` -> `N07` remains fixed as the first continuity/stability arc
 7. `R08` -> `U09` -> `A10` must complete before expanding `N11`
-8. later milestones continue dependency-led interleaving, not strict round-robin
+8. `N11` -> `R12` -> `A13` -> `U14` is the next fixed bounded arc unless explicitly revised
+9. later milestones continue dependency-led interleaving, not strict round-robin
 
 If a proposal violates order, the planner must justify and obtain explicit approval.
 
@@ -771,9 +954,9 @@ Do not update this file for routine implementation churn.
 
 The next planning sequence is:
 
-1. `R08`
-2. `U09`
-3. `A10`
-4. `N11`
+1. `N11`
+2. `R12`
+3. `A13`
+4. `U14`
 
 Each requires its own approved `docs/plans/PLAN_<ID>.md` before implementation.
