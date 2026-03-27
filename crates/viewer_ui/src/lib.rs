@@ -215,6 +215,10 @@ pub struct UiSystem {
     profile_texture_failures: HashMap<String, String>,
     relay_filter_text: String,
     relay_level_filter: Option<RuntimeRelayLevel>,
+    pub show_diagnostics: bool,
+    pub show_social: bool,
+    pub focus_continuity_requested: bool,
+    pub focus_social_requested: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +409,10 @@ impl UiSystem {
             profile_texture_failures: HashMap::new(),
             relay_filter_text: String::new(),
             relay_level_filter: None,
+            show_diagnostics: true,
+            show_social: false,
+            focus_continuity_requested: false,
+            focus_social_requested: false,
         }
     }
 
@@ -441,7 +449,7 @@ impl UiSystem {
         avg_scene_update_ms: f32,
         total_instances: usize,
         visible_proxies: usize,
-        show_chat_window: bool,
+        _show_chat_window: bool,
     ) -> UiActions {
         if surface_size.width == 0 || surface_size.height == 0 {
             return UiActions::default();
@@ -479,11 +487,14 @@ impl UiSystem {
                     ));
                 });
 
+            let mut diag_open = self.show_diagnostics;
+            let mut focus_continuity = self.focus_continuity_requested;
             egui::Window::new("Diagnostics")
                 .default_pos(egui::pos2(surface_size.width as f32 - 260.0, 48.0))
                 .resizable(false)
+                .open(&mut diag_open)
                 .show(ctx, |ui| {
-                    egui::CollapsingHeader::new("Performance")
+                    egui::CollapsingHeader::new("Performance & Metrics")
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.label(format!("FPS: {:.1}", fps));
@@ -527,11 +538,7 @@ impl UiSystem {
                             }
                             ui.separator();
                             ui.label(format!("Scene Update: {:.2} ms", avg_scene_update_ms));
-                        });
-
-                    egui::CollapsingHeader::new("Scene Metrics")
-                        .default_open(false)
-                        .show(ui, |ui| {
+                            ui.separator();
                             ui.label(format!("Instances: {}", total_instances));
                             ui.label(format!("Visible: {}", visible_proxies));
                         });
@@ -573,9 +580,14 @@ impl UiSystem {
                             ));
                         });
 
-                    egui::CollapsingHeader::new("Live Visual")
-                        .default_open(false)
+                    egui::CollapsingHeader::new("Presence & Continuity")
+                        .default_open(true)
                         .show(ui, |ui| {
+                            if focus_continuity {
+                                ui.label("Focus: Presence & Continuity");
+                                ui.scroll_to_cursor(Some(egui::Align::TOP));
+                                focus_continuity = false;
+                            }
                             for line in live_visual_lines(live_visual) {
                                 ui.label(line);
                             }
@@ -663,15 +675,25 @@ impl UiSystem {
                                 });
                         });
                 });
+            self.show_diagnostics = diag_open;
+            self.focus_continuity_requested = focus_continuity;
 
-            if show_chat_window {
+            let mut social_open = self.show_social;
+            let mut focus_social = self.focus_social_requested;
+            if social_open {
                 egui::Window::new("Social")
                     .default_pos(egui::pos2(16.0, 340.0))
                     .default_size(egui::vec2(760.0, 360.0))
                     .min_size(egui::vec2(520.0, 260.0))
                     .max_size(egui::vec2(1100.0, 760.0))
                     .resizable(true)
+                    .open(&mut social_open)
                     .show(ctx, |ui| {
+                        if focus_social {
+                            ui.label("Focus: Social Workspace");
+                            ui.scroll_to_cursor(Some(egui::Align::TOP));
+                            focus_social = false;
+                        }
                         ui.horizontal(|ui| {
                             let (connection_text, color) = connection_chip(&chat_state.connection);
                             ui.colored_label(color, format!(" connection: {connection_text} "));
@@ -909,7 +931,9 @@ impl UiSystem {
                             });
                         });
                     });
+                self.show_social = social_open;
             }
+            self.focus_social_requested = focus_social;
 
             if let Some(profile) = profile_state.as_mut() {
                 egui::Window::new("Avatar Profile")
@@ -986,9 +1010,23 @@ impl UiSystem {
                                         Some((profile.avatar_id.clone(), tab));
                                 }
                             }
-                            if ui.button("Refresh").clicked() {
+                            let cooldown_ms = viewer_core::PROFILE_REFRESH_COOLDOWN_MS;
+                            let last_refresh = profile.last_refresh_unix_ms.unwrap_or(0);
+                            let on_cooldown = now_unix_ms < last_refresh + cooldown_ms;
+                            let remaining_secs = if on_cooldown {
+                                (last_refresh + cooldown_ms - now_unix_ms + 999) / 1000
+                            } else {
+                                0
+                            };
+
+                            let refresh_btn =
+                                ui.add_enabled(!on_cooldown, egui::Button::new("Refresh"));
+                            if refresh_btn.clicked() {
                                 actions.refresh_avatar_profile =
                                     Some((profile.avatar_id.clone(), Some(profile.selected_tab)));
+                            }
+                            if on_cooldown {
+                                ui.weak(format!("({remaining_secs}s)"));
                             }
                             egui::ComboBox::from_id_salt("profile_tab_jump")
                                 .selected_text(format!("{:?}", profile.selected_tab))

@@ -90,6 +90,7 @@ pub enum AvatarRenderMode {
 }
 
 pub const MAX_R08_ATTACHMENTS_PER_AVATAR: usize = 8;
+pub const PROFILE_REFRESH_COOLDOWN_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AvatarAppearanceSummary {
@@ -1425,6 +1426,7 @@ pub struct AvatarProfileState {
     pub load_classifieds: ProfileLoadState,
     pub load_first_life: ProfileLoadState,
     pub load_notes: ProfileLoadState,
+    pub last_refresh_unix_ms: Option<u64>,
 }
 
 impl AvatarProfileState {
