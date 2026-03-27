@@ -15,7 +15,9 @@ Make the existing debug/social/profile/diagnostic UI feel like one coherent “d
 
 ## In scope
 - **Session status UX**
-  - Define a shared, UI-friendly session status type in `viewer_core` (or equivalent shared contract) representing: `disabled`, `starting`, `connected`, `reconnecting`, `failed` (with optional concise reason).
+  - Define a shared, UI-friendly session status type in `viewer_core` representing: `disabled`, `starting`, `connected`, `reconnecting`, `failed` (with optional concise reason).
+    - Concrete contract: add `SessionUxStatus` (and if needed `SessionUxFailureReason`) in `viewer_core` so `viewer_ui` never depends on `viewer_app` internals.
+    - Reason is bounded and sanitized (no credentials/endpoints; no long error chains). Prefer a short stable “reason key” enum plus an optional short message when needed.
   - Update `viewer_app` to map its existing in-process live worker states (including reconnect loop) into the shared session status value.
   - Update `viewer_ui` to render session status as a consistent “chip” (label + color) and make it visible in the primary workflow surface.
 - **Workflow panel grouping (UI information architecture)**
@@ -37,7 +39,14 @@ Make the existing debug/social/profile/diagnostic UI feel like one coherent “d
     - existing `VIEWER_APP_PROFILE_CACHE_TTL_SECS` policy used by `viewer_app`
   - Render per-tab freshness chips and replace raw “updated: <unix_ms>” presentation with:
     - freshness label
-    - concise “age” readout (still deterministic; avoid locale/timezone formatting)
+    - concise deterministic “age” readout (no locale/timezone formatting)
+      - Compute `age_ms = now_unix_ms - last_updated_unix_ms` when `last_updated_unix_ms` is present and non-zero.
+      - Format by truncation (floor), not rounding:
+        - `0s..59s` as `<Ns>`
+        - `1m..59m` as `<Nm>`
+        - `1h..23h` as `<Nh>`
+        - `1d..99d` as `<Nd>`
+        - `>=100d` as `99d+`
     - visible error reason on failed loads
   - Keep data ownership unchanged: `AvatarProfileState` remains the source of truth; UI computes indicators.
 - **Diagnostics usability**
@@ -56,6 +65,55 @@ Make the existing debug/social/profile/diagnostic UI feel like one coherent “d
 - Chat connection state is a typed enum in `viewer_core` (`ChatConnectionState`) and is already rendered as a colored chip in the UI. (`crates/viewer_core/src/lib.rs`, `crates/viewer_ui/src/lib.rs`)
 - Profile load state exists per tab (`ProfileLoadState` with `last_updated_unix_ms`), and fetch TTL policy exists in `viewer_app` (`should_fetch_profile_tab(..., ttl_secs)`). (`crates/viewer_core/src/lib.rs`, `crates/viewer_app/src/main.rs`)
 - Profile UI currently shows raw `last_updated_unix_ms` and status color, but no freshness concept and no consistent “stale” indicator.
+
+## Required plan pinning (from review)
+
+### Session status contract (pinned)
+
+This milestone will introduce exactly one UX-facing session-status contract owned by `viewer_core`:
+
+- Location: `crates/viewer_core/src/lib.rs`
+- Types:
+  - `pub enum SessionUxStatus`
+    - `Disabled { reason: Option<SessionUxReason> }`
+    - `Starting`
+    - `Connected`
+    - `Reconnecting { reason: Option<SessionUxReason> }`
+    - `Failed { reason: SessionUxReason }`
+  - `pub enum SessionUxReason`
+    - `DisabledByConfig`
+    - `MissingConfig`
+    - `ConnectTransport`
+    - `LoginTransport`
+    - `LoginAuth`
+    - `LoginRequiresTos`
+    - `LoginRequiresMfa`
+    - `LoginUpdateRequired`
+    - `ConnectionLost`
+    - `Other`
+
+Notes:
+- `SessionUxReason` is a bounded, stable reason key suitable for UI chips/tooltips.
+- `viewer_app` is responsible for sanitizing any underlying error detail into this bounded reason key (no endpoints/credentials; no long error chains).
+- `viewer_ui` must not depend on `viewer_app` internal enums (no cross-crate leakage of `LiveStartupFailureClass`).
+
+### Profile age formatting (pinned)
+
+The UI must display profile age deterministically (no locale/timezone formatting):
+
+- Inputs: `now_unix_ms: u64`, `last_updated_unix_ms: Option<u64>`, `ttl_secs: u64`
+- If `last_updated_unix_ms` is `None` or `0`: age display is `n/a` and freshness is `unknown`.
+- If `last_updated_unix_ms > now_unix_ms`: treat as clock skew; age display is `0s` and freshness is `unknown`.
+- Else compute `age_ms = now_unix_ms - last_updated_unix_ms` and format by truncation (floor), not rounding:
+  - `0s..59s` as `<Ns>`
+  - `1m..59m` as `<Nm>` where `Nm = floor(age_s / 60)`
+  - `1h..23h` as `<Nh>` where `Nh = floor(age_s / 3600)`
+  - `1d..99d` as `<Nd>` where `Nd = floor(age_s / 86400)`
+  - `>=100d` as `99d+`
+- Freshness decision:
+  - if `ttl_secs == 0`: freshness is `unknown`
+  - else if `age_s <= ttl_secs`: `fresh`
+  - else: `stale`
 
 ## Files and components touched
 - `crates/viewer_core/src/lib.rs`

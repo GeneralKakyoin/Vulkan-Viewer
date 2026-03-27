@@ -243,3 +243,31 @@ more than one session to establish correctly.
 **Rule for future plans:** All procedural geometry generators must emit `SubMesh` units that map to these canonical SL face IDs. Never merge distinct SL faces into a single mesh without preserving the ID-based look-up path.
 
 **Files affected:** `viewer_core::geometry::llvolume`.
+
+---
+
+## L16 — `white_view` fallback for empty texture IDs ensures valid bind groups
+
+**Category:** Rendering / `viewer_render`
+
+**Learned when:** Implementing Milestone A06 (Texture & Material Integration).
+
+**What happened:** When a `MaterialDescriptor` has an empty `AssetID` for a texture slot, the renderer must still provide a valid `wgpu::TextureView` to the bind group. Using the loading (yellow) or missing (magenta) views for "legally empty" slots (like an unassigned normal map) would produce visual noise. An opaque white 1x1 texture is used instead to ensure the shader's multiplication (`base_color * mesh_color`) remains identity when no texture is intended.
+
+**Rule for future plans:** Always use `white_view` as the fallback for empty or unassigned texture slots in `create_material_bind_group`. Reserve `loading_view` and `missing_view` for cases where an ID is present but the asset is not yet available.
+
+**Files affected:** `viewer_render::RenderBackend`.
+
+---
+
+## L17 — Attachments that are derived from app-local avatar samples fit better as seam payloads than snapshot fields
+
+**Category:** Architecture / `viewer_core` / `viewer_app`
+
+**Learned when:** Implementing R08 attachment proxies on top of the existing avatar sample path.
+
+**What happened:** The attachment data was derived from the app's current avatar sample list, not from the live worker snapshot itself. Extending `WorldObjectIngestionItem` would have forced every snapshot lane constructor to grow new fields even though the payload was orthogonal to the existing snapshot decode data.
+
+**Rule for future plans:** When a bounded visual payload is derived from app-side state rather than the live snapshot, prefer a seam-side payload collection on `WorldObjectIngestionSeam` and keep the snapshot item constructors unchanged unless the worker truly owns the new data.
+
+**Files affected:** `viewer_core::WorldObjectIngestionSeam`, `viewer_app` avatar-to-seam mapping.

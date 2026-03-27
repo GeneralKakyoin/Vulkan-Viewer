@@ -1,10 +1,34 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
+pub mod material;
+pub use material::{MaterialDescriptor, PbrDescriptor, TextureAnim, TextureEntry};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialSet {
+    pub default: MaterialDescriptor,
+    pub by_face: BTreeMap<u16, MaterialDescriptor>,
+}
+
+impl Default for MaterialSet {
+    fn default() -> Self {
+        Self {
+            default: MaterialDescriptor::default(),
+            by_face: BTreeMap::new(),
+        }
+    }
+}
+
+impl MaterialSet {
+    pub fn material_for_face(&self, face_id: u16) -> &MaterialDescriptor {
+        self.by_face.get(&face_id).unwrap_or(&self.default)
+    }
+}
+
 pub mod geometry;
 pub mod spatial;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AssetID(String);
 
 impl AssetID {
@@ -63,6 +87,39 @@ pub enum AvatarRenderMode {
     #[default]
     Proxy,
     FallbackBox,
+}
+
+pub const MAX_R08_ATTACHMENTS_PER_AVATAR: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AvatarAppearanceSummary {
+    pub display_label: String,
+    pub sim_name: Option<String>,
+    pub is_self: bool,
+    pub stale: bool,
+    pub last_update_unix_ms: u64,
+    pub attachment_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AvatarAttachmentProxy {
+    pub avatar_id: String,
+    pub attachment_id: String,
+    pub local_id: u32,
+    pub display_label: String,
+    pub transform: Transform,
+    pub color: [f32; 4],
+    pub materials: MaterialSet,
+    pub alpha_mode: AlphaMode,
+}
+
+impl AvatarAttachmentProxy {
+    pub fn key(&self) -> String {
+        format!(
+            "{}::{}::{}",
+            self.avatar_id, self.attachment_id, self.local_id
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -148,6 +205,16 @@ pub enum MeshKind {
     AvatarProxy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum AlphaMode {
+    #[default]
+    Opaque,
+    AlphaTest {
+        cutoff: f32,
+    },
+    Blend,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GeometrySource {
     Procedural(VolumeParams, f32), // Params, LOD/Detail
@@ -214,6 +281,8 @@ pub enum InstanceRole {
     WorldSemanticContextRing,
     WorldAvatarPlaceholderSelf,
     WorldAvatarPlaceholderOther,
+    WorldAvatarAttachmentProxy,
+    WorldIngestionContinuityPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -375,7 +444,10 @@ pub struct RenderableInstance {
     pub geometry: GeometrySource,
     pub role: InstanceRole,
     pub transform: Transform,
-    pub color: [f32; 3],
+    pub color: [f32; 4],
+    pub alpha_mode: AlphaMode,
+    pub materials: MaterialSet,
+    pub texture_anim: TextureAnim,
     pub parent_id: Option<usize>,
     pub stable_id: Option<String>,
     pub world_matrix: [[f32; 4]; 4],
@@ -389,7 +461,8 @@ impl RenderableInstance {
         geometry: GeometrySource,
         role: InstanceRole,
         transform: Transform,
-        color: [f32; 3],
+        color: [f32; 4],
+        alpha_mode: AlphaMode,
     ) -> Self {
         let local_aabb = local_aabb_for_geometry(&geometry);
         let world_matrix = transform_to_mat4(transform);
@@ -399,6 +472,9 @@ impl RenderableInstance {
             role,
             transform,
             color,
+            alpha_mode,
+            materials: MaterialSet::default(),
+            texture_anim: TextureAnim::default(),
             parent_id: None,
             stable_id: None,
             world_matrix,
@@ -406,6 +482,16 @@ impl RenderableInstance {
             world_aabb,
             dirty_spatial: true,
         }
+    }
+
+    pub fn with_materials(mut self, materials: MaterialSet) -> Self {
+        self.materials = materials;
+        self
+    }
+
+    pub fn with_texture_anim(mut self, anim: TextureAnim) -> Self {
+        self.texture_anim = anim;
+        self
     }
 
     pub fn aabb(&self) -> Aabb {
@@ -469,7 +555,8 @@ pub struct Scene {
     pub octree: crate::spatial::Octree,
     pub next_id: usize,
     pub instance_map: BTreeMap<String, usize>, // agent_id -> instance_id
-    pub world_object_feed_map: BTreeMap<u32, usize>, // local_id -> instance_id
+    pub avatar_attachment_map: BTreeMap<String, usize>, // avatar_id::attachment_id::local_id -> instance_id
+    pub world_object_feed_map: BTreeMap<u32, usize>,    // local_id -> instance_id
 }
 
 impl Default for Scene {
@@ -479,6 +566,7 @@ impl Default for Scene {
             octree: crate::spatial::Octree::new(1024.0), // Large enough for current diagnostics
             next_id: 0,
             instance_map: BTreeMap::new(),
+            avatar_attachment_map: BTreeMap::new(),
             world_object_feed_map: BTreeMap::new(),
         }
     }
@@ -488,6 +576,30 @@ impl Default for Scene {
 pub struct DecodedWorldObjectFeedObject {
     pub local_id: u32,
     pub scale_centi: Option<[u16; 3]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HandoffPhase {
+    #[default]
+    None,
+    Crossed,
+    Confirming,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct BoundedNeighborSummary {
+    pub region_handle: u64,
+    pub region_x: u32,
+    pub region_y: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RegionContinuitySummary {
+    pub phase: HandoffPhase,
+    pub active_region_coords: Option<[u32; 2]>,
+    pub previous_region_coords: Option<[u32; 2]>,
+    pub neighbors: Vec<BoundedNeighborSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -553,6 +665,8 @@ pub struct LiveVisualSnapshot {
     pub decoded_object_feed_objects: Vec<DecodedWorldObjectFeedObject>,
     #[serde(default)]
     pub decoded_object_feed_recent_kills: Vec<u32>,
+    #[serde(default)]
+    pub continuity: RegionContinuitySummary,
     pub observed_at_unix_ms: u64,
 }
 
@@ -577,6 +691,37 @@ pub enum ChatSendStatus {
     Sending,
     Sent,
     Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
+pub enum SessionUxReason {
+    DisabledByConfig,
+    MissingConfig,
+    ConnectTransport,
+    LoginTransport,
+    LoginAuth,
+    LoginRequiresTos,
+    LoginRequiresMfa,
+    LoginUpdateRequired,
+    ConnectionLost,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
+pub enum SessionUxStatus {
+    Disabled { reason: Option<SessionUxReason> },
+    Starting,
+    Connected,
+    Reconnecting { reason: Option<SessionUxReason> },
+    Failed { reason: SessionUxReason },
+}
+
+impl Default for SessionUxStatus {
+    fn default() -> Self {
+        Self::Disabled {
+            reason: Some(SessionUxReason::DisabledByConfig),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,7 +828,7 @@ pub struct DirectImThread {
     pub last_read_unix_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RuntimeRelayLevel {
     Trace,
     Info,
@@ -896,12 +1041,154 @@ pub struct WorldAvatarPlaceholder {
     pub is_self: bool,
     pub last_update_unix_ms: u64,
     pub stale: bool,
+    pub appearance: AvatarAppearanceSummary,
+    pub attachments: Vec<AvatarAttachmentProxy>,
 }
 
 impl WorldAvatarPlaceholder {
     pub fn short_agent_id(&self) -> String {
         short_uuid(&self.agent_id)
     }
+}
+
+const R08_ATTACHMENT_SLOT_DEFINITIONS: [(&str, u32, [f32; 3], [f32; 3], [f32; 4]); 10] = [
+    (
+        "back",
+        0,
+        [0.0, 1.25, -0.14],
+        [0.18, 0.18, 0.18],
+        [0.48, 0.34, 0.82, 1.0],
+    ),
+    (
+        "belt",
+        1,
+        [0.0, 0.88, 0.03],
+        [0.16, 0.16, 0.16],
+        [0.78, 0.66, 0.26, 1.0],
+    ),
+    (
+        "foot_left",
+        2,
+        [-0.16, 0.16, 0.02],
+        [0.12, 0.12, 0.12],
+        [0.30, 0.74, 0.98, 1.0],
+    ),
+    (
+        "foot_right",
+        3,
+        [0.16, 0.16, 0.02],
+        [0.12, 0.12, 0.12],
+        [0.30, 0.74, 0.98, 1.0],
+    ),
+    (
+        "hat",
+        4,
+        [0.0, 1.82, 0.0],
+        [0.20, 0.20, 0.20],
+        [0.92, 0.75, 0.34, 1.0],
+    ),
+    (
+        "hand_left",
+        5,
+        [-0.36, 0.96, 0.10],
+        [0.14, 0.14, 0.14],
+        [0.24, 0.82, 0.56, 1.0],
+    ),
+    (
+        "hand_right",
+        6,
+        [0.36, 0.96, 0.10],
+        [0.14, 0.14, 0.14],
+        [0.24, 0.82, 0.56, 1.0],
+    ),
+    (
+        "hip",
+        7,
+        [0.0, 1.02, -0.04],
+        [0.17, 0.17, 0.17],
+        [0.82, 0.46, 0.28, 1.0],
+    ),
+    (
+        "shoulder_left",
+        8,
+        [-0.22, 1.48, 0.04],
+        [0.15, 0.15, 0.15],
+        [0.82, 0.46, 0.82, 1.0],
+    ),
+    (
+        "shoulder_right",
+        9,
+        [0.22, 1.48, 0.04],
+        [0.15, 0.15, 0.15],
+        [0.82, 0.46, 0.82, 1.0],
+    ),
+];
+
+fn attachment_display_label(avatar: &WorldAvatarPlaceholder, attachment_id: &str) -> String {
+    if avatar.display_name.trim().is_empty() {
+        format!("{}:{}", attachment_id, avatar.short_agent_id())
+    } else {
+        format!("{}:{}", attachment_id, avatar.display_name)
+    }
+}
+
+pub fn project_avatar_attachments(
+    avatars: &[WorldAvatarPlaceholder],
+) -> Vec<AvatarAttachmentProxy> {
+    let mut attachments = Vec::new();
+
+    for avatar in avatars {
+        let mut per_avatar: Vec<AvatarAttachmentProxy> = R08_ATTACHMENT_SLOT_DEFINITIONS
+            .iter()
+            .map(
+                |(attachment_id, local_id, offset, scale, color)| AvatarAttachmentProxy {
+                    avatar_id: avatar.agent_id.clone(),
+                    attachment_id: (*attachment_id).to_string(),
+                    local_id: *local_id,
+                    display_label: attachment_display_label(avatar, attachment_id),
+                    transform: Transform {
+                        position: [
+                            avatar.world_position[0] + offset[0],
+                            avatar.world_position[1] + offset[1],
+                            avatar.world_position[2] + offset[2],
+                        ],
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        scale: *scale,
+                    },
+                    color: if avatar.stale {
+                        [color[0] * 0.7, color[1] * 0.7, color[2] * 0.7, color[3]]
+                    } else if avatar.is_self {
+                        [
+                            (color[0] + 0.10).min(1.0),
+                            (color[1] + 0.04).min(1.0),
+                            (color[2] + 0.02).min(1.0),
+                            color[3],
+                        ]
+                    } else {
+                        *color
+                    },
+                    materials: MaterialSet::default(),
+                    alpha_mode: AlphaMode::Opaque,
+                },
+            )
+            .collect();
+
+        per_avatar.sort_by(|a, b| {
+            a.attachment_id
+                .cmp(&b.attachment_id)
+                .then_with(|| a.local_id.cmp(&b.local_id))
+        });
+        per_avatar.truncate(MAX_R08_ATTACHMENTS_PER_AVATAR);
+        attachments.extend(per_avatar);
+    }
+
+    attachments.sort_by(|a, b| {
+        a.avatar_id
+            .cmp(&b.avatar_id)
+            .then_with(|| a.attachment_id.cmp(&b.attachment_id))
+            .then_with(|| a.local_id.cmp(&b.local_id))
+    });
+    attachments
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1332,9 +1619,10 @@ pub enum WorldObjectIngestionLane {
     DecodedObjectFeedKillPayload,
     ObjectStateEntitySeedPayload,
     ObjectStateEntityLifecyclePayload,
+    ContinuityPayload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldObjectIngestionItem {
     pub lane: WorldObjectIngestionLane,
     pub stage: WorldEntryStage,
@@ -1359,11 +1647,13 @@ pub struct WorldObjectIngestionItem {
     pub decoded_object_feed_export_truncated: bool,
     pub decoded_object_local_id: Option<u32>,
     pub decoded_object_scale_centi: Option<[u16; 3]>,
+    pub continuity: Option<RegionContinuitySummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct WorldObjectIngestionSeam {
     pub items: Vec<WorldObjectIngestionItem>,
+    pub avatar_attachments: Vec<AvatarAttachmentProxy>,
 }
 
 impl WorldObjectIngestionSeam {
@@ -1395,6 +1685,7 @@ impl WorldObjectIngestionSeam {
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
+            continuity: None,
         }];
         if slice.traffic.available {
             items.push(WorldObjectIngestionItem {
@@ -1421,9 +1712,13 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
-        Self { items }
+        Self {
+            items,
+            avatar_attachments: Vec::new(),
+        }
     }
 
     pub fn from_live_snapshot(snapshot: Option<&LiveVisualSnapshot>) -> Self {
@@ -1473,6 +1768,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         if let Some(location_count) = snapshot.and_then(|s| s.decoded_coarse_location_count) {
@@ -1538,6 +1834,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
             if let Some(coarse_second_xyz) = second_xyz {
                 seam.items.push(WorldObjectIngestionItem {
@@ -1564,6 +1861,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
                 });
             }
         }
@@ -1610,6 +1908,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         if let Some(body_len) = snapshot.and_then(|s| s.decoded_viewer_time_body_len) {
@@ -1655,6 +1954,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         if let Some(state) = snapshot {
@@ -1701,6 +2001,7 @@ impl WorldObjectIngestionSeam {
                         .decoded_object_feed_export_truncated,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
                 });
 
                 for obj in &state.decoded_object_feed_objects {
@@ -1729,6 +2030,7 @@ impl WorldObjectIngestionSeam {
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(obj.local_id),
                         decoded_object_scale_centi: obj.scale_centi,
+                        continuity: None,
                     });
                 }
 
@@ -1758,6 +2060,7 @@ impl WorldObjectIngestionSeam {
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(*local_id),
                         decoded_object_scale_centi: None,
+                        continuity: None,
                     });
                 }
             }
@@ -1824,6 +2127,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
                 });
                 seam.items.push(WorldObjectIngestionItem {
                     lane: WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload,
@@ -1863,11 +2167,92 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
+                });
+            }
+
+            if continuity_has_signal(&state.continuity) {
+                seam.items.push(WorldObjectIngestionItem {
+                    lane: WorldObjectIngestionLane::ContinuityPayload,
+                    stage,
+                    region_coords,
+                    simulator_target_present: state.first_sim_endpoint.is_some(),
+                    traffic_broader_count: 0,
+                    traffic_unknown_count: 0,
+                    traffic_region_control_count: 0,
+                    decoded_endpoint_port: None,
+                    decoded_endpoint_host_tail: None,
+                    decoded_coarse_location_count: None,
+                    decoded_coarse_first_xyz: None,
+                    decoded_coarse_second_xyz: None,
+                    decoded_coarse_third_xyz: None,
+                    decoded_coarse_updates: None,
+                    decoded_health_updates: None,
+                    decoded_health_basis_points: None,
+                    decoded_viewer_time_updates: None,
+                    decoded_viewer_time_body_len: None,
+                    decoded_viewer_time_signature: None,
+                    decoded_object_feed_total_objects: None,
+                    decoded_object_feed_export_truncated: false,
+                    decoded_object_local_id: None,
+                    decoded_object_scale_centi: None,
+                    continuity: Some(state.continuity.clone()),
                 });
             }
         }
         seam
     }
+
+    pub fn with_avatar_attachments(mut self, avatars: &[WorldAvatarPlaceholder]) -> Self {
+        let mut attachments = Vec::new();
+        for avatar in avatars {
+            if avatar.attachments.is_empty() {
+                attachments.extend(project_avatar_attachments(std::slice::from_ref(avatar)));
+            } else {
+                attachments.extend(avatar.attachments.iter().cloned());
+            }
+        }
+        self.avatar_attachments = normalize_avatar_attachments(attachments);
+        self
+    }
+}
+
+fn normalize_avatar_attachments(
+    attachments: Vec<AvatarAttachmentProxy>,
+) -> Vec<AvatarAttachmentProxy> {
+    let mut grouped: BTreeMap<String, Vec<AvatarAttachmentProxy>> = BTreeMap::new();
+    for attachment in attachments {
+        grouped
+            .entry(attachment.avatar_id.clone())
+            .or_default()
+            .push(attachment);
+    }
+
+    let mut normalized = Vec::new();
+    for (_avatar_id, mut per_avatar) in grouped {
+        per_avatar.sort_by(|a, b| {
+            a.attachment_id
+                .cmp(&b.attachment_id)
+                .then_with(|| a.local_id.cmp(&b.local_id))
+        });
+        per_avatar.truncate(MAX_R08_ATTACHMENTS_PER_AVATAR);
+        normalized.extend(per_avatar);
+    }
+
+    normalized.sort_by(|a, b| {
+        a.avatar_id
+            .cmp(&b.avatar_id)
+            .then_with(|| a.attachment_id.cmp(&b.attachment_id))
+            .then_with(|| a.local_id.cmp(&b.local_id))
+    });
+    normalized
+}
+
+fn continuity_has_signal(continuity: &RegionContinuitySummary) -> bool {
+    continuity.phase != HandoffPhase::None
+        || continuity.active_region_coords.is_some()
+        || continuity.previous_region_coords.is_some()
+        || !continuity.neighbors.is_empty()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1904,7 +2289,8 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::AxisMarker),
             InstanceRole::SceneStatic,
             Transform::default(),
-            [0.60, 0.65, 0.70],
+            [0.60, 0.65, 0.70, 1.0],
+            AlphaMode::Opaque,
         );
         scene.insert_instance(
             GeometrySource::Diagnostic(MeshKind::GroundPlane),
@@ -1914,7 +2300,8 @@ impl Scene {
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [256.0, 1.0, 256.0],
             },
-            [0.18, 0.20, 0.22],
+            [0.18, 0.20, 0.22, 1.0],
+            AlphaMode::Opaque,
         );
         scene.insert_instance(
             GeometrySource::Diagnostic(MeshKind::Cube),
@@ -1924,7 +2311,8 @@ impl Scene {
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: [1.0, 1.0, 1.0],
             },
-            [0.85, 0.35, 0.25],
+            [0.85, 0.35, 0.25, 1.0],
+            AlphaMode::Opaque,
         );
         scene
     }
@@ -1934,11 +2322,12 @@ impl Scene {
         geometry: GeometrySource,
         role: InstanceRole,
         transform: Transform,
-        color: [f32; 3],
+        color: [f32; 4],
+        alpha_mode: AlphaMode,
     ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        let instance = RenderableInstance::new(geometry, role, transform, color);
+        let instance = RenderableInstance::new(geometry, role, transform, color, alpha_mode);
         let aabb = instance.aabb();
         self.instances.insert(id, instance);
         self.octree.insert(id, aabb);
@@ -1962,7 +2351,8 @@ impl Scene {
         role: InstanceRole,
         mesh: GeometrySource,
         transform: Transform,
-        color: [f32; 3],
+        color: [f32; 4],
+        alpha_mode: AlphaMode,
     ) {
         let existing_id = self
             .instances
@@ -1979,14 +2369,14 @@ impl Scene {
                 // Note: octree update happens in sync_spatial
             }
         } else {
-            self.insert_instance(mesh, role, transform, color);
+            self.insert_instance(mesh, role, transform, color, alpha_mode);
         }
     }
 
     fn upsert_world_object_feed(
         &mut self,
         local_id: u32,
-        item: WorldObjectIngestionItem,
+        item: &WorldObjectIngestionItem,
         coarse_anchor_pos: Option<[f32; 3]>,
     ) {
         if local_id == 0 {
@@ -2012,6 +2402,7 @@ impl Scene {
             InstanceRole::WorldObjectFeedProxy,
             transform,
             color,
+            AlphaMode::Opaque,
         );
         self.world_object_feed_map.insert(local_id, id);
     }
@@ -2121,10 +2512,10 @@ impl Scene {
             let cube = self.instances.get_mut(&id).unwrap();
             cube.color = match snapshot {
                 Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
-                    [0.20, 0.82, 0.34]
+                    [0.20, 0.82, 0.34, 1.0]
                 }
-                Some(state) if state.logged_in => [0.94, 0.74, 0.20],
-                _ => [0.85, 0.35, 0.25],
+                Some(state) if state.logged_in => [0.94, 0.74, 0.20, 1.0],
+                _ => [0.85, 0.35, 0.25, 1.0],
             };
 
             cube.transform.scale = match snapshot {
@@ -2147,6 +2538,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::AxisMarker),
             live_transform,
             live_color,
+            AlphaMode::Opaque,
         );
 
         upsert_instance(
@@ -2155,6 +2547,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::Cube),
             world_region_anchor_transform(world_presence),
             world_region_anchor_color(world_presence),
+            AlphaMode::Opaque,
         );
 
         upsert_instance(
@@ -2163,6 +2556,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::AxisMarker),
             world_entry_beacon_transform(world_presence),
             world_entry_beacon_color(world_presence),
+            AlphaMode::Opaque,
         );
 
         upsert_instance(
@@ -2171,6 +2565,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::AxisMarker),
             world_sim_target_transform(snapshot, world_presence),
             world_sim_target_color(world_presence),
+            AlphaMode::Opaque,
         );
 
         upsert_instance(
@@ -2179,6 +2574,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::Cube),
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::Broader),
             world_traffic_pillar_color(TrafficPillarKind::Broader),
+            AlphaMode::Opaque,
         );
         upsert_instance(
             self,
@@ -2186,6 +2582,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::Cube),
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::Unknown),
             world_traffic_pillar_color(TrafficPillarKind::Unknown),
+            AlphaMode::Opaque,
         );
         upsert_instance(
             self,
@@ -2193,6 +2590,7 @@ impl Scene {
             GeometrySource::Diagnostic(MeshKind::Cube),
             world_traffic_pillar_transform(world_slice, TrafficPillarKind::RegionControl),
             world_traffic_pillar_color(TrafficPillarKind::RegionControl),
+            AlphaMode::Opaque,
         );
     }
 
@@ -2200,7 +2598,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy)
         {
             upsert_instance(
@@ -2209,6 +2606,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_proxy_transform(item),
                 world_ingestion_proxy_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionProxy);
@@ -2217,7 +2615,23 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::ContinuityPayload)
+        {
+            upsert_instance(
+                self,
+                InstanceRole::WorldIngestionContinuityPayload,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
+                world_ingestion_continuity_transform(item),
+                world_ingestion_continuity_color(item),
+                AlphaMode::Opaque,
+            );
+        } else {
+            remove_instance(self, InstanceRole::WorldIngestionContinuityPayload);
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
             .find(|item| item.lane == WorldObjectIngestionLane::TrafficSignalPayload)
         {
             upsert_instance(
@@ -2226,6 +2640,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_traffic_payload_transform(item),
                 world_ingestion_traffic_payload_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionTrafficPayload);
@@ -2234,7 +2649,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedSimulatorEndpointPayload)
         {
             upsert_instance(
@@ -2243,6 +2657,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_endpoint_transform(item),
                 world_ingestion_decoded_endpoint_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionDecodedEndpointPayload);
@@ -2251,7 +2666,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload)
         {
             upsert_instance(
@@ -2260,6 +2674,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_coarse_location_transform(item),
                 world_ingestion_decoded_coarse_location_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(
@@ -2268,10 +2683,10 @@ impl Scene {
             );
         }
 
-        if let Some(item) =
-            seam.items.iter().copied().find(|item| {
-                item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload
-            })
+        if let Some(item) = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload)
         {
             upsert_instance(
                 self,
@@ -2279,6 +2694,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_decoded_coarse_neighborhood_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_color(item),
+                AlphaMode::Opaque,
             );
             upsert_instance(
                 self,
@@ -2286,6 +2702,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_satellite_a_color(item),
+                AlphaMode::Opaque,
             );
             upsert_instance(
                 self,
@@ -2293,6 +2710,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(item),
                 world_ingestion_decoded_coarse_neighborhood_satellite_b_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(
@@ -2312,7 +2730,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
         {
             upsert_instance(
@@ -2321,6 +2738,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_decoded_health_transform(item),
                 world_ingestion_decoded_health_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionDecodedHealthPayload);
@@ -2329,7 +2747,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedViewerTimePayload)
         {
             upsert_instance(
@@ -2338,15 +2755,16 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_ingestion_decoded_viewer_time_transform(item),
                 world_ingestion_decoded_viewer_time_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionDecodedViewerTimePayload);
         }
 
-        let object_feed_summary =
-            seam.items.iter().copied().find(|item| {
-                item.lane == WorldObjectIngestionLane::DecodedObjectFeedSummaryPayload
-            });
+        let object_feed_summary = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedObjectFeedSummaryPayload);
 
         if object_feed_summary.is_none() {
             self.clear_world_object_feed();
@@ -2354,13 +2772,12 @@ impl Scene {
             let coarse_anchor_pos = seam
                 .items
                 .iter()
-                .copied()
                 .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload)
                 .map(world_ingestion_decoded_coarse_location_transform)
                 .map(|t| t.position);
 
             let mut present_ids = BTreeSet::new();
-            for item in seam.items.iter().copied().filter(|item| {
+            for item in seam.items.iter().filter(|item| {
                 item.lane == WorldObjectIngestionLane::DecodedObjectFeedObjectPayload
             }) {
                 if let Some(local_id) = item.decoded_object_local_id {
@@ -2369,10 +2786,10 @@ impl Scene {
                 }
             }
 
-            for item in
-                seam.items.iter().copied().filter(|item| {
-                    item.lane == WorldObjectIngestionLane::DecodedObjectFeedKillPayload
-                })
+            for item in seam
+                .items
+                .iter()
+                .filter(|item| item.lane == WorldObjectIngestionLane::DecodedObjectFeedKillPayload)
             {
                 if let Some(local_id) = item.decoded_object_local_id {
                     self.remove_world_object_feed(local_id);
@@ -2391,12 +2808,10 @@ impl Scene {
         let coarse_item = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload);
         let health_item = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload);
         if let (Some(coarse), Some(health)) = (coarse_item, health_item) {
             upsert_instance(
@@ -2405,6 +2820,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 world_ingestion_decoded_composite_transform(coarse, health),
                 world_ingestion_decoded_composite_color(health),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldIngestionDecodedCompositeBeacon);
@@ -2413,7 +2829,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntitySeedPayload)
         {
             let entity_count = world_object_state_entity_count(item);
@@ -2423,6 +2838,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 world_object_state_entity_body_transform(item, 0),
                 world_object_state_entity_body_color(item, 0),
+                AlphaMode::Opaque,
             );
             upsert_instance(
                 self,
@@ -2430,6 +2846,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_object_state_entity_aura_transform(item, 0),
                 world_object_state_entity_aura_color(item, 0),
+                AlphaMode::Opaque,
             );
             if entity_count >= 2 {
                 upsert_instance(
@@ -2438,6 +2855,7 @@ impl Scene {
                     GeometrySource::Diagnostic(MeshKind::Cube),
                     world_object_state_entity_body_transform(item, 1),
                     world_object_state_entity_body_color(item, 1),
+                    AlphaMode::Opaque,
                 );
                 upsert_instance(
                     self,
@@ -2445,6 +2863,7 @@ impl Scene {
                     GeometrySource::Diagnostic(MeshKind::AxisMarker),
                     world_object_state_entity_aura_transform(item, 1),
                     world_object_state_entity_aura_color(item, 1),
+                    AlphaMode::Opaque,
                 );
             } else {
                 remove_instance(self, InstanceRole::WorldObjectStateEntityWingBody);
@@ -2457,6 +2876,7 @@ impl Scene {
                     GeometrySource::Diagnostic(MeshKind::Cube),
                     world_object_state_entity_body_transform(item, 2),
                     world_object_state_entity_body_color(item, 2),
+                    AlphaMode::Opaque,
                 );
                 upsert_instance(
                     self,
@@ -2464,6 +2884,7 @@ impl Scene {
                     GeometrySource::Diagnostic(MeshKind::AxisMarker),
                     world_object_state_entity_aura_transform(item, 2),
                     world_object_state_entity_aura_color(item, 2),
+                    AlphaMode::Opaque,
                 );
             } else {
                 remove_instance(self, InstanceRole::WorldObjectStateEntityGuardBody);
@@ -2475,6 +2896,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_object_state_entity_cluster_core_transform(item, entity_count),
                 world_object_state_entity_cluster_core_color(item, entity_count),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldObjectStateEntityBody);
@@ -2486,10 +2908,10 @@ impl Scene {
             remove_instance(self, InstanceRole::WorldObjectStateEntityClusterCore);
         }
 
-        if let Some(item) =
-            seam.items.iter().copied().find(|item| {
-                item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload
-            })
+        if let Some(item) = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload)
         {
             upsert_instance(
                 self,
@@ -2497,6 +2919,7 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::AxisMarker),
                 world_object_state_entity_pulse_transform(item),
                 world_object_state_entity_pulse_color(item),
+                AlphaMode::Opaque,
             );
             upsert_instance(
                 self,
@@ -2504,11 +2927,14 @@ impl Scene {
                 GeometrySource::Diagnostic(MeshKind::Cube),
                 world_object_state_entity_stability_transform(item),
                 world_object_state_entity_stability_color(item),
+                AlphaMode::Opaque,
             );
         } else {
             remove_instance(self, InstanceRole::WorldObjectStateEntityPulse);
             remove_instance(self, InstanceRole::WorldObjectStateEntityStability);
         }
+
+        self.apply_avatar_attachment_proxies(&seam.avatar_attachments);
     }
 
     pub fn apply_world_avatar_placeholders(
@@ -2525,32 +2951,32 @@ impl Scene {
                 (AvatarRenderMode::Proxy, true, _) => (
                     GeometrySource::Diagnostic(MeshKind::AvatarProxy),
                     [0.38, 1.30, 0.38],
-                    [1.0, 0.35, 0.15],
+                    [1.0, 0.35, 0.15, 1.0],
                 ),
                 (AvatarRenderMode::Proxy, false, true) => (
                     GeometrySource::Diagnostic(MeshKind::AvatarProxy),
                     [0.36, 1.22, 0.36],
-                    [0.66, 0.50, 0.38],
+                    [0.66, 0.50, 0.38, 1.0],
                 ),
                 (AvatarRenderMode::Proxy, false, false) => (
                     GeometrySource::Diagnostic(MeshKind::AvatarProxy),
                     [0.36, 1.22, 0.36],
-                    [0.30, 0.74, 0.98],
+                    [0.30, 0.74, 0.98, 1.0],
                 ),
                 (AvatarRenderMode::FallbackBox, true, _) => (
                     GeometrySource::Diagnostic(MeshKind::Cube),
                     [0.32, 1.20, 0.32],
-                    [1.0, 0.35, 0.15],
+                    [1.0, 0.35, 0.15, 1.0],
                 ),
                 (AvatarRenderMode::FallbackBox, false, true) => (
                     GeometrySource::Diagnostic(MeshKind::Cube),
                     [0.30, 1.10, 0.30],
-                    [0.66, 0.50, 0.38],
+                    [0.66, 0.50, 0.38, 1.0],
                 ),
                 (AvatarRenderMode::FallbackBox, false, false) => (
                     GeometrySource::Diagnostic(MeshKind::Cube),
                     [0.30, 1.10, 0.30],
-                    [0.30, 0.74, 0.98],
+                    [0.30, 0.74, 0.98, 1.0],
                 ),
             };
 
@@ -2574,7 +3000,7 @@ impl Scene {
                 } else {
                     InstanceRole::WorldAvatarPlaceholderOther
                 };
-                let id = self.insert_instance(mesh, role, transform, color);
+                let id = self.insert_instance(mesh, role, transform, color, AlphaMode::Opaque);
                 self.instance_map.insert(avatar.agent_id.clone(), id);
             }
         }
@@ -2593,6 +3019,65 @@ impl Scene {
             }
         }
     }
+
+    pub fn apply_avatar_attachment_proxies(&mut self, attachments: &[AvatarAttachmentProxy]) {
+        let mut current_keys = HashSet::new();
+
+        for attachment in attachments {
+            let key = attachment.key();
+            current_keys.insert(key.clone());
+
+            let transform = attachment.transform;
+            let color = attachment.color;
+            let geometry = GeometrySource::Diagnostic(MeshKind::AvatarProxy);
+
+            if let Some(&id) = self.avatar_attachment_map.get(&key) {
+                if let Some(inst) = self.instances.get_mut(&id) {
+                    if inst.transform != transform
+                        || inst.color != color
+                        || inst.geometry != geometry
+                        || inst.alpha_mode != attachment.alpha_mode
+                        || inst.materials != attachment.materials
+                    {
+                        inst.transform = transform;
+                        inst.color = color;
+                        inst.geometry = geometry;
+                        inst.alpha_mode = attachment.alpha_mode;
+                        inst.materials = attachment.materials.clone();
+                        inst.dirty_spatial = true;
+                    }
+                    continue;
+                }
+            }
+
+            let id = self.insert_instance(
+                geometry,
+                InstanceRole::WorldAvatarAttachmentProxy,
+                transform,
+                color,
+                attachment.alpha_mode,
+            );
+            if let Some(inst) = self.instances.get_mut(&id) {
+                inst.materials = attachment.materials.clone();
+                inst.stable_id = Some(key.clone());
+            }
+            self.avatar_attachment_map.insert(key, id);
+        }
+
+        let mut to_remove = Vec::new();
+        for (key, &id) in &self.avatar_attachment_map {
+            if !current_keys.contains(key) {
+                to_remove.push((key.clone(), id));
+            }
+        }
+
+        for (key, id) in to_remove {
+            self.avatar_attachment_map.remove(&key);
+            if let Some(inst) = self.instances.remove(&id) {
+                self.octree.remove(id, inst.world_aabb);
+            }
+        }
+    }
 }
 
 fn upsert_instance(
@@ -2600,9 +3085,10 @@ fn upsert_instance(
     role: InstanceRole,
     geometry: GeometrySource,
     transform: Transform,
-    color: [f32; 3],
+    color: [f32; 4],
+    alpha_mode: AlphaMode,
 ) {
-    scene.upsert_role(role, geometry, transform, color);
+    scene.upsert_role(role, geometry, transform, color, alpha_mode);
 }
 
 fn remove_instance(scene: &mut Scene, role: InstanceRole) {
@@ -2648,11 +3134,11 @@ fn world_region_anchor_transform(presence: FirstRegionPresence) -> Transform {
     }
 }
 
-fn world_region_anchor_color(presence: FirstRegionPresence) -> [f32; 3] {
+fn world_region_anchor_color(presence: FirstRegionPresence) -> [f32; 4] {
     match presence.stage {
-        WorldEntryStage::EnteredFirstRegion => [0.26, 0.90, 0.64],
-        WorldEntryStage::Connected => [0.98, 0.80, 0.32],
-        WorldEntryStage::Offline => [0.45, 0.37, 0.33],
+        WorldEntryStage::EnteredFirstRegion => [0.26, 0.90, 0.64, 1.0],
+        WorldEntryStage::Connected => [0.98, 0.80, 0.32, 1.0],
+        WorldEntryStage::Offline => [0.45, 0.37, 0.33, 1.0],
     }
 }
 
@@ -2670,11 +3156,11 @@ fn world_entry_beacon_transform(presence: FirstRegionPresence) -> Transform {
     }
 }
 
-fn world_entry_beacon_color(presence: FirstRegionPresence) -> [f32; 3] {
+fn world_entry_beacon_color(presence: FirstRegionPresence) -> [f32; 4] {
     match presence.stage {
-        WorldEntryStage::EnteredFirstRegion => [0.12, 0.86, 0.98],
-        WorldEntryStage::Connected => [0.98, 0.83, 0.24],
-        WorldEntryStage::Offline => [0.62, 0.36, 0.30],
+        WorldEntryStage::EnteredFirstRegion => [0.12, 0.86, 0.98, 1.0],
+        WorldEntryStage::Connected => [0.98, 0.83, 0.24, 1.0],
+        WorldEntryStage::Offline => [0.62, 0.36, 0.30, 1.0],
     }
 }
 
@@ -2706,14 +3192,14 @@ fn world_sim_target_transform(
     }
 }
 
-fn world_sim_target_color(presence: FirstRegionPresence) -> [f32; 3] {
+fn world_sim_target_color(presence: FirstRegionPresence) -> [f32; 4] {
     if !presence.has_sim_endpoint {
-        return [0.48, 0.44, 0.38];
+        return [0.48, 0.44, 0.38, 1.0];
     }
     match presence.stage {
-        WorldEntryStage::EnteredFirstRegion => [0.32, 0.86, 0.98],
-        WorldEntryStage::Connected => [0.98, 0.82, 0.30],
-        WorldEntryStage::Offline => [0.58, 0.40, 0.34],
+        WorldEntryStage::EnteredFirstRegion => [0.32, 0.86, 0.98, 1.0],
+        WorldEntryStage::Connected => [0.98, 0.82, 0.30, 1.0],
+        WorldEntryStage::Offline => [0.58, 0.40, 0.34, 1.0],
     }
 }
 
@@ -2768,15 +3254,15 @@ fn traffic_pillar_height(available: bool, count: u32) -> f32 {
     0.18 + clamped * 0.04
 }
 
-fn world_traffic_pillar_color(kind: TrafficPillarKind) -> [f32; 3] {
+fn world_traffic_pillar_color(kind: TrafficPillarKind) -> [f32; 4] {
     match kind {
-        TrafficPillarKind::Broader => [0.30, 0.72, 0.94],
-        TrafficPillarKind::Unknown => [0.94, 0.46, 0.30],
-        TrafficPillarKind::RegionControl => [0.48, 0.88, 0.56],
+        TrafficPillarKind::Broader => [0.30, 0.72, 0.94, 1.0],
+        TrafficPillarKind::Unknown => [0.94, 0.46, 0.30, 1.0],
+        TrafficPillarKind::RegionControl => [0.48, 0.88, 0.56, 1.0],
     }
 }
 
-fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_proxy_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let (y, scale) = match item.stage {
         WorldEntryStage::EnteredFirstRegion => (0.36, [0.22, 0.22, 0.22]),
@@ -2792,18 +3278,38 @@ fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform 
     }
 }
 
-fn world_ingestion_proxy_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_proxy_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     if !item.simulator_target_present {
-        return [0.42, 0.40, 0.36];
+        return [0.42, 0.40, 0.36, 1.0];
     }
     match item.stage {
-        WorldEntryStage::EnteredFirstRegion => [0.20, 0.78, 0.96],
-        WorldEntryStage::Connected => [0.82, 0.44, 0.95],
-        WorldEntryStage::Offline => [0.42, 0.40, 0.36],
+        WorldEntryStage::EnteredFirstRegion => [0.20, 0.78, 0.96, 1.0],
+        WorldEntryStage::Connected => [0.82, 0.44, 0.95, 1.0],
+        WorldEntryStage::Offline => [0.42, 0.40, 0.36, 1.0],
     }
 }
 
-fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_continuity_transform(item: &WorldObjectIngestionItem) -> Transform {
+    let mut transform = world_ingestion_proxy_transform(item);
+    transform.position[1] += 0.15;
+    transform.scale = [0.15, 0.15, 0.15];
+    transform
+}
+
+fn world_ingestion_continuity_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
+    if let Some(summary) = &item.continuity {
+        match summary.phase {
+            HandoffPhase::None => [0.4, 0.4, 0.4, 1.0],
+            HandoffPhase::Crossed => [0.9, 0.2, 0.2, 1.0],
+            HandoffPhase::Confirming => [0.9, 0.9, 0.2, 1.0],
+            HandoffPhase::Completed => [0.2, 0.9, 0.2, 1.0],
+        }
+    } else {
+        [0.3, 0.3, 0.3, 1.0]
+    }
+}
+
+fn world_ingestion_traffic_payload_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let weighted = item
         .traffic_broader_count
@@ -2819,13 +3325,13 @@ fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> 
     }
 }
 
-fn world_ingestion_traffic_payload_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_traffic_payload_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     if item.traffic_region_control_count > 0 {
-        [0.48, 0.88, 0.56]
+        [0.48, 0.88, 0.56, 1.0]
     } else if item.traffic_unknown_count > 0 {
-        [0.94, 0.46, 0.30]
+        [0.94, 0.46, 0.30, 1.0]
     } else {
-        [0.30, 0.72, 0.94]
+        [0.30, 0.72, 0.94, 1.0]
     }
 }
 
@@ -2840,7 +3346,7 @@ fn decode_simulator_endpoint(endpoint: Option<&str>) -> Option<(u16, u8)> {
     Some((port, host_tail))
 }
 
-fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_endpoint_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let host_tail = f32::from(item.decoded_endpoint_host_tail.unwrap_or(0));
     let port = f32::from(item.decoded_endpoint_port.unwrap_or(0));
@@ -2855,18 +3361,18 @@ fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) ->
     }
 }
 
-fn world_ingestion_decoded_endpoint_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_decoded_endpoint_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let port = item.decoded_endpoint_port.unwrap_or(0);
     if port >= 13000 {
-        [0.30, 0.84, 0.96]
+        [0.30, 0.84, 0.96, 1.0]
     } else if port >= 9000 {
-        [0.34, 0.90, 0.62]
+        [0.34, 0.90, 0.62, 1.0]
     } else {
-        [0.92, 0.66, 0.30]
+        [0.92, 0.66, 0.30, 1.0]
     }
 }
 
-fn world_ingestion_decoded_coarse_location_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_coarse_location_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let x = base_x - 0.42 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.4;
@@ -2881,19 +3387,19 @@ fn world_ingestion_decoded_coarse_location_transform(item: WorldObjectIngestionI
     }
 }
 
-fn world_ingestion_decoded_coarse_location_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_decoded_coarse_location_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let count = item.decoded_coarse_location_count.unwrap_or(0);
     if count >= 8 {
-        [0.96, 0.38, 0.30]
+        [0.96, 0.38, 0.30, 1.0]
     } else if count >= 3 {
-        [0.98, 0.76, 0.28]
+        [0.98, 0.76, 0.28, 1.0]
     } else {
-        [0.38, 0.88, 0.96]
+        [0.38, 0.88, 0.96, 1.0]
     }
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_second_xyz.unwrap_or([128, 128, 0]);
@@ -2909,14 +3415,14 @@ fn world_ingestion_decoded_coarse_neighborhood_transform(
     }
 }
 
-fn world_ingestion_decoded_coarse_neighborhood_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_decoded_coarse_neighborhood_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let updates = item.decoded_coarse_updates.unwrap_or(0) as f32;
     let intensity = (updates.min(10.0) / 10.0).clamp(0.0, 1.0);
-    [0.30, 0.64 + intensity * 0.30, 0.98]
+    [0.30, 0.64 + intensity * 0.30, 0.98, 1.0]
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
@@ -2931,15 +3437,15 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_a_color(
-    item: WorldObjectIngestionItem,
-) -> [f32; 3] {
+    item: &WorldObjectIngestionItem,
+) -> [f32; 4] {
     let count = item.decoded_coarse_location_count.unwrap_or(0) as f32;
     let c = (count / 12.0).clamp(0.0, 1.0);
-    [0.26, 0.74 + c * 0.20, 0.84]
+    [0.26, 0.74 + c * 0.20, 0.84, 1.0]
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item
@@ -2957,14 +3463,14 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_b_color(
-    item: WorldObjectIngestionItem,
-) -> [f32; 3] {
+    item: &WorldObjectIngestionItem,
+) -> [f32; 4] {
     let updates = item.decoded_coarse_updates.unwrap_or(0) as f32;
     let i = (updates.min(12.0) / 12.0).clamp(0.0, 1.0);
-    [0.24, 0.58 + i * 0.34, 0.96]
+    [0.24, 0.58 + i * 0.34, 0.96, 1.0]
 }
 
-fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_health_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
     let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
@@ -2977,13 +3483,13 @@ fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> T
     }
 }
 
-fn world_ingestion_decoded_health_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_decoded_health_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
     let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
-    [1.0 - normalized * 0.72, 0.28 + normalized * 0.66, 0.24]
+    [1.0 - normalized * 0.72, 0.28 + normalized * 0.66, 0.24, 1.0]
 }
 
-fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_viewer_time_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let updates = item.decoded_viewer_time_updates.unwrap_or(0);
     let body_len = f32::from(item.decoded_viewer_time_body_len.unwrap_or(0));
@@ -3003,16 +3509,16 @@ fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem)
     }
 }
 
-fn world_ingestion_decoded_viewer_time_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_decoded_viewer_time_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let updates = item.decoded_viewer_time_updates.unwrap_or(0) as f32;
     let body_len = f32::from(item.decoded_viewer_time_body_len.unwrap_or(0));
     let intensity = (updates.min(12.0) / 12.0).clamp(0.0, 1.0);
     let len_norm = (body_len / 255.0).clamp(0.0, 1.0);
-    [0.36 + len_norm * 0.44, 0.34 + intensity * 0.48, 0.92]
+    [0.36 + len_norm * 0.44, 0.34 + intensity * 0.48, 0.92, 1.0]
 }
 
 fn world_object_feed_proxy_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     coarse_anchor_pos: Option<[f32; 3]>,
 ) -> Transform {
     let local_id = item.decoded_object_local_id.unwrap_or(0);
@@ -3046,17 +3552,17 @@ fn world_object_feed_proxy_transform(
     }
 }
 
-fn world_object_feed_proxy_color(local_id: u32) -> [f32; 3] {
+fn world_object_feed_proxy_color(local_id: u32) -> [f32; 4] {
     let hash = local_id.wrapping_mul(2_654_435_761);
     let r = ((hash & 0xFF) as f32) / 255.0;
     let g = (((hash >> 8) & 0xFF) as f32) / 255.0;
     let b = (((hash >> 16) & 0xFF) as f32) / 255.0;
-    [0.30 + r * 0.55, 0.30 + g * 0.55, 0.30 + b * 0.55]
+    [0.30 + r * 0.55, 0.30 + g * 0.55, 0.30 + b * 0.55, 1.0]
 }
 
 fn world_ingestion_decoded_composite_transform(
-    coarse: WorldObjectIngestionItem,
-    health: WorldObjectIngestionItem,
+    coarse: &WorldObjectIngestionItem,
+    health: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(coarse.region_coords.or(health.region_coords));
     let [cx, cy, cz] = coarse.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
@@ -3073,12 +3579,12 @@ fn world_ingestion_decoded_composite_transform(
     }
 }
 
-fn world_ingestion_decoded_composite_color(health: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_ingestion_decoded_composite_color(health: &WorldObjectIngestionItem) -> [f32; 4] {
     let h = (f32::from(health.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
-    [0.92 - h * 0.52, 0.35 + h * 0.55, 0.86 - h * 0.62]
+    [0.92 - h * 0.52, 0.35 + h * 0.55, 0.86 - h * 0.62, 1.0]
 }
 
-fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
+fn world_object_state_entity_count(item: &WorldObjectIngestionItem) -> usize {
     match item.decoded_coarse_location_count.unwrap_or(0) {
         0..=1 => 1,
         2..=4 => 2,
@@ -3086,7 +3592,7 @@ fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
     }
 }
 
-fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn object_state_cluster_center(item: &WorldObjectIngestionItem) -> [f32; 3] {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [cx, cy, cz] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let health =
@@ -3099,7 +3605,7 @@ fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
 }
 
 fn world_object_state_entity_body_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
 ) -> Transform {
     let [center_x, center_y, center_z] = object_state_cluster_center(item);
@@ -3132,9 +3638,9 @@ fn world_object_state_entity_body_transform(
 }
 
 fn world_object_state_entity_body_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
-) -> [f32; 3] {
+) -> [f32; 4] {
     let health =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     match variant {
@@ -3142,22 +3648,25 @@ fn world_object_state_entity_body_color(
             0.28 + health * 0.26,
             0.24 + health * 0.44,
             0.58 + health * 0.20,
+            1.0,
         ],
         2 => [
             0.42 + health * 0.22,
             0.30 + health * 0.34,
             0.30 + health * 0.18,
+            1.0,
         ],
         _ => [
             0.24 + health * 0.32,
             0.30 + health * 0.58,
             0.36 + health * 0.22,
+            1.0,
         ],
     }
 }
 
 fn world_object_state_entity_aura_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
 ) -> Transform {
     let body = world_object_state_entity_body_transform(item, variant);
@@ -3183,20 +3692,20 @@ fn world_object_state_entity_aura_transform(
 }
 
 fn world_object_state_entity_aura_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
-) -> [f32; 3] {
+) -> [f32; 4] {
     let health =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     match variant {
-        1 => [0.44 + health * 0.38, 0.36 + health * 0.48, 0.96],
-        2 => [0.96, 0.54 + health * 0.28, 0.34 + health * 0.42],
-        _ => [0.96, 0.42 + health * 0.44, 0.26 + health * 0.52],
+        1 => [0.44 + health * 0.38, 0.36 + health * 0.48, 0.96, 1.0],
+        2 => [0.96, 0.54 + health * 0.28, 0.34 + health * 0.42, 1.0],
+        _ => [0.96, 0.42 + health * 0.44, 0.26 + health * 0.52, 1.0],
     }
 }
 
 fn world_object_state_entity_cluster_core_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     entity_count: usize,
 ) -> Transform {
     let [center_x, center_y, center_z] = object_state_cluster_center(item);
@@ -3215,9 +3724,9 @@ fn world_object_state_entity_cluster_core_transform(
 }
 
 fn world_object_state_entity_cluster_core_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     entity_count: usize,
-) -> [f32; 3] {
+) -> [f32; 4] {
     let health =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     let richness = (entity_count as f32 / 3.0).clamp(0.33, 1.0);
@@ -3225,6 +3734,7 @@ fn world_object_state_entity_cluster_core_color(
         0.24 + richness * 0.46,
         0.52 + health * 0.38,
         0.94 - richness * 0.34,
+        1.0,
     ]
 }
 
@@ -3236,7 +3746,7 @@ enum ObjectStateLifecyclePhase {
     Strained,
 }
 
-fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLifecyclePhase {
+fn object_state_lifecycle_phase(item: &WorldObjectIngestionItem) -> ObjectStateLifecyclePhase {
     let health = item.decoded_health_basis_points.unwrap_or(0);
     let coarse_updates = item.decoded_coarse_updates.unwrap_or(0);
     let health_updates = item.decoded_health_updates.unwrap_or(0);
@@ -3253,7 +3763,7 @@ fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLi
     }
 }
 
-fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_object_state_entity_pulse_transform(item: &WorldObjectIngestionItem) -> Transform {
     let core = world_object_state_entity_cluster_core_transform(
         item,
         world_object_state_entity_count(item),
@@ -3287,16 +3797,16 @@ fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> 
     }
 }
 
-fn world_object_state_entity_pulse_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_object_state_entity_pulse_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     match object_state_lifecycle_phase(item) {
-        ObjectStateLifecyclePhase::Dormant => [0.48, 0.52, 0.66],
-        ObjectStateLifecyclePhase::Warming => [0.62, 0.74, 0.96],
-        ObjectStateLifecyclePhase::Active => [0.26, 0.92, 0.62],
-        ObjectStateLifecyclePhase::Strained => [0.98, 0.42, 0.30],
+        ObjectStateLifecyclePhase::Dormant => [0.48, 0.52, 0.66, 1.0],
+        ObjectStateLifecyclePhase::Warming => [0.62, 0.74, 0.96, 1.0],
+        ObjectStateLifecyclePhase::Active => [0.26, 0.92, 0.62, 1.0],
+        ObjectStateLifecyclePhase::Strained => [0.98, 0.42, 0.30, 1.0],
     }
 }
 
-fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_object_state_entity_stability_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [center_x, _, center_z] = object_state_cluster_center(item);
     let health_norm =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
@@ -3323,10 +3833,15 @@ fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem)
     }
 }
 
-fn world_object_state_entity_stability_color(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn world_object_state_entity_stability_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let health_norm =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
-    [0.96 - health_norm * 0.56, 0.26 + health_norm * 0.58, 0.38]
+    [
+        0.96 - health_norm * 0.56,
+        0.26 + health_norm * 0.58,
+        0.38,
+        1.0,
+    ]
 }
 
 fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transform {
@@ -3360,13 +3875,13 @@ fn live_placeholder_transform(snapshot: Option<&LiveVisualSnapshot>) -> Transfor
     }
 }
 
-fn live_placeholder_color(snapshot: Option<&LiveVisualSnapshot>) -> [f32; 3] {
+fn live_placeholder_color(snapshot: Option<&LiveVisualSnapshot>) -> [f32; 4] {
     match snapshot {
         Some(state) if state.logged_in && state.handshake_agent_movement_complete => {
-            [0.12, 0.86, 0.98]
+            [0.12, 0.86, 0.98, 1.0]
         }
-        Some(state) if state.logged_in => [0.98, 0.83, 0.24],
-        _ => [0.70, 0.32, 0.24],
+        Some(state) if state.logged_in => [0.98, 0.83, 0.24, 1.0],
+        _ => [0.70, 0.32, 0.24, 1.0],
     }
 }
 
@@ -3497,6 +4012,34 @@ mod social_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_renderable_instance_texture_anim_builder() {
+        let geometry = GeometrySource::Diagnostic(MeshKind::Cube);
+        let transform = Transform::default();
+        let color = [1.0, 1.0, 1.0, 1.0];
+        let mut instance = RenderableInstance::new(
+            geometry,
+            InstanceRole::SceneStatic,
+            transform,
+            color,
+            AlphaMode::Opaque,
+        );
+
+        // Default should be off
+        assert_eq!(instance.texture_anim.mode, 0);
+
+        // Builder should work
+        let anim = TextureAnim {
+            mode: 0x01, // ANIM_ON
+            rate: 1.5,
+            ..TextureAnim::default()
+        };
+        instance = instance.with_texture_anim(anim);
+
+        assert_eq!(instance.texture_anim.mode, 0x01);
+        assert_eq!(instance.texture_anim.rate, 1.5);
+    }
+
     fn apply_scene_from_snapshot(scene: &mut Scene, snapshot: Option<&LiveVisualSnapshot>) {
         scene.apply_live_visual_snapshot(snapshot);
         let seam = WorldObjectIngestionAdapter::adapt(snapshot);
@@ -3542,6 +4085,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 0,
         }
     }
@@ -3558,7 +4102,7 @@ mod tests {
                     && instance.role == InstanceRole::SceneStatic
             })
             .expect("cube should exist");
-        assert_eq!(cube.color, [0.85, 0.35, 0.25]);
+        assert_eq!(cube.color, [0.85, 0.35, 0.25, 1.0]);
         assert_eq!(cube.transform.scale, [1.0, 1.0, 1.0]);
         let live_anchor = scene
             .instances
@@ -3579,7 +4123,7 @@ mod tests {
             region_anchor.geometry,
             GeometrySource::Diagnostic(MeshKind::Cube)
         );
-        assert_eq!(region_anchor.color, [0.45, 0.37, 0.33]);
+        assert_eq!(region_anchor.color, [0.45, 0.37, 0.33, 1.0]);
         let entry_beacon = scene
             .instances
             .values()
@@ -3595,7 +4139,7 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
-        assert_eq!(target.color, [0.48, 0.44, 0.38]);
+        assert_eq!(target.color, [0.48, 0.44, 0.38, 1.0]);
         let broader = scene
             .instances
             .values()
@@ -3656,7 +4200,7 @@ mod tests {
                     && instance.role == InstanceRole::SceneStatic
             })
             .expect("cube should exist");
-        assert_eq!(cube.color, [0.94, 0.74, 0.20]);
+        assert_eq!(cube.color, [0.94, 0.74, 0.20, 1.0]);
         assert_eq!(cube.transform.scale, [1.10, 1.10, 1.10]);
         let live_anchor = scene
             .instances
@@ -3670,20 +4214,20 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
-        assert_eq!(region_anchor.color, [0.98, 0.80, 0.32]);
+        assert_eq!(region_anchor.color, [0.98, 0.80, 0.32, 1.0]);
         let entry_beacon = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
-        assert_eq!(entry_beacon.color, [0.98, 0.83, 0.24]);
+        assert_eq!(entry_beacon.color, [0.98, 0.83, 0.24, 1.0]);
         assert_eq!(entry_beacon.transform.position[1], 1.4);
         let target = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
-        assert_eq!(target.color, [0.48, 0.44, 0.38]);
+        assert_eq!(target.color, [0.48, 0.44, 0.38, 1.0]);
         let seam_proxy = scene
             .instances
             .values()
@@ -3742,7 +4286,7 @@ mod tests {
                     && instance.role == InstanceRole::SceneStatic
             })
             .expect("cube should exist");
-        assert_eq!(cube.color, [0.20, 0.82, 0.34]);
+        assert_eq!(cube.color, [0.20, 0.82, 0.34, 1.0]);
         assert_eq!(cube.transform.scale, [1.25, 1.25, 1.25]);
         let live_anchor = scene
             .instances
@@ -3756,20 +4300,20 @@ mod tests {
             .values()
             .find(|instance| instance.role == InstanceRole::WorldRegionAnchor)
             .expect("region anchor should exist");
-        assert_eq!(region_anchor.color, [0.26, 0.90, 0.64]);
+        assert_eq!(region_anchor.color, [0.26, 0.90, 0.64, 1.0]);
         let entry_beacon = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldEntryBeacon)
             .expect("entry beacon should exist");
-        assert_eq!(entry_beacon.color, [0.12, 0.86, 0.98]);
+        assert_eq!(entry_beacon.color, [0.12, 0.86, 0.98, 1.0]);
         assert_eq!(entry_beacon.transform.position[1], 2.0);
         let target = scene
             .instances
             .values()
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
-        assert_eq!(target.color, [0.48, 0.44, 0.38]);
+        assert_eq!(target.color, [0.48, 0.44, 0.38, 1.0]);
         let seam_proxy = scene
             .instances
             .values()
@@ -3852,6 +4396,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         };
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
@@ -3861,7 +4406,7 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::LivePlaceholder)
             .expect("live placeholder should exist");
         assert_ne!(live_anchor.transform.position, [3.0, 0.9, 0.0]);
-        assert_eq!(live_anchor.color, [0.12, 0.86, 0.98]);
+        assert_eq!(live_anchor.color, [0.12, 0.86, 0.98, 1.0]);
         let region_anchor = scene
             .instances
             .values()
@@ -3880,7 +4425,7 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldSimTargetMarker)
             .expect("sim target marker should exist");
         assert_ne!(target.transform.position, [3.0, 1.2, 0.0]);
-        assert_eq!(target.color, [0.32, 0.86, 0.98]);
+        assert_eq!(target.color, [0.32, 0.86, 0.98, 1.0]);
         let broader = scene
             .instances
             .values()
@@ -3904,7 +4449,7 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldIngestionProxy)
             .expect("ingestion seam proxy should exist");
         assert_ne!(seam_proxy.transform.position, [3.0, 0.32, -0.85]);
-        assert_eq!(seam_proxy.color, [0.20, 0.78, 0.96]);
+        assert_eq!(seam_proxy.color, [0.20, 0.78, 0.96, 1.0]);
         let traffic_payload = scene
             .instances
             .values()
@@ -3915,7 +4460,7 @@ mod tests {
             GeometrySource::Diagnostic(MeshKind::AxisMarker)
         );
         assert!(traffic_payload.transform.scale[0] > 0.22);
-        assert_eq!(traffic_payload.color, [0.30, 0.72, 0.94]);
+        assert_eq!(traffic_payload.color, [0.30, 0.72, 0.94, 1.0]);
         let decoded_endpoint_payload = scene
             .instances
             .values()
@@ -3926,7 +4471,7 @@ mod tests {
             GeometrySource::Diagnostic(MeshKind::AxisMarker)
         );
         assert!(decoded_endpoint_payload.transform.position[1] > 0.48);
-        assert_eq!(decoded_endpoint_payload.color, [0.30, 0.84, 0.96]);
+        assert_eq!(decoded_endpoint_payload.color, [0.30, 0.84, 0.96, 1.0]);
         let decoded_health_payload = scene
             .instances
             .values()
@@ -4094,6 +4639,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 0,
         };
         let presence = FirstRegionPresence::from_live_snapshot(Some(&snapshot));
@@ -4142,6 +4688,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 7,
         };
         let slice = WorldDiagnosticSlice::from_live_snapshot(Some(&snapshot));
@@ -4170,13 +4717,46 @@ mod tests {
         let connected =
             WorldObjectIngestionSeam::from_live_snapshot(Some(&sample_snapshot(true, false)));
         assert_eq!(connected.items.len(), 1);
-        let first = connected.items[0];
+        let first = &connected.items[0];
         assert_eq!(
             first.lane,
             WorldObjectIngestionLane::FirstRegionPresenceProxy
         );
         assert_eq!(first.stage, WorldEntryStage::Connected);
         assert!(!first.simulator_target_present);
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_maps_continuity_payload_from_live_snapshot() {
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.continuity = RegionContinuitySummary {
+            phase: HandoffPhase::Confirming,
+            active_region_coords: Some([1024, 2048]),
+            previous_region_coords: Some([1023, 2048]),
+            neighbors: vec![BoundedNeighborSummary {
+                region_handle: 0x0000040000000800,
+                region_x: 1024,
+                region_y: 2048,
+            }],
+        };
+
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        let continuity = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ContinuityPayload)
+            .expect("continuity payload should exist");
+        assert_eq!(
+            continuity.continuity.as_ref().map(|value| value.phase),
+            Some(HandoffPhase::Confirming)
+        );
+        assert_eq!(
+            continuity
+                .continuity
+                .as_ref()
+                .and_then(|value| value.active_region_coords),
+            Some([1024, 2048])
+        );
     }
 
     #[test]
@@ -4219,6 +4799,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4277,6 +4858,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4329,6 +4911,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4379,6 +4962,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4432,6 +5016,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4505,6 +5090,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4573,6 +5159,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4769,6 +5356,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         apply_scene_from_snapshot(&mut scene, Some(&coarse_only));
@@ -5068,33 +5656,34 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
+            continuity: None,
         };
         assert_eq!(
-            object_state_lifecycle_phase(base),
+            object_state_lifecycle_phase(&base),
             ObjectStateLifecyclePhase::Dormant
         );
         assert_eq!(
-            object_state_lifecycle_phase(WorldObjectIngestionItem {
+            object_state_lifecycle_phase(&WorldObjectIngestionItem {
                 decoded_coarse_updates: Some(1),
-                ..base
+                ..base.clone()
             }),
             ObjectStateLifecyclePhase::Warming
         );
         assert_eq!(
-            object_state_lifecycle_phase(WorldObjectIngestionItem {
+            object_state_lifecycle_phase(&WorldObjectIngestionItem {
                 decoded_coarse_updates: Some(3),
                 decoded_health_updates: Some(2),
                 decoded_viewer_time_updates: Some(1),
-                ..base
+                ..base.clone()
             }),
             ObjectStateLifecyclePhase::Active
         );
         assert_eq!(
-            object_state_lifecycle_phase(WorldObjectIngestionItem {
+            object_state_lifecycle_phase(&WorldObjectIngestionItem {
                 decoded_health_basis_points: Some(2200),
                 decoded_coarse_updates: Some(6),
                 decoded_health_updates: Some(4),
-                ..base
+                ..base.clone()
             }),
             ObjectStateLifecyclePhase::Strained
         );
@@ -5303,6 +5892,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -5327,13 +5917,20 @@ mod tests {
     #[test]
     fn scene_removes_ingestion_proxy_when_seam_is_empty() {
         let mut scene = Scene::prototype();
-        let snapshot = sample_snapshot(true, true);
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.continuity.active_region_coords = Some([1024, 2048]);
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         assert!(
             scene
                 .instances
                 .values()
                 .any(|instance| instance.role == InstanceRole::WorldIngestionProxy)
+        );
+        assert!(
+            scene
+                .instances
+                .values()
+                .any(|instance| { instance.role == InstanceRole::WorldIngestionContinuityPayload })
         );
 
         scene.apply_world_object_ingestion_seam(&WorldObjectIngestionSeam::default());
@@ -5348,6 +5945,12 @@ mod tests {
                 .instances
                 .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
+        assert!(
+            scene
+                .instances
+                .values()
+                .all(|instance| { instance.role != InstanceRole::WorldIngestionContinuityPayload })
         );
         assert!(
             scene
@@ -5460,6 +6063,8 @@ mod tests {
                 is_self: true,
                 last_update_unix_ms: 10,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("other-id"),
@@ -5470,6 +6075,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 10,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
         ];
 
@@ -5484,7 +6091,7 @@ mod tests {
             self_avatar.geometry,
             GeometrySource::Diagnostic(MeshKind::AvatarProxy)
         );
-        assert_eq!(self_avatar.color, [1.0, 0.35, 0.15]);
+        assert_eq!(self_avatar.color, [1.0, 0.35, 0.15, 1.0]);
         assert_eq!(self_avatar.transform.scale, [0.38, 1.30, 0.38]);
 
         let other_avatar = scene
@@ -5496,7 +6103,7 @@ mod tests {
             other_avatar.geometry,
             GeometrySource::Diagnostic(MeshKind::AvatarProxy)
         );
-        assert_eq!(other_avatar.color, [0.30, 0.74, 0.98]);
+        assert_eq!(other_avatar.color, [0.30, 0.74, 0.98, 1.0]);
         assert_eq!(other_avatar.transform.scale, [0.36, 1.22, 0.36]);
     }
 
@@ -5512,6 +6119,8 @@ mod tests {
             is_self: false,
             last_update_unix_ms: 10,
             stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
         }];
 
         scene.apply_world_avatar_placeholders(&avatars, AvatarRenderMode::FallbackBox);
@@ -5522,8 +6131,69 @@ mod tests {
             .find(|instance| instance.role == InstanceRole::WorldAvatarPlaceholderOther)
             .expect("other avatar should be present");
         assert_eq!(avatar.geometry, GeometrySource::Diagnostic(MeshKind::Cube));
-        assert_eq!(avatar.color, [0.30, 0.74, 0.98]);
+        assert_eq!(avatar.color, [0.30, 0.74, 0.98, 1.0]);
         assert_eq!(avatar.transform.scale, [0.30, 1.10, 0.30]);
+    }
+
+    #[test]
+    fn project_avatar_attachments_is_bounded_and_sorted() {
+        let avatar = WorldAvatarPlaceholder {
+            agent_id: String::from("avatar-id"),
+            world_position: [4.0, 1.0, 2.0],
+            local_position: Some([10, 20, 30]),
+            sim_name: Some(String::from("TestSim")),
+            display_name: String::from("Avatar"),
+            is_self: false,
+            last_update_unix_ms: 99,
+            stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
+        };
+
+        let attachments = project_avatar_attachments(&[avatar]);
+        assert_eq!(attachments.len(), MAX_R08_ATTACHMENTS_PER_AVATAR);
+        assert_eq!(attachments[0].attachment_id, "back");
+        assert_eq!(attachments[0].local_id, 0);
+        assert_eq!(attachments[7].attachment_id, "hip");
+        assert_eq!(attachments[7].local_id, 7);
+    }
+
+    #[test]
+    fn scene_applies_and_removes_avatar_attachment_proxies() {
+        let mut scene = Scene::prototype();
+        let avatar = WorldAvatarPlaceholder {
+            agent_id: String::from("avatar-id"),
+            world_position: [4.0, 1.0, 2.0],
+            local_position: Some([10, 20, 30]),
+            sim_name: Some(String::from("TestSim")),
+            display_name: String::from("Avatar"),
+            is_self: false,
+            last_update_unix_ms: 99,
+            stale: false,
+            appearance: AvatarAppearanceSummary::default(),
+            attachments: Vec::new(),
+        };
+        let seam = WorldObjectIngestionSeam::default().with_avatar_attachments(&[avatar]);
+
+        scene.apply_world_object_ingestion_seam(&seam);
+
+        let attachment_instances: Vec<_> = scene
+            .instances
+            .values()
+            .filter(|instance| instance.role == InstanceRole::WorldAvatarAttachmentProxy)
+            .collect();
+        assert_eq!(attachment_instances.len(), MAX_R08_ATTACHMENTS_PER_AVATAR);
+        assert!(attachment_instances.iter().all(|instance| {
+            instance.geometry == GeometrySource::Diagnostic(MeshKind::AvatarProxy)
+        }));
+
+        scene.apply_world_object_ingestion_seam(&WorldObjectIngestionSeam::default());
+        assert!(
+            scene
+                .instances
+                .values()
+                .all(|instance| instance.role != InstanceRole::WorldAvatarAttachmentProxy)
+        );
     }
 
     #[test]
@@ -5551,6 +6221,8 @@ mod tests {
                 is_self: true,
                 last_update_unix_ms: 1,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("friend-a"),
@@ -5561,6 +6233,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 2,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("nearby-b"),
@@ -5571,6 +6245,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 3,
                 stale: true,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
         ];
 
@@ -5597,6 +6273,8 @@ mod tests {
                 is_self: true,
                 last_update_unix_ms: 100,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("22222222-2222-2222-2222-222222222222"),
@@ -5607,6 +6285,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 100,
                 stale: false,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
             WorldAvatarPlaceholder {
                 agent_id: String::from("33333333-3333-3333-3333-333333333333"),
@@ -5617,6 +6297,8 @@ mod tests {
                 is_self: false,
                 last_update_unix_ms: 100,
                 stale: true,
+                appearance: AvatarAppearanceSummary::default(),
+                attachments: Vec::new(),
             },
         ];
 
@@ -5659,6 +6341,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 100,
         };
 
@@ -5816,6 +6499,54 @@ mod tests {
             IntersectionResult::Intersecting
         );
     }
+
+    #[test]
+    fn compute_profile_freshness_logic() {
+        let now = 100_000u64;
+        let ttl = 60u64;
+
+        // Fresh
+        let (f, a) = compute_profile_freshness(now, Some(now - 10_000), ttl);
+        assert_eq!(f, ProfileFreshness::Fresh);
+        assert_eq!(a, "10s");
+
+        // Stale
+        let (f, a) = compute_profile_freshness(now, Some(now - 70_000), ttl);
+        assert_eq!(f, ProfileFreshness::Stale);
+        assert_eq!(a, "1m");
+
+        // Unknown (no timestamp)
+        let (f, a) = compute_profile_freshness(now, None, ttl);
+        assert_eq!(f, ProfileFreshness::Unknown);
+        assert_eq!(a, "n/a");
+
+        // Unknown (zero timestamp)
+        let (f, a) = compute_profile_freshness(now, Some(0), ttl);
+        assert_eq!(f, ProfileFreshness::Unknown);
+        assert_eq!(a, "n/a");
+
+        // Clock skew
+        let (f, a) = compute_profile_freshness(now, Some(now + 1000), ttl);
+        assert_eq!(f, ProfileFreshness::Unknown);
+        assert_eq!(a, "0s");
+    }
+
+    #[test]
+    fn compute_profile_freshness_age_formatting() {
+        let now = 20_000_000_000u64;
+        let ttl = 1u64;
+
+        let (_, a) = compute_profile_freshness(now, Some(now - 5000), ttl);
+        assert_eq!(a, "5s");
+        let (_, a) = compute_profile_freshness(now, Some(now - 120_000), ttl);
+        assert_eq!(a, "2m");
+        let (_, a) = compute_profile_freshness(now, Some(now - 7200_000), ttl);
+        assert_eq!(a, "2h");
+        let (_, a) = compute_profile_freshness(now, Some(now - 86400_u64 * 3 * 1000), ttl);
+        assert_eq!(a, "3d");
+        let (_, a) = compute_profile_freshness(now, Some(now - 86400_u64 * 150 * 1000), ttl);
+        assert_eq!(a, "99d+");
+    }
 }
 
 pub fn perspective_rh_zo(fovy_radians: f32, aspect: f32, znear: f32, zfar: f32) -> [[f32; 4]; 4] {
@@ -5940,5 +6671,85 @@ pub fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
     [
         m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
         m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileFreshness {
+    Fresh,
+    Stale,
+    Unknown,
+}
+
+pub fn compute_profile_freshness(
+    now_unix_ms: u64,
+    last_updated_unix_ms: Option<u64>,
+    ttl_secs: u64,
+) -> (ProfileFreshness, String) {
+    let Some(last_updated_ms) = last_updated_unix_ms else {
+        return (ProfileFreshness::Unknown, "n/a".to_string());
+    };
+    if last_updated_ms == 0 {
+        return (ProfileFreshness::Unknown, "n/a".to_string());
+    }
+
+    if last_updated_ms > now_unix_ms {
+        return (ProfileFreshness::Unknown, "0s".to_string());
+    }
+
+    let age_ms = now_unix_ms - last_updated_ms;
+    let age_s = age_ms / 1000;
+
+    let freshness = if ttl_secs == 0 {
+        ProfileFreshness::Unknown
+    } else if age_s <= ttl_secs {
+        ProfileFreshness::Fresh
+    } else {
+        ProfileFreshness::Stale
+    };
+
+    let age_str = if age_s < 60 {
+        format!("{}s", age_s)
+    } else if age_s < 3600 {
+        format!("{}m", age_s / 60)
+    } else if age_s < 86400 {
+        format!("{}h", age_s / 3600)
+    } else if age_s < 86400 * 100 {
+        format!("{}d", age_s / 86400)
+    } else {
+        "99d+".to_string()
+    };
+
+    (freshness, age_str)
+}
+
+pub fn mat3_translate(s: f32, t: f32) -> [[f32; 3]; 3] {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [s, t, 1.0]]
+}
+
+pub fn mat3_rotate(angle: f32) -> [[f32; 3]; 3] {
+    let c = angle.cos();
+    let s = angle.sin();
+    [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
+}
+
+pub fn mat3_scale(s: f32, t: f32) -> [[f32; 3]; 3] {
+    [[s, 0.0, 0.0], [0.0, t, 0.0], [0.0, 0.0, 1.0]]
+}
+
+pub fn mat3_mul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for c in 0..3 {
+        for r in 0..3 {
+            out[c][r] = a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2];
+        }
+    }
+    out
+}
+
+pub fn mat3_transform_vec2(m: [[f32; 3]; 3], v: [f32; 2]) -> [f32; 2] {
+    [
+        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0],
+        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1],
     ]
 }

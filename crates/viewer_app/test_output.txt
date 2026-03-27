@@ -1,0 +1,133 @@
+   Compiling viewer_app v0.1.0 (C:\Users\matti\Desktop\Antigravity viewer\Vulkan-Viewer\crates\viewer_app)
+error[E0433]: failed to resolve: use of undeclared type `MaterialSet`
+    --> crates\viewer_app\src\main.rs:4506:24
+     |
+4506 |         let mut mat1 = MaterialSet::default();
+     |                        ^^^^^^^^^^^ use of undeclared type `MaterialSet`
+     |
+help: consider importing this struct
+     |
+3963 +     use viewer_core::MaterialSet;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `MaterialDescriptor`
+    --> crates\viewer_app\src\main.rs:4509:24
+     |
+4509 |             .insert(1, MaterialDescriptor::new_legacy(AssetID::new("tex_c")));
+     |                        ^^^^^^^^^^^^^^^^^^ use of undeclared type `MaterialDescriptor`
+     |
+help: consider importing this enum
+     |
+3963 +     use viewer_core::MaterialDescriptor;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `RenderableInstance`
+    --> crates\viewer_app\src\main.rs:4512:13
+     |
+4512 |             RenderableInstance::new(
+     |             ^^^^^^^^^^^^^^^^^^ use of undeclared type `RenderableInstance`
+     |
+help: consider importing this struct
+     |
+3963 +     use viewer_core::RenderableInstance;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `InstanceRole`
+    --> crates\viewer_app\src\main.rs:4514:17
+     |
+4514 |                 InstanceRole::SceneStatic,
+     |                 ^^^^^^^^^^^^ use of undeclared type `InstanceRole`
+     |
+help: consider importing this enum
+     |
+3963 +     use viewer_core::InstanceRole;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `Transform`
+    --> crates\viewer_app\src\main.rs:4515:17
+     |
+4515 |                 Transform::default(),
+     |                 ^^^^^^^^^ use of undeclared type `Transform`
+     |
+help: consider importing this struct
+     |
+3963 +     use viewer_core::Transform;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `MaterialSet`
+    --> crates\viewer_app\src\main.rs:4523:24
+     |
+4523 |         let mut mat2 = MaterialSet::default();
+     |                        ^^^^^^^^^^^ use of undeclared type `MaterialSet`
+     |
+help: consider importing this struct
+     |
+3963 +     use viewer_core::MaterialSet;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `RenderableInstance`
+    --> crates\viewer_app\src\main.rs:4527:13
+     |
+4527 |             RenderableInstance::new(
+     |             ^^^^^^^^^^^^^^^^^^ use of undeclared type `RenderableInstance`
+     |
+help: consider importing this struct
+     |
+3963 +     use viewer_core::RenderableInstance;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `InstanceRole`
+    --> crates\viewer_app\src\main.rs:4529:17
+     |
+4529 |                 InstanceRole::SceneStatic,
+     |                 ^^^^^^^^^^^^ use of undeclared type `InstanceRole`
+     |
+help: consider importing this enum
+     |
+3963 +     use viewer_core::InstanceRole;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `Transform`
+    --> crates\viewer_app\src\main.rs:4530:17
+     |
+4530 |                 Transform::default(),
+     |                 ^^^^^^^^^ use of undeclared type `Transform`
+     |
+help: consider importing this struct
+     |
+3963 +     use viewer_core::Transform;
+     |
+
+error[E0277]: the trait bound `viewer_core::AssetID: Ord` is not satisfied
+    --> crates\viewer_app\src\main.rs:3712:25
+     |
+3712 |                     ids.insert(texture_id);
+     |                         ^^^^^^ the trait `Ord` is not implemented for `viewer_core::AssetID`
+     |
+note: required by a bound in `BTreeSet::<T, A>::insert`
+    --> C:\Users\matti\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\collections\btree\set.rs:900:12
+     |
+ 898 |     pub fn insert(&mut self, value: T) -> bool
+     |            ------ required by a bound in this associated function
+ 899 |     where
+ 900 |         T: Ord,
+     |            ^^^ required by this bound in `BTreeSet::<T, A>::insert`
+
+error[E0277]: the trait bound `viewer_core::AssetID: Ord` is not satisfied
+    --> crates\viewer_app\src\main.rs:3720:29
+     |
+3720 |                         ids.insert(texture_id);
+     |                             ^^^^^^ the trait `Ord` is not implemented for `viewer_core::AssetID`
+     |
+note: required by a bound in `BTreeSet::<T, A>::insert`
+    --> C:\Users\matti\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\collections\btree\set.rs:900:12
+     |
+ 898 |     pub fn insert(&mut self, value: T) -> bool
+     |            ------ required by a bound in this associated function
+ 899 |     where
+ 900 |         T: Ord,
+     |            ^^^ required by this bound in `BTreeSet::<T, A>::insert`
+
+Some errors have detailed explanations: E0277, E0433.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `viewer_app` (bin "viewer_app" test) due to 11 previous errors

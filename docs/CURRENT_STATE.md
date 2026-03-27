@@ -1,177 +1,53 @@
-# CURRENT_STATE.md
+# Current State: Vulkan-Viewer
 
-A living state snapshot. This file describes what is true now.
-Update it when behavior changes materially.
-Do not use it as a roadmap, milestone history log, or planning journal.
+## Overview
+The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
----
+## Latest Notable Changes (R08)
+- **Avatar Appearance Contracts**: Added `AvatarAppearanceSummary` and bounded `AvatarAttachmentProxy` scene-facing contracts in `viewer_core`.
+- **Attachment Lifecycle**: Added `WorldAvatarAttachmentProxy` scene roles plus seam-owned attachment proxy lifecycle management in `Scene::apply_world_object_ingestion_seam(...)`.
+- **Deterministic Attachment Projection**: `viewer_app` now projects bounded attachment proxies from existing avatar samples and feeds them into the seam path.
+- **Attachment Diagnostics**: `viewer_ui` now shows avatar and attachment proxy counts in the diagnostics panel.
+- **R08 Coverage**: Added deterministic attachment projection and seam create/remove tests in `viewer_core`; validated app, UI, renderer, and workspace test passes plus offline screenshot smoke.
 
-## Latest notable changes
+## Latest Notable Changes (N07)
+- **Bounded Region Continuity Model**: Added typed continuity state (`None`, `Crossed`, `Confirming`, `Completed`) in `viewer_net` and propagated it through `viewer_app` into `LiveVisualSnapshot`.
+- **Continuity Snapshot Contract**: Extended `viewer_core::LiveVisualSnapshot` with `RegionContinuitySummary` (active/previous region coords + bounded neighbors, serde-defaulted).
+- **Continuity Seam Lane**: Added `WorldObjectIngestionLane::ContinuityPayload` and seam->scene lifecycle wiring so continuity visualization remains seam-owned.
+- **Continuity Diagnostics UI**: Added read-only continuity lines in `viewer_ui` diagnostics (`phase`, active/previous region, neighbor count).
+- **N07 Test Coverage**: Added targeted tests for continuity mapping, continuity seam payload emission, and seam-owned continuity role lifecycle removal.
 
-* R01 execution: mesh loading/caching is hardened so empty/invalid glTF bytes cannot poison the mesh cache; dynamic geometry upload skips zero-index submeshes and only updates AABBs when upload succeeds.
-* A02 execution: fixture-backed texture acquisition + bounded CPU cache foundation is in place (`AssetStatus` + `FixtureTextureCache`), and `viewer_app` can upload fixture textures to the renderer when `VIEWER_FIXTURE_TEXTURES` is set.
-* New flag-driven runtime verification modes are available:
-  * `STRESS_TEST=camera` for deterministic auto-camera orbit validation
-  * `STRESS_TEST=screenshot` for automated PNG capture (`artifacts/screenshots` default) to support model/agent visual verification
-* A canonical test/verification reference now exists at `docs/TESTING_REFERENCE.md` (commands, flags, and `VIEWER_*` env vars).
-* New prefixed milestone plans are now authored:
-  * `docs/plans/PLAN_R01.md`
-  * `docs/plans/PLAN_A02.md`
-* Matching plan reviews are now authored:
-  * `docs/reviews/REVIEW_plan_r01.md`
-  * `docs/reviews/REVIEW_plan_a02.md`
-* `N03` execution: bounded object-update classification + minimal decode now exports a capped object feed through `LiveVisualSnapshot` and the ingestion seam, and the scene now renders deterministic world-object feed proxy instances with lifecycle-safe removal behavior.
-* Deferred-feature capture policy is now propagated across workflow docs (`AGENTS.md`, `docs/TASKS.md`, and planner/reviewer runbook prompts), not just `docs/plans/PLAN.md`.
-* `docs/plans/PLAN.md` now includes explicit instructions for expanding future concise milestones (`U04+`) into implementation-ready milestone plans.
-* A canonical deferred-feature parking list now exists at `docs/plans/DEFERRED_FEATURES.md`; planning-time "too early" features must be recorded there.
-* The master roadmap in `docs/plans/PLAN.md` now uses prefixed milestone IDs (`R/A/N/U`) and treats the next milestone sequence as `R01 -> A02 -> N03` (with `N03` now next).
-* `docs/plans/RENDERING_ROADMAP_V2.md` is now deprecated and redirects planning to the master roadmap plus per-milestone `PLAN_<ID>.md` files.
-* The rendering track should currently be treated as complete through **M2**.
-* The M2 geometry torture test (`STRESS_TEST=2`) now uploads and renders real procedural/sculpt geometry (dynamic meshes) instead of falling back to diagnostic cubes.
-* `LLVolume` circle-path extrusion now produces 3D geometry (closed paths stitched; no planar end caps on integer-revolution circles).
-* The repo is beyond the original Phase E baseline and now includes:
+## Latest Notable Changes (R05)
+- **R05 Review Fixes**: Resolved vertex layout mismatch in `viewer_render` pipelines and reconciled alpha/capping logic.
+- **RGBA Rendering Contract**: Standardized all color handling to RGBA `[f32; 4]` across `viewer_core` and `viewer_render`.
+- **AlphaMode Support**: Integrated `Opaque`, `AlphaTest`, and `Blend` modes into the `Scene` and `RenderableInstance` types.
+- **Pass Bucketing & Sorting**: Implemented a pass-based rendering system with deterministic front-to-back sorting for opaque/alpha-tested items and back-to-front sorting for transparent items.
+- **Stable Draw Item Model**: Created `DrawItem` and `draw_helpers.rs` to ensure consistent frame-to-frame draw submission.
+- **Fragment Alpha Discard**: Added alpha-testing logic directly to the GPU shader for performance.
 
-  * bounded live-world ingestion seams
-  * avatar placeholder world presence
-  * spatial scene-management groundwork
-  * geometry-engine groundwork for SL primitives, mesh, and sculpt support
-* Continuity cleanup is in progress so this file reflects present truth only.
+## Latest Notable Changes (A06)
+- **Texture & Material Integration**: Fully integrated `MaterialSet` and `TextureAnim` into `RenderableInstance` for per-instance and per-face overrides.
+- **Wired UV Matrix Pipeline**: Connected `RenderableInstance::texture_anim` to the `RenderBackend` uniform upload, enabling scrolling and flipbook animations on the GPU.
+- **Ergonomic Instance API**: Added `with_texture_anim` builder and automated default initialization to `RenderableInstance`.
+- **Verified Animation Logic**: Added comprehensive unit tests for UV matrix math and a visual verification case in the Geometry Torture stress test.
+- **Deterministic Texture Fallbacks**: Robust handling of loading (yellow) and missing (magenta) states integrated into the descriptor binding.
 
----
+## Latest Notable Changes (U04)
+- **Unified Session Status**: Standardized UX-facing session states (`disabled`, `starting`, `connected`, `reconnecting`, `failed`) implemented across the codebase.
+- **Improved UI Shell**: Reorganized into Session, Social, and Diagnostics panels.
+- **Diagnostics Relay Filters**: Added category and level filtering to the integrated Runtime Relay.
+- **Enhanced Profile Headers**: Implemented cache freshness labels (`Fresh`/`Stale`) and human-readable age readout.
+- **Crate Modernization**: Resolved all `wgpu` deprecation warnings in `viewer_render`.
 
-## Current overall state
+## Active Milestone
+**U09: Workflow depth and product usability expansion** (Next Planned)
+Focus: build on the bounded R08 avatar/attachment foundation with clearer workflow and diagnostics depth.
 
-The viewer has a working runtime, proven live login/bootstrap compatibility, a bounded first connected-world slice, avatar placeholder presence, and a rendering track that has advanced through **M2**.
+## System Components
+- `viewer_app`: Orchestration and worker state mapping (UI-agnostic).
+- `viewer_core`: Shared domain types, session status contract, and deterministic logic.
+- `viewer_ui`: Egui-based presentation layer (decoupled from app internals).
+- `viewer_render`: Wgpu-driven rendering backend.
+- `viewer_net`/`viewer_grid`: Protocol and asset transport layers.
 
-The current repo state should be understood as:
-
-* **Core runtime and networking foundation:** proven
-* **First connected world slice:** substantially proven
-* **Rendering track:** complete through **M2**
-* **Full asset-backed world rendering:** not yet complete
-* **Broad viewer parity features:** still future work
-
----
-
-## What is proven
-
-### Runtime and app foundation
-
-The following are established baseline behavior:
-
-* stable `wgpu` / `winit` / `egui` runtime foundation
-* camera, scene, and typed renderable-instance flow
-* renderer architecture viability
-* crate boundaries are holding
-* `viewer_app` owns orchestration rather than renderer internals
-
-### Networking and login
-
-The following are proven:
-
-* real Second Life login succeeds
-* login transport covers LLSD / XML-RPC compatibility cases
-* seed capability fetch and EventQueue bootstrap are viable
-* first-simulator LLUDP handshake succeeds in live runs
-* early post-login traffic is typed and classified
-
-### Live ingestion seam and first world slice
-
-The following are established:
-
-* bounded decode -> snapshot -> seam -> scene mapping is viable
-* bounded coarse neighborhood ingestion is viable
-* pre-world object/state composition is viable
-* avatar placeholder presence is viable
-* chat / IM / nearby / profile UI shell exists
-
-### Rendering track
-
-The rendering side should currently be treated as complete through **M2**.
-
-#### M1 — Spatial foundation and scene management
-
-The repo state includes spatial and scene-management groundwork beyond the original flat diagnostic baseline, including:
-
-* hierarchical scene graph support via `parent_id`
-* quaternion-based rotation support in `Transform`
-* `Scene::sync_spatial()` as the batch spatial-update boundary
-* world-matrix propagation for parent/child transforms
-* dirty-flag spatial update flow and stable object-ID handling
-* renderer consumption of precomputed world matrices
-* hierarchical stress-test coverage for dynamic spatial behavior
-
-#### M2 — Geometry engine groundwork
-
-The repo state includes geometry-engine groundwork for asset-backed rendering:
-
-* procedural `LLVolume` generation in `viewer_core`
-* `gltf`-based mesh loading groundwork in `viewer_asset`
-* sculpt decode support for legacy content
-* geometry caching and early LOD-selection groundwork
-* preserved SL-compatible face bitmasks for future material alignment
-
-This means the repo is **past** the original “diagnostic proxies only” rendering state, but it is **not yet** at full textured/material world rendering.
-
----
-
-## Current known limits
-
-### Rendering limits
-
-These are still not complete:
-
-* full texture and material pipeline
-* final asset-backed world-object rendering path across the live world
-* avatar rigging and skinned rendering
-* environmental / EEP rendering
-* polished post-processing and mature overlay systems
-
-### Networking and protocol limits
-
-These remain incomplete or only partially bounded:
-
-* broad world/object decode beyond the current bounded slice
-* region/world streaming beyond the current bounded diagnostic seam
-* full `RegionHandshake` payload interpretation
-* robust sim-name extraction and crossed-region handling across the whole runtime
-
-### Viewer and product limits
-
-These remain future work:
-
-* complete login UI workflow
-* inventory and map shells
-* broader usability and parity expansion
-
----
-
-## Current focus
-
-The repo should not describe rendering as “not started.”
-The last reliable rendering milestone should be treated as **M2 complete**.
-
-The next work should therefore be framed as **post-M2 rendering expansion**, not as if geometry generation still has not happened.
-
-That means planning should start from a repo state that already includes:
-
-* runtime foundation
-* login/bootstrap viability
-* bounded live ingestion seam
-* avatar placeholder world slice
-* M1 spatial groundwork
-* M2 geometry-engine groundwork
-
----
-
-## Continuity rule for this file
-
-`CURRENT_STATE.md` must describe present truth.
-Keep history minimal.
-A tiny “latest notable changes” section is allowed, but detailed milestone plans, execution history, and future sequencing belong in:
-
-* `docs/plans/`
-* `docs/reviews/`
-* `docs/reports/`
-* `docs/TASKS.md`
-* `docs/HANDOFF.md`
+- **Verification Status**: `cargo fmt --all`, `cargo check --workspace`, targeted crate tests, `cargo test --workspace`, and offline screenshot smoke all pass on the current R08 baseline.

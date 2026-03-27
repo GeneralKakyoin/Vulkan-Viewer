@@ -4,8 +4,8 @@ use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileLoadStatus, RuntimeRelayLevel,
-    SocialState, WorldAvatarPlaceholder,
+    ChatSendStatus, ChatState, LiveVisualSnapshot, ProfileFreshness, ProfileLoadStatus,
+    RuntimeRelayLevel, SessionUxReason, SessionUxStatus, SocialState, WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -44,6 +44,20 @@ fn live_visual_lines(snapshot: Option<&LiveVisualSnapshot>) -> Vec<String> {
                 ));
             } else {
                 lines.push(String::from("Traffic summary: unavailable"));
+            }
+
+            lines.push(format!("Continuity Phase: {:?}", snapshot.continuity.phase));
+            if let Some([x, y]) = snapshot.continuity.active_region_coords {
+                lines.push(format!("Active Region: {}, {}", x, y));
+            }
+            if let Some([px, py]) = snapshot.continuity.previous_region_coords {
+                lines.push(format!("Prev Region: {}, {}", px, py));
+            }
+            if !snapshot.continuity.neighbors.is_empty() {
+                lines.push(format!(
+                    "Neighbors: {}",
+                    snapshot.continuity.neighbors.len()
+                ));
             }
             lines
         }
@@ -199,6 +213,8 @@ pub struct UiSystem {
     thread_filter: ThreadFilter,
     profile_texture_cache: HashMap<String, egui::TextureHandle>,
     profile_texture_failures: HashMap<String, String>,
+    relay_filter_text: String,
+    relay_level_filter: Option<RuntimeRelayLevel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +267,35 @@ fn avatar_render_mode_label(mode: AvatarRenderMode) -> &'static str {
     match mode {
         AvatarRenderMode::Proxy => "proxy",
         AvatarRenderMode::FallbackBox => "fallback-box",
+    }
+}
+
+fn session_reason_label(reason: SessionUxReason) -> &'static str {
+    match reason {
+        SessionUxReason::DisabledByConfig => "disabled-by-config",
+        SessionUxReason::MissingConfig => "missing-config",
+        SessionUxReason::ConnectTransport => "connect-transport",
+        SessionUxReason::LoginTransport => "login-transport",
+        SessionUxReason::LoginAuth => "login-auth",
+        SessionUxReason::LoginRequiresTos => "login-requires-tos",
+        SessionUxReason::LoginRequiresMfa => "login-requires-mfa",
+        SessionUxReason::LoginUpdateRequired => "login-update-required",
+        SessionUxReason::ConnectionLost => "connection-lost",
+        SessionUxReason::Other => "other",
+    }
+}
+
+fn session_status_chip(
+    status: &SessionUxStatus,
+) -> (&'static str, egui::Color32, Option<SessionUxReason>) {
+    match status {
+        SessionUxStatus::Disabled { reason } => ("disabled", egui::Color32::GRAY, *reason),
+        SessionUxStatus::Starting => ("starting", egui::Color32::YELLOW, None),
+        SessionUxStatus::Connected => ("connected", egui::Color32::GREEN, None),
+        SessionUxStatus::Reconnecting { reason } => {
+            ("reconnecting", egui::Color32::YELLOW, *reason)
+        }
+        SessionUxStatus::Failed { reason } => ("failed", egui::Color32::RED, Some(*reason)),
     }
 }
 
@@ -358,6 +403,8 @@ impl UiSystem {
             thread_filter: ThreadFilter::Recent,
             profile_texture_cache: HashMap::new(),
             profile_texture_failures: HashMap::new(),
+            relay_filter_text: String::new(),
+            relay_level_filter: None,
         }
     }
 
@@ -379,7 +426,7 @@ impl UiSystem {
         surface_size: PhysicalSize<u32>,
         camera: &Camera,
         live_visual: Option<&LiveVisualSnapshot>,
-        live_startup_status: &str,
+        session_status: SessionUxStatus,
         chat_state: &mut ChatState,
         social_state: &mut SocialState,
         world_avatars: &[WorldAvatarPlaceholder],
@@ -387,6 +434,8 @@ impl UiSystem {
         world_self_location: Option<[f32; 3]>,
         profile_state: &mut Option<AvatarProfileState>,
         profile_image_bytes: &BTreeMap<String, Vec<u8>>,
+        now_unix_ms: u64,
+        profile_cache_ttl_secs: u64,
         fps: f32,
         frame_ms: f32,
         avg_scene_update_ms: f32,
@@ -406,34 +455,107 @@ impl UiSystem {
                 ui.heading("SL Viewer Rewrite");
             });
 
-            egui::Window::new("Debug")
+            egui::Window::new("Session")
                 .default_pos(egui::pos2(16.0, 48.0))
                 .resizable(false)
                 .show(ctx, |ui| {
-                    egui::CollapsingHeader::new("Runtime")
+                    let (status_text, status_color, status_reason) =
+                        session_status_chip(&session_status);
+                    ui.horizontal(|ui| {
+                        ui.label("Status:");
+                        ui.colored_label(status_color, status_text);
+                        if let Some(reason) = status_reason {
+                            ui.weak(format!(" ({})", session_reason_label(reason)));
+                        }
+                    });
+                    ui.separator();
+                    ui.label(format!("Sim: {}", world_sim_name.unwrap_or("unknown")));
+                    if let Some([x, y, z]) = world_self_location {
+                        ui.label(format!("Pos: {:.1}, {:.1}, {:.1}", x, y, z));
+                    }
+                    ui.label(format!(
+                        "Avatar Render: {}",
+                        avatar_render_mode_label(social_state.avatar_render_mode)
+                    ));
+                });
+
+            egui::Window::new("Diagnostics")
+                .default_pos(egui::pos2(surface_size.width as f32 - 260.0, 48.0))
+                .resizable(false)
+                .show(ctx, |ui| {
+                    egui::CollapsingHeader::new("Performance")
                         .default_open(true)
                         .show(ui, |ui| {
-                            ui.label(format!(
-                                "Surface: {}x{}",
-                                surface_size.width, surface_size.height
-                            ));
-                            ui.label(format!("Live startup: {live_startup_status}"));
-                            ui.label(format!(
-                                "Avatar render: {}",
-                                avatar_render_mode_label(social_state.avatar_render_mode)
-                            ));
-                            ui.label(format!("Sim: {}", world_sim_name.unwrap_or("unknown")));
-                            if let Some([x, y, z]) = world_self_location {
-                                ui.label(format!("Location: {:.1}, {:.1}, {:.1}", x, y, z));
-                            } else {
-                                ui.label("Location: unknown");
+                            ui.label(format!("FPS: {:.1}", fps));
+                            ui.label(format!("Frame: {:.2} ms", frame_ms));
+
+                            // Frametime Sparkline
+                            let history = &social_state.frametime_history;
+                            if !history.is_empty() {
+                                let height = 30.0;
+                                let width = ui.available_width().at_least(100.0);
+                                let (rect, _response) = ui.allocate_at_least(
+                                    egui::vec2(width, height),
+                                    egui::Sense::hover(),
+                                );
+                                let painter = ui.painter();
+                                painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+
+                                let count = history.len();
+                                let bar_width = width / (count as f32).max(1.0);
+                                let max_ms = 33.3; // Scale to 30fps baseline, but allow overflow
+
+                                for (i, &ms) in history.iter().enumerate() {
+                                    let h_frac = (ms / max_ms).at_most(1.0);
+                                    let h = h_frac * height;
+                                    let x = rect.min.x + i as f32 * bar_width;
+                                    let y = rect.max.y - h;
+                                    let color = if ms > 20.0 {
+                                        egui::Color32::from_rgb(200, 100, 100) // Reddish for spike
+                                    } else {
+                                        egui::Color32::from_rgb(100, 200, 100) // Greenish
+                                    };
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(x, y),
+                                            egui::pos2(x + bar_width.at_least(1.0), rect.max.y),
+                                        ),
+                                        0.0,
+                                        color,
+                                    );
+                                }
                             }
+                            ui.separator();
+                            ui.label(format!("Scene Update: {:.2} ms", avg_scene_update_ms));
                         });
+
+                    egui::CollapsingHeader::new("Scene Metrics")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(format!("Instances: {}", total_instances));
+                            ui.label(format!("Visible: {}", visible_proxies));
+                        });
+
+                    egui::CollapsingHeader::new("Avatar Surface")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            let total_attachment_proxies: usize = world_avatars
+                                .iter()
+                                .map(|avatar| avatar.attachments.len())
+                                .sum();
+                            ui.label(format!("Avatars: {}", world_avatars.len()));
+                            ui.label(format!(
+                                "Attachment proxies: {} (cap {} per avatar)",
+                                total_attachment_proxies,
+                                viewer_core::MAX_R08_ATTACHMENTS_PER_AVATAR
+                            ));
+                        });
+
                     egui::CollapsingHeader::new("Camera")
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.label(format!(
-                                "pos: x={:.2} y={:.2} z={:.2}",
+                                "pos: {:.1}, {:.1}, {:.1}",
                                 camera.position[0], camera.position[1], camera.position[2]
                             ));
                             ui.label(format!(
@@ -441,64 +563,109 @@ impl UiSystem {
                                 camera.yaw, camera.pitch
                             ));
                         });
-                    egui::CollapsingHeader::new("Live Visual Snapshot")
+
+                    egui::CollapsingHeader::new("System")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(format!(
+                                "Surface: {}x{}",
+                                surface_size.width, surface_size.height
+                            ));
+                        });
+
+                    egui::CollapsingHeader::new("Live Visual")
                         .default_open(false)
                         .show(ui, |ui| {
                             for line in live_visual_lines(live_visual) {
                                 ui.label(line);
                             }
                         });
-                });
 
-            egui::Window::new("Performance")
-                .default_pos(egui::pos2(16.0, 252.0))
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("FPS: {:.1}", fps));
-                    ui.label(format!("Frame: {:.2} ms", frame_ms));
+                    egui::CollapsingHeader::new("Runtime Relay")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Search:");
+                                ui.text_edit_singleline(&mut self.relay_filter_text);
+                                if ui.button("x").clicked() {
+                                    self.relay_filter_text.clear();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Min Level:");
+                                ui.selectable_value(&mut self.relay_level_filter, None, "All");
+                                ui.selectable_value(
+                                    &mut self.relay_level_filter,
+                                    Some(RuntimeRelayLevel::Info),
+                                    "Info",
+                                );
+                                ui.selectable_value(
+                                    &mut self.relay_level_filter,
+                                    Some(RuntimeRelayLevel::Warn),
+                                    "Warn",
+                                );
+                                ui.selectable_value(
+                                    &mut self.relay_level_filter,
+                                    Some(RuntimeRelayLevel::Error),
+                                    "Error",
+                                );
+                            });
+                            ui.separator();
 
-                    // Frametime Sparkline
-                    let history = &social_state.frametime_history;
-                    if !history.is_empty() {
-                        let height = 30.0;
-                        let width = ui.available_width().at_least(100.0);
-                        let (rect, _response) =
-                            ui.allocate_at_least(egui::vec2(width, height), egui::Sense::hover());
-                        let painter = ui.painter();
-                        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+                            let filtered_events: Vec<_> = social_state
+                                .relay
+                                .events
+                                .iter()
+                                .filter(|e| {
+                                    if let Some(min_level) = self.relay_level_filter {
+                                        if e.level < min_level {
+                                            return false;
+                                        }
+                                    }
+                                    if !self.relay_filter_text.is_empty() {
+                                        let filter = self.relay_filter_text.to_lowercase();
+                                        if !e.category.to_lowercase().contains(&filter)
+                                            && !e.message.to_lowercase().contains(&filter)
+                                        {
+                                            return false;
+                                        }
+                                    }
+                                    true
+                                })
+                                .collect();
 
-                        let count = history.len();
-                        let bar_width = width / (count as f32).max(1.0);
-                        let max_ms = 33.3; // Scale to 30fps baseline, but allow overflow
+                            ui.label(format!(
+                                "showing {}/{} events",
+                                filtered_events.len(),
+                                social_state.relay.events.len()
+                            ));
 
-                        for (i, &ms) in history.iter().enumerate() {
-                            let h_frac = (ms / max_ms).at_most(1.0);
-                            let h = h_frac * height;
-                            let x = rect.min.x + i as f32 * bar_width;
-                            let y = rect.max.y - h;
-                            let color = if ms > 20.0 {
-                                egui::Color32::from_rgb(200, 100, 100) // Reddish for spike
-                            } else {
-                                egui::Color32::from_rgb(100, 200, 100) // Greenish
-                            };
-                            painter.rect_filled(
-                                egui::Rect::from_min_max(
-                                    egui::pos2(x, y),
-                                    egui::pos2(x + bar_width.at_least(1.0), rect.max.y),
-                                ),
-                                0.0,
-                                color,
-                            );
-                        }
-                    }
-                    ui.separator();
-                    ui.label(format!("Scene Update: {:.2} ms", avg_scene_update_ms));
-                    ui.label(format!("Total Instances: {}", total_instances));
-                    ui.label(format!("Visible Proxies: {}", visible_proxies));
+                            egui::ScrollArea::vertical()
+                                .id_salt("relay_scroll")
+                                .max_height(200.0)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for event in filtered_events {
+                                        let color = match event.level {
+                                            RuntimeRelayLevel::Trace => egui::Color32::GRAY,
+                                            RuntimeRelayLevel::Info => egui::Color32::WHITE,
+                                            RuntimeRelayLevel::Warn => egui::Color32::YELLOW,
+                                            RuntimeRelayLevel::Error => egui::Color32::RED,
+                                        };
+                                        ui.colored_label(
+                                            color,
+                                            format!(
+                                                "[{}] {}: {}",
+                                                event.at_unix_ms, event.category, event.message
+                                            ),
+                                        );
+                                    }
+                                });
+                        });
                 });
 
             if show_chat_window {
-                egui::Window::new("Chat + IM")
+                egui::Window::new("Social")
                     .default_pos(egui::pos2(16.0, 340.0))
                     .default_size(egui::vec2(760.0, 360.0))
                     .min_size(egui::vec2(520.0, 260.0))
@@ -619,12 +786,20 @@ impl UiSystem {
                                             }
                                         });
                                     ui.separator();
-                                    let text_edit = ui.add(
+                                    let is_connected =
+                                        matches!(session_status, SessionUxStatus::Connected);
+                                    let text_edit = ui.add_enabled(
+                                        is_connected,
                                         egui::TextEdit::multiline(&mut chat_state.draft.text)
                                             .desired_rows(3)
-                                            .hint_text("Enter sends, Shift+Enter newline"),
+                                            .hint_text(if is_connected {
+                                                "Enter sends, Shift+Enter newline"
+                                            } else {
+                                                "Connect to send nearby chat"
+                                            }),
                                     );
-                                    let can_send = !chat_state.draft.text.trim().is_empty();
+                                    let can_send =
+                                        is_connected && !chat_state.draft.text.trim().is_empty();
                                     let enter_send = text_edit.has_focus()
                                         && ui.input(|input| {
                                             should_submit_on_enter(
@@ -697,12 +872,20 @@ impl UiSystem {
                                             ui.label("No IM history yet.");
                                         }
                                         ui.separator();
-                                        let text_edit = ui.add(
+                                        let is_connected =
+                                            matches!(session_status, SessionUxStatus::Connected);
+                                        let text_edit = ui.add_enabled(
+                                            is_connected,
                                             egui::TextEdit::multiline(&mut social_state.im_draft)
                                                 .desired_rows(3)
-                                                .hint_text("Enter sends, Shift+Enter newline"),
+                                                .hint_text(if is_connected {
+                                                    "Enter sends, Shift+Enter newline"
+                                                } else {
+                                                    "Connect to send IM"
+                                                }),
                                         );
-                                        let can_send = !social_state.im_draft.trim().is_empty();
+                                        let can_send = is_connected
+                                            && !social_state.im_draft.trim().is_empty();
                                         let enter_send = text_edit.has_focus()
                                             && ui.input(|input| {
                                                 should_submit_on_enter(
@@ -754,17 +937,31 @@ impl UiSystem {
                                 ui.strong(profile.display_label());
                                 ui.weak(format!("#{}", short_id(profile.avatar_id.as_str())));
                                 ui.colored_label(status_color, status_text);
+
+                                // Freshness indicator
+                                let (freshness, age_str) = viewer_core::compute_profile_freshness(
+                                    now_unix_ms,
+                                    load.last_updated_unix_ms,
+                                    profile_cache_ttl_secs,
+                                );
+                                let (freshness_label, freshness_color) = match freshness {
+                                    ProfileFreshness::Fresh => {
+                                        ("Fresh", egui::Color32::from_rgb(100, 200, 100))
+                                    }
+                                    ProfileFreshness::Stale => {
+                                        ("Stale", egui::Color32::from_rgb(200, 150, 50))
+                                    }
+                                    ProfileFreshness::Unknown => ("Unknown", egui::Color32::GRAY),
+                                };
+                                ui.colored_label(
+                                    freshness_color,
+                                    format!("{freshness_label} ({age_str})"),
+                                );
                             });
                             ui.horizontal(|ui| {
-                                ui.weak(format!(
-                                    "tab: {:?} | updated: {}",
-                                    profile.selected_tab,
-                                    load.last_updated_unix_ms
-                                        .map(|v| v.to_string())
-                                        .unwrap_or_else(|| String::from("n/a"))
-                                ));
+                                ui.weak(format!("tab: {:?}", profile.selected_tab));
                                 if let Some(err) = load.error.as_ref() {
-                                    ui.colored_label(egui::Color32::RED, err);
+                                    ui.colored_label(egui::Color32::RED, format!(" Error: {err}"));
                                 }
                             });
                         });
@@ -1081,36 +1278,6 @@ impl UiSystem {
                     });
             }
 
-            egui::Window::new("Runtime Relay")
-                .default_pos(egui::pos2(920.0, 48.0))
-                .default_size(egui::vec2(340.0, 320.0))
-                .show(ctx, |ui| {
-                    ui.label(format!("events: {}", social_state.relay.events.len()));
-                    egui::CollapsingHeader::new("Show Relay Events")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            egui::ScrollArea::vertical()
-                                .stick_to_bottom(true)
-                                .show(ui, |ui| {
-                                    for event in &social_state.relay.events {
-                                        let color = match event.level {
-                                            RuntimeRelayLevel::Trace => egui::Color32::GRAY,
-                                            RuntimeRelayLevel::Info => egui::Color32::WHITE,
-                                            RuntimeRelayLevel::Warn => egui::Color32::YELLOW,
-                                            RuntimeRelayLevel::Error => egui::Color32::RED,
-                                        };
-                                        ui.colored_label(
-                                            color,
-                                            format!(
-                                                "[{}] {}: {}",
-                                                event.at_unix_ms, event.category, event.message
-                                            ),
-                                        );
-                                    }
-                                });
-                        });
-                });
-
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("world_avatar_labels_layer"),
@@ -1207,7 +1374,7 @@ impl UiSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viewer_core::{DirectImMessage, FriendEntry};
+    use viewer_core::{DirectImMessage, FriendEntry, RegionContinuitySummary};
 
     #[test]
     fn live_visual_lines_reports_absent_snapshot() {
@@ -1259,12 +1426,18 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         };
         let lines = live_visual_lines(Some(&snapshot));
         assert!(lines.iter().any(|line| line.contains("Logged in: true")));
         assert!(lines.iter().any(|line| line.contains("obs=5")));
         assert!(lines.iter().any(|line| line.contains("CrossedRegion=1")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Continuity Phase: None"))
+        );
     }
 
     #[test]
@@ -1328,11 +1501,19 @@ mod tests {
     }
 
     #[test]
-    fn avatar_render_mode_label_reports_proxy_and_fallback() {
-        assert_eq!(avatar_render_mode_label(AvatarRenderMode::Proxy), "proxy");
-        assert_eq!(
-            avatar_render_mode_label(AvatarRenderMode::FallbackBox),
-            "fallback-box"
-        );
+    fn session_status_chip_labels() {
+        use viewer_core::{SessionUxReason, SessionUxStatus};
+
+        let (label, color, reason) = session_status_chip(&SessionUxStatus::Connected);
+        assert_eq!(label, "connected");
+        assert_eq!(color, egui::Color32::GREEN);
+        assert!(reason.is_none());
+
+        let (label, color, reason) = session_status_chip(&SessionUxStatus::Failed {
+            reason: SessionUxReason::LoginAuth,
+        });
+        assert_eq!(label, "failed");
+        assert_eq!(color, egui::Color32::RED);
+        assert_eq!(reason, Some(SessionUxReason::LoginAuth));
     }
 }

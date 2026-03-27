@@ -68,11 +68,21 @@ For any meaningful task:
    If planning identifies useful scope that is too early for the current task/milestone,
    record it in `docs/plans/DEFERRED_FEATURES.md` with reason, trigger/dependency, and earliest reconsideration milestone.
 
-7. **Review the plan before implementation.**
+7. **Run the LEARNINGS pre-check.**
+   Name the specific `docs/LEARNINGS.md` entries that constrain the plan.
+   If none apply, state "No applicable learnings" explicitly in the plan.
+
+8. **Review the plan before implementation.**
    Store plan reviews in `docs/reviews/`.
 
-8. **Get user sign-off before implementation.**
+9. **Get user sign-off before implementation.**
    Do not begin meaningful implementation on an unapproved plan.
+
+10. **Close with LEARNINGS delta.**
+   For implementation/review completion artifacts, include:
+   - `added` (new durable lesson)
+   - `updated` (existing lesson refined)
+   - `none` (no durable lesson, with one-line reason)
 
 ---
 
@@ -92,5 +102,6 @@ Use this structure:
 ## Validation plan
 ## Risks and open questions
 ## Deferred-too-early candidates captured
+## Learnings pre-check
 ## Completion criteria
 ```

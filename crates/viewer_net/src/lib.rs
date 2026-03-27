@@ -73,6 +73,8 @@ const MAX_OBJECT_FEED_OBJECTS: usize = 1024;
 const MAX_OBJECT_FEED_EXPORT_OBJECTS: usize = 128;
 const MAX_OBJECT_FEED_RECENT_KILLS: usize = 128;
 const MAX_ZEROCODED_BODY_BYTES: usize = 256 * 1024;
+const MAX_CONTINUITY_NEIGHBORS: usize = 8;
+const MAX_CONTINUITY_OBSERVATIONS: usize = 16;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "AgentProfile",
@@ -791,6 +793,30 @@ pub struct LoginTraceRedirect {
     pub result_type: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HandoffPhase {
+    #[default]
+    None,
+    Crossed,
+    Confirming,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct BoundedNeighborSummary {
+    pub region_handle: u64,
+    pub region_x: u32,
+    pub region_y: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RegionContinuitySummary {
+    pub phase: HandoffPhase,
+    pub active_region_coords: Option<[u32; 2]>,
+    pub previous_region_coords: Option<[u32; 2]>,
+    pub neighbors: Vec<BoundedNeighborSummary>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LoginTraceResponse {
     pub login: Option<bool>,
@@ -1356,6 +1382,7 @@ pub struct Connection {
     object_feed_recent_kills: Vec<u32>,
     object_feed_tick: u64,
     next_first_simulator_packet_id: u32,
+    continuity_summary: RegionContinuitySummary,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1381,6 +1408,7 @@ impl Connection {
             object_feed_recent_kills: Vec::new(),
             object_feed_tick: 0,
             next_first_simulator_packet_id: 1,
+            continuity_summary: RegionContinuitySummary::default(),
         }
     }
 
@@ -1418,6 +1446,21 @@ impl Connection {
 
     pub fn region_transition_control_observations(&self) -> &[RegionTransitionControlObservation] {
         &self.region_transition_control_observations
+    }
+
+    pub fn continuity_summary(&self) -> &RegionContinuitySummary {
+        &self.continuity_summary
+    }
+
+    pub fn record_region_continuity_observation(&mut self, summary: RegionContinuitySummary) {
+        let mut neighbors = summary.neighbors;
+        if neighbors.len() > MAX_CONTINUITY_NEIGHBORS {
+            neighbors.truncate(MAX_CONTINUITY_NEIGHBORS);
+        }
+        self.continuity_summary = RegionContinuitySummary {
+            neighbors,
+            ..summary
+        };
     }
 
     pub fn simulator_payload_decode_summary(&self) -> &SimulatorPayloadDecodeSummary {
@@ -1568,6 +1611,7 @@ impl Connection {
         self.object_feed_recent_kills.clear();
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
+        self.continuity_summary = RegionContinuitySummary::default();
         self.state = ConnectionState::LoggedIn;
         Ok(())
     }
@@ -2007,6 +2051,18 @@ impl Connection {
                     .agent_movement_complete_last_position = Some(decoded.position);
                 self.simulator_payload_decode_summary
                     .agent_movement_complete_last_region_handle = Some(decoded.region_handle);
+
+                // Continuity: Movement complete signals the completion of the handoff.
+                self.continuity_summary.phase = HandoffPhase::Completed;
+                let coords = [
+                    (decoded.region_handle >> 32) as u32,
+                    (decoded.region_handle & 0xFFFFFFFF) as u32,
+                ];
+                if self.continuity_summary.active_region_coords != Some(coords) {
+                    self.continuity_summary.previous_region_coords =
+                        self.continuity_summary.active_region_coords;
+                    self.continuity_summary.active_region_coords = Some(coords);
+                }
             }
         }
         if classification.kind == FirstSimulatorInboundMessageKind::HealthMessage
@@ -2112,6 +2168,24 @@ impl Connection {
                     payload_len: payload.len(),
                     signal: classification.signal.clone(),
                 });
+            if self.region_transition_control_observations.len() > MAX_CONTINUITY_OBSERVATIONS {
+                let overflow =
+                    self.region_transition_control_observations.len() - MAX_CONTINUITY_OBSERVATIONS;
+                self.region_transition_control_observations
+                    .drain(0..overflow);
+            }
+
+            // Continuity: Transition phase progression.
+            match kind {
+                RegionTransitionControlKind::CrossedRegion => {
+                    self.continuity_summary.phase = HandoffPhase::Crossed;
+                }
+                RegionTransitionControlKind::ConfirmEnableSimulator => {
+                    if self.continuity_summary.phase == HandoffPhase::Crossed {
+                        self.continuity_summary.phase = HandoffPhase::Confirming;
+                    }
+                }
+            }
         }
 
         Ok(classification)
@@ -3488,6 +3562,15 @@ impl Connection {
         self.object_feed_recent_kills.clear();
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
+        self.continuity_summary = RegionContinuitySummary {
+            phase: HandoffPhase::None,
+            active_region_coords: Some([
+                bootstrap.first_sim.region_x,
+                bootstrap.first_sim.region_y,
+            ]),
+            previous_region_coords: None,
+            neighbors: Vec::new(),
+        };
     }
 
     fn next_first_simulator_packet_id(&mut self) -> u32 {
@@ -9655,6 +9738,10 @@ mod tests {
         assert_eq!(region_control_summary.crossed_region, 1);
         assert_eq!(region_control_summary.confirm_enable_simulator, 1);
         assert!(!region_control_summary.not_seen_in_run);
+        let continuity = connection.continuity_summary();
+        assert_eq!(continuity.phase, HandoffPhase::Confirming);
+        assert_eq!(continuity.active_region_coords, Some([1000, 1001]));
+        assert_eq!(continuity.previous_region_coords, None);
 
         let early_traffic = connection.early_simulator_traffic_observations();
         assert_eq!(early_traffic.len(), 1);
@@ -9775,6 +9862,29 @@ mod tests {
         assert_eq!(handoff_summary.crossed_region, 1);
         assert_eq!(handoff_summary.confirm_enable_simulator, 0);
         assert!(!handoff_summary.not_seen_in_run);
+        assert_eq!(connection.continuity_summary().phase, HandoffPhase::Crossed);
+    }
+
+    #[test]
+    fn record_region_continuity_observation_caps_neighbor_export() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let neighbors = (0..32)
+            .map(|idx| BoundedNeighborSummary {
+                region_handle: idx as u64,
+                region_x: idx,
+                region_y: idx + 1,
+            })
+            .collect::<Vec<_>>();
+        connection.record_region_continuity_observation(RegionContinuitySummary {
+            phase: HandoffPhase::Crossed,
+            active_region_coords: Some([1000, 1001]),
+            previous_region_coords: Some([999, 1001]),
+            neighbors,
+        });
+        assert_eq!(
+            connection.continuity_summary().neighbors.len(),
+            MAX_CONTINUITY_NEIGHBORS
+        );
     }
 
     #[test]
