@@ -732,6 +732,39 @@ impl UiSystem {
                                 "Pressure Events: {}",
                                 fixture_texture_metrics.continuity_budget_pressure_events
                             ));
+                            ui.separator();
+                            ui.label("Experimental: Live Asset Bridge (A13)");
+                            ui.label(format!(
+                                "Live Enqueued / Ready: {} / {}",
+                                fixture_texture_metrics.live_requests_enqueued,
+                                fixture_texture_metrics.live_requests_ready
+                            ));
+                            let total_failed = fixture_texture_metrics
+                                .live_requests_failed_transport
+                                + fixture_texture_metrics.live_requests_failed_decode
+                                + fixture_texture_metrics.live_requests_failed_timeout
+                                + fixture_texture_metrics.live_requests_failed_other;
+                            ui.label(format!("Live Failed: {}", total_failed));
+                            if total_failed > 0 {
+                                ui.indent("live_failures", |ui| {
+                                    ui.label(format!(
+                                        "Transport: {}",
+                                        fixture_texture_metrics.live_requests_failed_transport
+                                    ));
+                                    ui.label(format!(
+                                        "Decode: {}",
+                                        fixture_texture_metrics.live_requests_failed_decode
+                                    ));
+                                    ui.label(format!(
+                                        "Timeout: {}",
+                                        fixture_texture_metrics.live_requests_failed_timeout
+                                    ));
+                                });
+                            }
+                            ui.label(format!(
+                                "Fixture Fallbacks: {}",
+                                fixture_texture_metrics.fixture_fallbacks_used
+                            ));
                         });
 
                     egui::CollapsingHeader::new("Runtime Relay")

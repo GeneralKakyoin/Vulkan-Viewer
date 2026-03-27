@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
+use viewer_core::{HandoffPhase, RegionContinuitySummary};
 use viewer_grid::legacy_login::{
     classify_legacy_login_name, normalize_legacy_passwd, split_legacy_name,
 };
@@ -786,30 +787,6 @@ pub struct LoginTraceRedirect {
     pub result_type: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum HandoffPhase {
-    #[default]
-    None,
-    Crossed,
-    Confirming,
-    Completed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct BoundedNeighborSummary {
-    pub region_handle: u64,
-    pub region_x: u32,
-    pub region_y: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct RegionContinuitySummary {
-    pub phase: HandoffPhase,
-    pub active_region_coords: Option<[u32; 2]>,
-    pub previous_region_coords: Option<[u32; 2]>,
-    pub neighbors: Vec<BoundedNeighborSummary>,
-}
-
 #[derive(Debug, Clone)]
 pub struct LoginTraceResponse {
     pub login: Option<bool>,
@@ -1376,6 +1353,7 @@ pub struct Connection {
     object_feed_tick: u64,
     next_first_simulator_packet_id: u32,
     continuity_summary: RegionContinuitySummary,
+    last_phase_change_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1402,6 +1380,7 @@ impl Connection {
             object_feed_tick: 0,
             next_first_simulator_packet_id: 1,
             continuity_summary: RegionContinuitySummary::default(),
+            last_phase_change_at: Instant::now(),
         }
     }
 
@@ -1441,19 +1420,60 @@ impl Connection {
         &self.region_transition_control_observations
     }
 
-    pub fn continuity_summary(&self) -> &RegionContinuitySummary {
-        &self.continuity_summary
+    pub fn continuity_summary(&self) -> RegionContinuitySummary {
+        let mut summary = self.continuity_summary.clone();
+        summary.phase_age_ms = self.last_phase_change_at.elapsed().as_millis() as u64;
+        summary
     }
 
     pub fn record_region_continuity_observation(&mut self, summary: RegionContinuitySummary) {
+        // Guard: do not move backwards in handoff phase priority unless it's a reset to None
+        let current_priority = self.continuity_summary.phase.priority();
+        let next_priority = summary.phase.priority();
+        if next_priority < current_priority && summary.phase != HandoffPhase::None {
+            return;
+        }
+
+        if self.continuity_summary.phase != summary.phase {
+            self.last_phase_change_at = Instant::now();
+        }
+
         let mut neighbors = summary.neighbors;
         if neighbors.len() > MAX_CONTINUITY_NEIGHBORS {
             neighbors.truncate(MAX_CONTINUITY_NEIGHBORS);
         }
+
+        let phase_age_ms = self.last_phase_change_at.elapsed().as_millis() as u64;
+
+        // Inherit coordinates if not provided in the new summary
+        let active_region_coords = summary
+            .active_region_coords
+            .or(self.continuity_summary.active_region_coords);
+        let previous_region_coords = summary
+            .previous_region_coords
+            .or(self.continuity_summary.previous_region_coords);
+
         self.continuity_summary = RegionContinuitySummary {
+            phase: summary.phase,
+            outcome: summary.outcome,
+            reason: summary.reason,
+            phase_age_ms,
+            active_region_coords,
+            previous_region_coords,
             neighbors,
-            ..summary
         };
+    }
+
+    fn continuity_summary_with_phase(&self, phase: HandoffPhase) -> RegionContinuitySummary {
+        RegionContinuitySummary {
+            phase,
+            outcome: self.continuity_summary.outcome,
+            reason: self.continuity_summary.reason,
+            phase_age_ms: 0,
+            active_region_coords: self.continuity_summary.active_region_coords,
+            previous_region_coords: self.continuity_summary.previous_region_coords,
+            neighbors: self.continuity_summary.neighbors.clone(),
+        }
     }
 
     pub fn simulator_payload_decode_summary(&self) -> &SimulatorPayloadDecodeSummary {
@@ -2040,16 +2060,16 @@ impl Connection {
                 .agent_movement_complete_last_region_handle = Some(decoded.region_handle);
 
             // Continuity: Movement complete signals the completion of the handoff.
-            self.continuity_summary.phase = HandoffPhase::Completed;
             let coords = [
                 (decoded.region_handle >> 32) as u32,
                 (decoded.region_handle & 0xFFFFFFFF) as u32,
             ];
-            if self.continuity_summary.active_region_coords != Some(coords) {
-                self.continuity_summary.previous_region_coords =
-                    self.continuity_summary.active_region_coords;
-                self.continuity_summary.active_region_coords = Some(coords);
+            let mut continuity_update = self.continuity_summary_with_phase(HandoffPhase::Completed);
+            if continuity_update.active_region_coords != Some(coords) {
+                continuity_update.previous_region_coords = continuity_update.active_region_coords;
+                continuity_update.active_region_coords = Some(coords);
             }
+            self.record_region_continuity_observation(continuity_update);
         }
         if classification.kind == FirstSimulatorInboundMessageKind::HealthMessage
             && classification.decode_source
@@ -2162,11 +2182,15 @@ impl Connection {
             // Continuity: Transition phase progression.
             match kind {
                 RegionTransitionControlKind::CrossedRegion => {
-                    self.continuity_summary.phase = HandoffPhase::Crossed;
+                    self.record_region_continuity_observation(
+                        self.continuity_summary_with_phase(HandoffPhase::Crossed),
+                    );
                 }
                 RegionTransitionControlKind::ConfirmEnableSimulator => {
                     if self.continuity_summary.phase == HandoffPhase::Crossed {
-                        self.continuity_summary.phase = HandoffPhase::Confirming;
+                        self.record_region_continuity_observation(
+                            self.continuity_summary_with_phase(HandoffPhase::Confirming),
+                        );
                     }
                 }
             }
@@ -3548,6 +3572,9 @@ impl Connection {
         self.next_first_simulator_packet_id = 1;
         self.continuity_summary = RegionContinuitySummary {
             phase: HandoffPhase::None,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
             active_region_coords: Some([
                 bootstrap.first_sim.region_x,
                 bootstrap.first_sim.region_y,
@@ -3747,6 +3774,24 @@ impl Connection {
             }
         }
         Ok(nearby)
+    }
+}
+
+pub async fn fetch_asset_bytes(url: &str, timeout: Duration) -> Result<Vec<u8>, ConnectionError> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout.max(Duration::from_secs(1)))
+        .build()?;
+    let response = client.get(url).send().await?;
+    if response.status().is_success() {
+        let bytes = response.bytes().await?;
+        Ok(bytes.to_vec())
+    } else {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("unreadable body"));
+        Err(ConnectionError::HttpStatus { status, body })
     }
 }
 
@@ -9839,7 +9884,7 @@ mod tests {
     fn record_region_continuity_observation_caps_neighbor_export() {
         let mut connection = Connection::new(ConnectionConfig::default());
         let neighbors = (0..32)
-            .map(|idx| BoundedNeighborSummary {
+            .map(|idx| viewer_core::BoundedNeighborSummary {
                 region_handle: idx as u64,
                 region_x: idx,
                 region_y: idx + 1,
@@ -9847,6 +9892,9 @@ mod tests {
             .collect::<Vec<_>>();
         connection.record_region_continuity_observation(RegionContinuitySummary {
             phase: HandoffPhase::Crossed,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
             active_region_coords: Some([1000, 1001]),
             previous_region_coords: Some([999, 1001]),
             neighbors,
@@ -9854,6 +9902,50 @@ mod tests {
         assert_eq!(
             connection.continuity_summary().neighbors.len(),
             MAX_CONTINUITY_NEIGHBORS
+        );
+    }
+
+    #[test]
+    fn continuity_summary_phase_age_advances_after_phase_change() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.record_region_continuity_observation(RegionContinuitySummary {
+            phase: HandoffPhase::Crossed,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
+            active_region_coords: Some([1000, 1001]),
+            previous_region_coords: None,
+            neighbors: Vec::new(),
+        });
+
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            connection.continuity_summary().phase_age_ms >= 1,
+            "phase age should increase over time after phase transition"
+        );
+    }
+
+    #[test]
+    fn observe_transition_control_does_not_regress_completed_phase() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+        connection.record_region_continuity_observation(RegionContinuitySummary {
+            phase: HandoffPhase::Completed,
+            outcome: viewer_core::HandoffOutcome::Normal,
+            reason: viewer_core::HandoffReason::None,
+            phase_age_ms: 0,
+            active_region_coords: Some([1000, 1001]),
+            previous_region_coords: Some([999, 1001]),
+            neighbors: Vec::new(),
+        });
+
+        connection
+            .observe_first_simulator_inbound_payload(&make_medium_frequency_packet(7))
+            .expect("crossed-region observation should parse");
+
+        assert_eq!(
+            connection.continuity_summary().phase,
+            HandoffPhase::Completed
         );
     }
 

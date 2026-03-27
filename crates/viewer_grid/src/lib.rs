@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod continuity;
 pub mod legacy_login;
 
 pub use legacy_login::{
@@ -325,6 +326,31 @@ fn classify_failure(response: &GridLoginResponse) -> GridLoginError {
     }
 }
 
+pub struct AssetCapabilityPolicy;
+
+impl AssetCapabilityPolicy {
+    pub fn select_texture_url(
+        capabilities: &std::collections::BTreeMap<String, String>,
+        asset_id: &viewer_core::AssetID,
+    ) -> Option<String> {
+        if asset_id.is_empty() {
+            return None;
+        }
+
+        // Preference 1: GetTexture (Modern CDN-backed capability)
+        if let Some(base_url) = capabilities.get("GetTexture") {
+            return Some(format!("{}?texture_id={}", base_url, asset_id));
+        }
+
+        // Preference 2: ViewerAsset (Older but direct capability)
+        if let Some(base_url) = capabilities.get("ViewerAsset") {
+            return Some(format!("{}/texture/{}", base_url, asset_id));
+        }
+
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,13 +393,47 @@ mod tests {
         let request = SecondLifeAdapter.shape_login_request(&make_intent());
         assert!(request.options.iter().any(|opt| opt == "event_queue"));
     }
-
     #[test]
     fn secondlife_request_hashes_password() {
         let request = SecondLifeAdapter.shape_login_request(&make_intent());
         assert_eq!(
             request.params.password,
             "$1$5ebe2294ecd0e0f08eab7690d2a6ee69"
+        );
+    }
+
+    #[test]
+    fn asset_policy_prioritizes_get_texture() {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("GetTexture".to_string(), "http://cdn".to_string());
+        caps.insert("ViewerAsset".to_string(), "http://fallback".to_string());
+
+        let id = viewer_core::AssetID::new("test-id");
+        let url = AssetCapabilityPolicy::select_texture_url(&caps, &id).unwrap();
+        assert_eq!(url, "http://cdn?texture_id=test-id");
+    }
+
+    #[test]
+    fn asset_policy_falls_back_to_viewer_asset() {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("ViewerAsset".to_string(), "http://fallback".to_string());
+
+        let id = viewer_core::AssetID::new("test-id");
+        let url = AssetCapabilityPolicy::select_texture_url(&caps, &id).unwrap();
+        assert_eq!(url, "http://fallback/texture/test-id");
+    }
+
+    #[test]
+    fn asset_policy_returns_none_on_missing_caps_or_id() {
+        let caps = std::collections::BTreeMap::new();
+        let id = viewer_core::AssetID::new("test-id");
+        assert!(AssetCapabilityPolicy::select_texture_url(&caps, &id).is_none());
+
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("GetTexture".to_string(), "http://cdn".to_string());
+        assert!(
+            AssetCapabilityPolicy::select_texture_url(&caps, &viewer_core::AssetID::default())
+                .is_none()
         );
     }
 }
