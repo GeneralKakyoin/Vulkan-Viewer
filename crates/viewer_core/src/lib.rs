@@ -45,6 +45,43 @@ impl AssetID {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AssetPriority {
+    /// Highest priority: Assets in the currently active region.
+    Active,
+    /// High priority: Assets from the region we just left.
+    Previous,
+    /// Medium priority: Assets from direct neighbors of the active region.
+    Neighbor,
+    /// Low priority: All other assets.
+    Normal,
+}
+
+impl Default for AssetPriority {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetPriorityHint {
+    pub id: AssetID,
+    pub priority: AssetPriority,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetContinuityMetrics {
+    pub continuity_retained_active: usize,
+    pub continuity_retained_previous: usize,
+    pub continuity_retained_neighbor: usize,
+    pub continuity_promoted_neighbor: usize,
+    pub continuity_evicted_expired: usize,
+    pub continuity_evicted_budget: usize,
+    pub continuity_requests_enqueued: usize,
+    pub continuity_requests_dropped_cap: usize,
+    pub continuity_budget_pressure_events: usize,
+}
+
 impl std::fmt::Display for AssetID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
