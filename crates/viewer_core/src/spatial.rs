@@ -185,7 +185,6 @@ impl OctreeNode {
         match intersection {
             IntersectionResult::Outside => {
                 // Node is completely culled, ignore it and all children
-                return;
             }
             IntersectionResult::Inside => {
                 // Node is completely inside, add all items recursively without further checks

@@ -167,9 +167,7 @@ pub fn compute_texture_matrix(
     let res = mat3_mul(m_rotate, m_center);
     let res = mat3_mul(m_uncenter, res);
     let res = mat3_mul(m_scale, res);
-    let res = mat3_mul(m_offset, res);
-
-    res
+    mat3_mul(m_offset, res)
 }
 
 #[cfg(test)]

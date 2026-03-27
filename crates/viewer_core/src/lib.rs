@@ -68,6 +68,15 @@ pub struct AssetContinuityMetrics {
     pub continuity_requests_enqueued: usize,
     pub continuity_requests_dropped_cap: usize,
     pub continuity_budget_pressure_events: usize,
+
+    // Live Bridge Metrics (A13)
+    pub live_requests_enqueued: usize,
+    pub live_requests_ready: usize,
+    pub live_requests_failed_transport: usize,
+    pub live_requests_failed_decode: usize,
+    pub live_requests_failed_timeout: usize,
+    pub live_requests_failed_other: usize,
+    pub fixture_fallbacks_used: usize,
 }
 
 impl std::fmt::Display for AssetID {

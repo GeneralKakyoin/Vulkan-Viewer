@@ -45,8 +45,7 @@ pub fn generate_volume_mesh(
 
     // Side faces (Outer)
     let mut side_indices = Vec::new();
-    for i in 0..path_len {
-        let pt = &path[i];
+    for (i, pt) in path.iter().enumerate().take(path_len) {
         let t_path = if path_closed {
             i as f32 / path_len as f32
         } else {
@@ -67,9 +66,11 @@ pub fn generate_volume_mesh(
             let normal = normalize(rotated_p);
 
             let vertex_pos = world_p;
-            for k in 0..3 {
-                min[k] = min[k].min(vertex_pos[k]);
-                max[k] = max[k].max(vertex_pos[k]);
+            for (min_coord, &pos_coord) in min.iter_mut().zip(&vertex_pos) {
+                *min_coord = min_coord.min(pos_coord);
+            }
+            for (max_coord, &pos_coord) in max.iter_mut().zip(&vertex_pos) {
+                *max_coord = max_coord.max(pos_coord);
             }
 
             vertices.push(Vertex {
@@ -273,8 +274,7 @@ pub fn generate_volume_mesh(
         let mut inner_indices = Vec::new();
         let base_inner_offset = vertices.len();
 
-        for i in 0..path_len {
-            let pt = &path[i];
+        for (i, pt) in path.iter().enumerate().take(path_len) {
             let t_path = if path_closed {
                 i as f32 / path_len as f32
             } else {
@@ -290,9 +290,11 @@ pub fn generate_volume_mesh(
                     rotated_p[1] + pt.pos[1],
                     rotated_p[2] + pt.pos[2],
                 ];
-                for k in 0..3 {
-                    min[k] = min[k].min(vertex_pos[k]);
-                    max[k] = max[k].max(vertex_pos[k]);
+                for (min_coord, &pos_coord) in min.iter_mut().zip(&vertex_pos) {
+                    *min_coord = min_coord.min(pos_coord);
+                }
+                for (max_coord, &pos_coord) in max.iter_mut().zip(&vertex_pos) {
+                    *max_coord = max_coord.max(pos_coord);
                 }
                 vertices.push(Vertex {
                     position: vertex_pos,
