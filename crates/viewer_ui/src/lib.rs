@@ -45,6 +45,20 @@ fn live_visual_lines(snapshot: Option<&LiveVisualSnapshot>) -> Vec<String> {
             } else {
                 lines.push(String::from("Traffic summary: unavailable"));
             }
+
+            lines.push(format!("Continuity Phase: {:?}", snapshot.continuity.phase));
+            if let Some([x, y]) = snapshot.continuity.active_region_coords {
+                lines.push(format!("Active Region: {}, {}", x, y));
+            }
+            if let Some([px, py]) = snapshot.continuity.previous_region_coords {
+                lines.push(format!("Prev Region: {}, {}", px, py));
+            }
+            if !snapshot.continuity.neighbors.is_empty() {
+                lines.push(format!(
+                    "Neighbors: {}",
+                    snapshot.continuity.neighbors.len()
+                ));
+            }
             lines
         }
         None => vec![
@@ -1345,7 +1359,7 @@ impl UiSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use viewer_core::{DirectImMessage, FriendEntry};
+    use viewer_core::{DirectImMessage, FriendEntry, RegionContinuitySummary};
 
     #[test]
     fn live_visual_lines_reports_absent_snapshot() {
@@ -1397,12 +1411,18 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         };
         let lines = live_visual_lines(Some(&snapshot));
         assert!(lines.iter().any(|line| line.contains("Logged in: true")));
         assert!(lines.iter().any(|line| line.contains("obs=5")));
         assert!(lines.iter().any(|line| line.contains("CrossedRegion=1")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Continuity Phase: None"))
+        );
     }
 
     #[test]

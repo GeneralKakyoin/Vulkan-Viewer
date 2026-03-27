@@ -271,6 +271,7 @@ fn build_base_live_visual_snapshot(result: &GridLoginResult) -> LiveVisualSnapsh
         decoded_object_feed_export_truncated: false,
         decoded_object_feed_objects: Vec::new(),
         decoded_object_feed_recent_kills: Vec::new(),
+        continuity: viewer_core::RegionContinuitySummary::default(),
         observed_at_unix_ms: now_unix_ms(),
     };
 

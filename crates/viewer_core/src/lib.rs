@@ -245,6 +245,7 @@ pub enum InstanceRole {
     WorldSemanticContextRing,
     WorldAvatarPlaceholderSelf,
     WorldAvatarPlaceholderOther,
+    WorldIngestionContinuityPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -538,6 +539,30 @@ pub struct DecodedWorldObjectFeedObject {
     pub scale_centi: Option<[u16; 3]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HandoffPhase {
+    #[default]
+    None,
+    Crossed,
+    Confirming,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct BoundedNeighborSummary {
+    pub region_handle: u64,
+    pub region_x: u32,
+    pub region_y: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RegionContinuitySummary {
+    pub phase: HandoffPhase,
+    pub active_region_coords: Option<[u32; 2]>,
+    pub previous_region_coords: Option<[u32; 2]>,
+    pub neighbors: Vec<BoundedNeighborSummary>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveVisualSnapshot {
     pub source: String,
@@ -601,6 +626,8 @@ pub struct LiveVisualSnapshot {
     pub decoded_object_feed_objects: Vec<DecodedWorldObjectFeedObject>,
     #[serde(default)]
     pub decoded_object_feed_recent_kills: Vec<u32>,
+    #[serde(default)]
+    pub continuity: RegionContinuitySummary,
     pub observed_at_unix_ms: u64,
 }
 
@@ -1411,9 +1438,10 @@ pub enum WorldObjectIngestionLane {
     DecodedObjectFeedKillPayload,
     ObjectStateEntitySeedPayload,
     ObjectStateEntityLifecyclePayload,
+    ContinuityPayload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldObjectIngestionItem {
     pub lane: WorldObjectIngestionLane,
     pub stage: WorldEntryStage,
@@ -1438,6 +1466,7 @@ pub struct WorldObjectIngestionItem {
     pub decoded_object_feed_export_truncated: bool,
     pub decoded_object_local_id: Option<u32>,
     pub decoded_object_scale_centi: Option<[u16; 3]>,
+    pub continuity: Option<RegionContinuitySummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1474,6 +1503,7 @@ impl WorldObjectIngestionSeam {
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
+            continuity: None,
         }];
         if slice.traffic.available {
             items.push(WorldObjectIngestionItem {
@@ -1500,6 +1530,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         Self { items }
@@ -1552,6 +1583,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         if let Some(location_count) = snapshot.and_then(|s| s.decoded_coarse_location_count) {
@@ -1617,6 +1649,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
             if let Some(coarse_second_xyz) = second_xyz {
                 seam.items.push(WorldObjectIngestionItem {
@@ -1643,6 +1676,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
                 });
             }
         }
@@ -1689,6 +1723,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         if let Some(body_len) = snapshot.and_then(|s| s.decoded_viewer_time_body_len) {
@@ -1734,6 +1769,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                continuity: None,
             });
         }
         if let Some(state) = snapshot {
@@ -1780,6 +1816,7 @@ impl WorldObjectIngestionSeam {
                         .decoded_object_feed_export_truncated,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
                 });
 
                 for obj in &state.decoded_object_feed_objects {
@@ -1808,6 +1845,7 @@ impl WorldObjectIngestionSeam {
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(obj.local_id),
                         decoded_object_scale_centi: obj.scale_centi,
+                        continuity: None,
                     });
                 }
 
@@ -1837,6 +1875,7 @@ impl WorldObjectIngestionSeam {
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(*local_id),
                         decoded_object_scale_centi: None,
+                        continuity: None,
                     });
                 }
             }
@@ -1903,6 +1942,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
                 });
                 seam.items.push(WorldObjectIngestionItem {
                     lane: WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload,
@@ -1942,11 +1982,48 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    continuity: None,
+                });
+            }
+
+            if continuity_has_signal(&state.continuity) {
+                seam.items.push(WorldObjectIngestionItem {
+                    lane: WorldObjectIngestionLane::ContinuityPayload,
+                    stage,
+                    region_coords,
+                    simulator_target_present: state.first_sim_endpoint.is_some(),
+                    traffic_broader_count: 0,
+                    traffic_unknown_count: 0,
+                    traffic_region_control_count: 0,
+                    decoded_endpoint_port: None,
+                    decoded_endpoint_host_tail: None,
+                    decoded_coarse_location_count: None,
+                    decoded_coarse_first_xyz: None,
+                    decoded_coarse_second_xyz: None,
+                    decoded_coarse_third_xyz: None,
+                    decoded_coarse_updates: None,
+                    decoded_health_updates: None,
+                    decoded_health_basis_points: None,
+                    decoded_viewer_time_updates: None,
+                    decoded_viewer_time_body_len: None,
+                    decoded_viewer_time_signature: None,
+                    decoded_object_feed_total_objects: None,
+                    decoded_object_feed_export_truncated: false,
+                    decoded_object_local_id: None,
+                    decoded_object_scale_centi: None,
+                    continuity: Some(state.continuity.clone()),
                 });
             }
         }
         seam
     }
+}
+
+fn continuity_has_signal(continuity: &RegionContinuitySummary) -> bool {
+    continuity.phase != HandoffPhase::None
+        || continuity.active_region_coords.is_some()
+        || continuity.previous_region_coords.is_some()
+        || !continuity.neighbors.is_empty()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -2070,7 +2147,7 @@ impl Scene {
     fn upsert_world_object_feed(
         &mut self,
         local_id: u32,
-        item: WorldObjectIngestionItem,
+        item: &WorldObjectIngestionItem,
         coarse_anchor_pos: Option<[f32; 3]>,
     ) {
         if local_id == 0 {
@@ -2292,7 +2369,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::FirstRegionPresenceProxy)
         {
             upsert_instance(
@@ -2310,7 +2386,23 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
+            .find(|item| item.lane == WorldObjectIngestionLane::ContinuityPayload)
+        {
+            upsert_instance(
+                self,
+                InstanceRole::WorldIngestionContinuityPayload,
+                GeometrySource::Diagnostic(MeshKind::AxisMarker),
+                world_ingestion_continuity_transform(item),
+                world_ingestion_continuity_color(item),
+                AlphaMode::Opaque,
+            );
+        } else {
+            remove_instance(self, InstanceRole::WorldIngestionContinuityPayload);
+        }
+
+        if let Some(item) = seam
+            .items
+            .iter()
             .find(|item| item.lane == WorldObjectIngestionLane::TrafficSignalPayload)
         {
             upsert_instance(
@@ -2328,7 +2420,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedSimulatorEndpointPayload)
         {
             upsert_instance(
@@ -2346,7 +2437,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload)
         {
             upsert_instance(
@@ -2364,10 +2454,10 @@ impl Scene {
             );
         }
 
-        if let Some(item) =
-            seam.items.iter().copied().find(|item| {
-                item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload
-            })
+        if let Some(item) = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseNeighborhoodPayload)
         {
             upsert_instance(
                 self,
@@ -2411,7 +2501,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload)
         {
             upsert_instance(
@@ -2429,7 +2518,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedViewerTimePayload)
         {
             upsert_instance(
@@ -2444,10 +2532,10 @@ impl Scene {
             remove_instance(self, InstanceRole::WorldIngestionDecodedViewerTimePayload);
         }
 
-        let object_feed_summary =
-            seam.items.iter().copied().find(|item| {
-                item.lane == WorldObjectIngestionLane::DecodedObjectFeedSummaryPayload
-            });
+        let object_feed_summary = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::DecodedObjectFeedSummaryPayload);
 
         if object_feed_summary.is_none() {
             self.clear_world_object_feed();
@@ -2455,13 +2543,12 @@ impl Scene {
             let coarse_anchor_pos = seam
                 .items
                 .iter()
-                .copied()
                 .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload)
                 .map(world_ingestion_decoded_coarse_location_transform)
                 .map(|t| t.position);
 
             let mut present_ids = BTreeSet::new();
-            for item in seam.items.iter().copied().filter(|item| {
+            for item in seam.items.iter().filter(|item| {
                 item.lane == WorldObjectIngestionLane::DecodedObjectFeedObjectPayload
             }) {
                 if let Some(local_id) = item.decoded_object_local_id {
@@ -2470,10 +2557,10 @@ impl Scene {
                 }
             }
 
-            for item in
-                seam.items.iter().copied().filter(|item| {
-                    item.lane == WorldObjectIngestionLane::DecodedObjectFeedKillPayload
-                })
+            for item in seam
+                .items
+                .iter()
+                .filter(|item| item.lane == WorldObjectIngestionLane::DecodedObjectFeedKillPayload)
             {
                 if let Some(local_id) = item.decoded_object_local_id {
                     self.remove_world_object_feed(local_id);
@@ -2492,12 +2579,10 @@ impl Scene {
         let coarse_item = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedCoarseLocationPayload);
         let health_item = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::DecodedHealthPayload);
         if let (Some(coarse), Some(health)) = (coarse_item, health_item) {
             upsert_instance(
@@ -2515,7 +2600,6 @@ impl Scene {
         if let Some(item) = seam
             .items
             .iter()
-            .copied()
             .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntitySeedPayload)
         {
             let entity_count = world_object_state_entity_count(item);
@@ -2595,10 +2679,10 @@ impl Scene {
             remove_instance(self, InstanceRole::WorldObjectStateEntityClusterCore);
         }
 
-        if let Some(item) =
-            seam.items.iter().copied().find(|item| {
-                item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload
-            })
+        if let Some(item) = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ObjectStateEntityLifecyclePayload)
         {
             upsert_instance(
                 self,
@@ -2888,7 +2972,7 @@ fn world_traffic_pillar_color(kind: TrafficPillarKind) -> [f32; 4] {
     }
 }
 
-fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_proxy_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let (y, scale) = match item.stage {
         WorldEntryStage::EnteredFirstRegion => (0.36, [0.22, 0.22, 0.22]),
@@ -2904,7 +2988,7 @@ fn world_ingestion_proxy_transform(item: WorldObjectIngestionItem) -> Transform 
     }
 }
 
-fn world_ingestion_proxy_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_proxy_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     if !item.simulator_target_present {
         return [0.42, 0.40, 0.36, 1.0];
     }
@@ -2915,7 +2999,27 @@ fn world_ingestion_proxy_color(item: WorldObjectIngestionItem) -> [f32; 4] {
     }
 }
 
-fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_continuity_transform(item: &WorldObjectIngestionItem) -> Transform {
+    let mut transform = world_ingestion_proxy_transform(item);
+    transform.position[1] += 0.15;
+    transform.scale = [0.15, 0.15, 0.15];
+    transform
+}
+
+fn world_ingestion_continuity_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
+    if let Some(summary) = &item.continuity {
+        match summary.phase {
+            HandoffPhase::None => [0.4, 0.4, 0.4, 1.0],
+            HandoffPhase::Crossed => [0.9, 0.2, 0.2, 1.0],
+            HandoffPhase::Confirming => [0.9, 0.9, 0.2, 1.0],
+            HandoffPhase::Completed => [0.2, 0.9, 0.2, 1.0],
+        }
+    } else {
+        [0.3, 0.3, 0.3, 1.0]
+    }
+}
+
+fn world_ingestion_traffic_payload_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let weighted = item
         .traffic_broader_count
@@ -2931,7 +3035,7 @@ fn world_ingestion_traffic_payload_transform(item: WorldObjectIngestionItem) -> 
     }
 }
 
-fn world_ingestion_traffic_payload_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_traffic_payload_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     if item.traffic_region_control_count > 0 {
         [0.48, 0.88, 0.56, 1.0]
     } else if item.traffic_unknown_count > 0 {
@@ -2952,7 +3056,7 @@ fn decode_simulator_endpoint(endpoint: Option<&str>) -> Option<(u16, u8)> {
     Some((port, host_tail))
 }
 
-fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_endpoint_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let host_tail = f32::from(item.decoded_endpoint_host_tail.unwrap_or(0));
     let port = f32::from(item.decoded_endpoint_port.unwrap_or(0));
@@ -2967,7 +3071,7 @@ fn world_ingestion_decoded_endpoint_transform(item: WorldObjectIngestionItem) ->
     }
 }
 
-fn world_ingestion_decoded_endpoint_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_decoded_endpoint_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let port = item.decoded_endpoint_port.unwrap_or(0);
     if port >= 13000 {
         [0.30, 0.84, 0.96, 1.0]
@@ -2978,7 +3082,7 @@ fn world_ingestion_decoded_endpoint_color(item: WorldObjectIngestionItem) -> [f3
     }
 }
 
-fn world_ingestion_decoded_coarse_location_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_coarse_location_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let x = base_x - 0.42 + ((f32::from(coarse_x) / 255.0) - 0.5) * 1.4;
@@ -2993,7 +3097,7 @@ fn world_ingestion_decoded_coarse_location_transform(item: WorldObjectIngestionI
     }
 }
 
-fn world_ingestion_decoded_coarse_location_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_decoded_coarse_location_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let count = item.decoded_coarse_location_count.unwrap_or(0);
     if count >= 8 {
         [0.96, 0.38, 0.30, 1.0]
@@ -3005,7 +3109,7 @@ fn world_ingestion_decoded_coarse_location_color(item: WorldObjectIngestionItem)
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_second_xyz.unwrap_or([128, 128, 0]);
@@ -3021,14 +3125,14 @@ fn world_ingestion_decoded_coarse_neighborhood_transform(
     }
 }
 
-fn world_ingestion_decoded_coarse_neighborhood_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_decoded_coarse_neighborhood_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let updates = item.decoded_coarse_updates.unwrap_or(0) as f32;
     let intensity = (updates.min(10.0) / 10.0).clamp(0.0, 1.0);
     [0.30, 0.64 + intensity * 0.30, 0.98, 1.0]
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
@@ -3043,7 +3147,7 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_a_transform(
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_a_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> [f32; 4] {
     let count = item.decoded_coarse_location_count.unwrap_or(0) as f32;
     let c = (count / 12.0).clamp(0.0, 1.0);
@@ -3051,7 +3155,7 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_a_color(
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [coarse_x, coarse_y, coarse_z] = item
@@ -3069,14 +3173,14 @@ fn world_ingestion_decoded_coarse_neighborhood_satellite_b_transform(
 }
 
 fn world_ingestion_decoded_coarse_neighborhood_satellite_b_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
 ) -> [f32; 4] {
     let updates = item.decoded_coarse_updates.unwrap_or(0) as f32;
     let i = (updates.min(12.0) / 12.0).clamp(0.0, 1.0);
     [0.24, 0.58 + i * 0.34, 0.96, 1.0]
 }
 
-fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_health_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
     let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
@@ -3089,13 +3193,13 @@ fn world_ingestion_decoded_health_transform(item: WorldObjectIngestionItem) -> T
     }
 }
 
-fn world_ingestion_decoded_health_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_decoded_health_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let basis_points = f32::from(item.decoded_health_basis_points.unwrap_or(0));
     let normalized = (basis_points / 10_000.0).clamp(0.0, 1.0);
     [1.0 - normalized * 0.72, 0.28 + normalized * 0.66, 0.24, 1.0]
 }
 
-fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_ingestion_decoded_viewer_time_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let updates = item.decoded_viewer_time_updates.unwrap_or(0);
     let body_len = f32::from(item.decoded_viewer_time_body_len.unwrap_or(0));
@@ -3115,7 +3219,7 @@ fn world_ingestion_decoded_viewer_time_transform(item: WorldObjectIngestionItem)
     }
 }
 
-fn world_ingestion_decoded_viewer_time_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_decoded_viewer_time_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let updates = item.decoded_viewer_time_updates.unwrap_or(0) as f32;
     let body_len = f32::from(item.decoded_viewer_time_body_len.unwrap_or(0));
     let intensity = (updates.min(12.0) / 12.0).clamp(0.0, 1.0);
@@ -3124,7 +3228,7 @@ fn world_ingestion_decoded_viewer_time_color(item: WorldObjectIngestionItem) -> 
 }
 
 fn world_object_feed_proxy_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     coarse_anchor_pos: Option<[f32; 3]>,
 ) -> Transform {
     let local_id = item.decoded_object_local_id.unwrap_or(0);
@@ -3167,8 +3271,8 @@ fn world_object_feed_proxy_color(local_id: u32) -> [f32; 4] {
 }
 
 fn world_ingestion_decoded_composite_transform(
-    coarse: WorldObjectIngestionItem,
-    health: WorldObjectIngestionItem,
+    coarse: &WorldObjectIngestionItem,
+    health: &WorldObjectIngestionItem,
 ) -> Transform {
     let [base_x, base_z] = world_cluster_base(coarse.region_coords.or(health.region_coords));
     let [cx, cy, cz] = coarse.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
@@ -3185,12 +3289,12 @@ fn world_ingestion_decoded_composite_transform(
     }
 }
 
-fn world_ingestion_decoded_composite_color(health: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_ingestion_decoded_composite_color(health: &WorldObjectIngestionItem) -> [f32; 4] {
     let h = (f32::from(health.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     [0.92 - h * 0.52, 0.35 + h * 0.55, 0.86 - h * 0.62, 1.0]
 }
 
-fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
+fn world_object_state_entity_count(item: &WorldObjectIngestionItem) -> usize {
     match item.decoded_coarse_location_count.unwrap_or(0) {
         0..=1 => 1,
         2..=4 => 2,
@@ -3198,7 +3302,7 @@ fn world_object_state_entity_count(item: WorldObjectIngestionItem) -> usize {
     }
 }
 
-fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
+fn object_state_cluster_center(item: &WorldObjectIngestionItem) -> [f32; 3] {
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let [cx, cy, cz] = item.decoded_coarse_first_xyz.unwrap_or([128, 128, 0]);
     let health =
@@ -3211,7 +3315,7 @@ fn object_state_cluster_center(item: WorldObjectIngestionItem) -> [f32; 3] {
 }
 
 fn world_object_state_entity_body_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
 ) -> Transform {
     let [center_x, center_y, center_z] = object_state_cluster_center(item);
@@ -3244,7 +3348,7 @@ fn world_object_state_entity_body_transform(
 }
 
 fn world_object_state_entity_body_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
 ) -> [f32; 4] {
     let health =
@@ -3272,7 +3376,7 @@ fn world_object_state_entity_body_color(
 }
 
 fn world_object_state_entity_aura_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
 ) -> Transform {
     let body = world_object_state_entity_body_transform(item, variant);
@@ -3298,7 +3402,7 @@ fn world_object_state_entity_aura_transform(
 }
 
 fn world_object_state_entity_aura_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     variant: usize,
 ) -> [f32; 4] {
     let health =
@@ -3311,7 +3415,7 @@ fn world_object_state_entity_aura_color(
 }
 
 fn world_object_state_entity_cluster_core_transform(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     entity_count: usize,
 ) -> Transform {
     let [center_x, center_y, center_z] = object_state_cluster_center(item);
@@ -3330,7 +3434,7 @@ fn world_object_state_entity_cluster_core_transform(
 }
 
 fn world_object_state_entity_cluster_core_color(
-    item: WorldObjectIngestionItem,
+    item: &WorldObjectIngestionItem,
     entity_count: usize,
 ) -> [f32; 4] {
     let health =
@@ -3352,7 +3456,7 @@ enum ObjectStateLifecyclePhase {
     Strained,
 }
 
-fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLifecyclePhase {
+fn object_state_lifecycle_phase(item: &WorldObjectIngestionItem) -> ObjectStateLifecyclePhase {
     let health = item.decoded_health_basis_points.unwrap_or(0);
     let coarse_updates = item.decoded_coarse_updates.unwrap_or(0);
     let health_updates = item.decoded_health_updates.unwrap_or(0);
@@ -3369,7 +3473,7 @@ fn object_state_lifecycle_phase(item: WorldObjectIngestionItem) -> ObjectStateLi
     }
 }
 
-fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_object_state_entity_pulse_transform(item: &WorldObjectIngestionItem) -> Transform {
     let core = world_object_state_entity_cluster_core_transform(
         item,
         world_object_state_entity_count(item),
@@ -3403,7 +3507,7 @@ fn world_object_state_entity_pulse_transform(item: WorldObjectIngestionItem) -> 
     }
 }
 
-fn world_object_state_entity_pulse_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_object_state_entity_pulse_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     match object_state_lifecycle_phase(item) {
         ObjectStateLifecyclePhase::Dormant => [0.48, 0.52, 0.66, 1.0],
         ObjectStateLifecyclePhase::Warming => [0.62, 0.74, 0.96, 1.0],
@@ -3412,7 +3516,7 @@ fn world_object_state_entity_pulse_color(item: WorldObjectIngestionItem) -> [f32
     }
 }
 
-fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem) -> Transform {
+fn world_object_state_entity_stability_transform(item: &WorldObjectIngestionItem) -> Transform {
     let [center_x, _, center_z] = object_state_cluster_center(item);
     let health_norm =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
@@ -3439,7 +3543,7 @@ fn world_object_state_entity_stability_transform(item: WorldObjectIngestionItem)
     }
 }
 
-fn world_object_state_entity_stability_color(item: WorldObjectIngestionItem) -> [f32; 4] {
+fn world_object_state_entity_stability_color(item: &WorldObjectIngestionItem) -> [f32; 4] {
     let health_norm =
         (f32::from(item.decoded_health_basis_points.unwrap_or(0)) / 10_000.0).clamp(0.0, 1.0);
     [
@@ -3691,6 +3795,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 0,
         }
     }
@@ -4001,6 +4106,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         };
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
@@ -4243,6 +4349,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 0,
         };
         let presence = FirstRegionPresence::from_live_snapshot(Some(&snapshot));
@@ -4291,6 +4398,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 7,
         };
         let slice = WorldDiagnosticSlice::from_live_snapshot(Some(&snapshot));
@@ -4319,13 +4427,46 @@ mod tests {
         let connected =
             WorldObjectIngestionSeam::from_live_snapshot(Some(&sample_snapshot(true, false)));
         assert_eq!(connected.items.len(), 1);
-        let first = connected.items[0];
+        let first = &connected.items[0];
         assert_eq!(
             first.lane,
             WorldObjectIngestionLane::FirstRegionPresenceProxy
         );
         assert_eq!(first.stage, WorldEntryStage::Connected);
         assert!(!first.simulator_target_present);
+    }
+
+    #[test]
+    fn world_object_ingestion_seam_maps_continuity_payload_from_live_snapshot() {
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.continuity = RegionContinuitySummary {
+            phase: HandoffPhase::Confirming,
+            active_region_coords: Some([1024, 2048]),
+            previous_region_coords: Some([1023, 2048]),
+            neighbors: vec![BoundedNeighborSummary {
+                region_handle: 0x0000040000000800,
+                region_x: 1024,
+                region_y: 2048,
+            }],
+        };
+
+        let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
+        let continuity = seam
+            .items
+            .iter()
+            .find(|item| item.lane == WorldObjectIngestionLane::ContinuityPayload)
+            .expect("continuity payload should exist");
+        assert_eq!(
+            continuity.continuity.as_ref().map(|value| value.phase),
+            Some(HandoffPhase::Confirming)
+        );
+        assert_eq!(
+            continuity
+                .continuity
+                .as_ref()
+                .and_then(|value| value.active_region_coords),
+            Some([1024, 2048])
+        );
     }
 
     #[test]
@@ -4368,6 +4509,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4426,6 +4568,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4478,6 +4621,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4528,6 +4672,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4581,6 +4726,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4654,6 +4800,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4722,6 +4869,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -4918,6 +5066,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         apply_scene_from_snapshot(&mut scene, Some(&coarse_only));
@@ -5217,33 +5366,34 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
+            continuity: None,
         };
         assert_eq!(
-            object_state_lifecycle_phase(base),
+            object_state_lifecycle_phase(&base),
             ObjectStateLifecyclePhase::Dormant
         );
         assert_eq!(
-            object_state_lifecycle_phase(WorldObjectIngestionItem {
+            object_state_lifecycle_phase(&WorldObjectIngestionItem {
                 decoded_coarse_updates: Some(1),
-                ..base
+                ..base.clone()
             }),
             ObjectStateLifecyclePhase::Warming
         );
         assert_eq!(
-            object_state_lifecycle_phase(WorldObjectIngestionItem {
+            object_state_lifecycle_phase(&WorldObjectIngestionItem {
                 decoded_coarse_updates: Some(3),
                 decoded_health_updates: Some(2),
                 decoded_viewer_time_updates: Some(1),
-                ..base
+                ..base.clone()
             }),
             ObjectStateLifecyclePhase::Active
         );
         assert_eq!(
-            object_state_lifecycle_phase(WorldObjectIngestionItem {
+            object_state_lifecycle_phase(&WorldObjectIngestionItem {
                 decoded_health_basis_points: Some(2200),
                 decoded_coarse_updates: Some(6),
                 decoded_health_updates: Some(4),
-                ..base
+                ..base.clone()
             }),
             ObjectStateLifecyclePhase::Strained
         );
@@ -5452,6 +5602,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 9,
         };
         let seam = WorldObjectIngestionSeam::from_live_snapshot(Some(&snapshot));
@@ -5476,13 +5627,20 @@ mod tests {
     #[test]
     fn scene_removes_ingestion_proxy_when_seam_is_empty() {
         let mut scene = Scene::prototype();
-        let snapshot = sample_snapshot(true, true);
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.continuity.active_region_coords = Some([1024, 2048]);
         apply_scene_from_snapshot(&mut scene, Some(&snapshot));
         assert!(
             scene
                 .instances
                 .values()
                 .any(|instance| instance.role == InstanceRole::WorldIngestionProxy)
+        );
+        assert!(
+            scene
+                .instances
+                .values()
+                .any(|instance| { instance.role == InstanceRole::WorldIngestionContinuityPayload })
         );
 
         scene.apply_world_object_ingestion_seam(&WorldObjectIngestionSeam::default());
@@ -5497,6 +5655,12 @@ mod tests {
                 .instances
                 .values()
                 .all(|instance| instance.role != InstanceRole::WorldIngestionTrafficPayload)
+        );
+        assert!(
+            scene
+                .instances
+                .values()
+                .all(|instance| { instance.role != InstanceRole::WorldIngestionContinuityPayload })
         );
         assert!(
             scene
@@ -5808,6 +5972,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: RegionContinuitySummary::default(),
             observed_at_unix_ms: 100,
         };
 

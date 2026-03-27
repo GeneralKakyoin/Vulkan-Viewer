@@ -3,6 +3,13 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (N07)
+- **Bounded Region Continuity Model**: Added typed continuity state (`None`, `Crossed`, `Confirming`, `Completed`) in `viewer_net` and propagated it through `viewer_app` into `LiveVisualSnapshot`.
+- **Continuity Snapshot Contract**: Extended `viewer_core::LiveVisualSnapshot` with `RegionContinuitySummary` (active/previous region coords + bounded neighbors, serde-defaulted).
+- **Continuity Seam Lane**: Added `WorldObjectIngestionLane::ContinuityPayload` and seam->scene lifecycle wiring so continuity visualization remains seam-owned.
+- **Continuity Diagnostics UI**: Added read-only continuity lines in `viewer_ui` diagnostics (`phase`, active/previous region, neighbor count).
+- **N07 Test Coverage**: Added targeted tests for continuity mapping, continuity seam payload emission, and seam-owned continuity role lifecycle removal.
+
 ## Latest Notable Changes (R05)
 - **R05 Review Fixes**: Resolved vertex layout mismatch in `viewer_render` pipelines and reconciled alpha/capping logic.
 - **RGBA Rendering Contract**: Standardized all color handling to RGBA `[f32; 4]` across `viewer_core` and `viewer_render`.
@@ -26,8 +33,8 @@ The Vulkan-Viewer is a high-performance Second Life compatible viewer built in R
 - **Crate Modernization**: Resolved all `wgpu` deprecation warnings in `viewer_render`.
 
 ## Active Milestone
-**M5: High Fidelity Asset Path** (Planned)
-Focus: Integrating glTF textures/materials with real-time grid asset streaming.
+**R08: Avatar appearance and attachment render foundation** (Next Planned)
+Focus: bounded avatar/attachment render contracts on top of the N07 continuity baseline.
 
 ## System Components
 - `viewer_app`: Orchestration and worker state mapping (UI-agnostic).
@@ -36,4 +43,4 @@ Focus: Integrating glTF textures/materials with real-time grid asset streaming.
 - `viewer_render`: Wgpu-driven rendering backend.
 - `viewer_net`/`viewer_grid`: Protocol and asset transport layers.
 
-- **Verification Status**: Milestone A06 fully verified via `cargo test` (including deterministic texture requests and material mapping) and `STRESS_TEST=2` integration.
+- **Verification Status**: N07 continuity path builds and targeted continuity tests pass. Full workspace tests remain blocked by existing `viewer_app::social_cache` temp-path test failures on Windows (`/tmp/...` path assumptions).

@@ -1778,6 +1778,7 @@ fn offline_snapshot() -> LiveVisualSnapshot {
         decoded_object_feed_export_truncated: false,
         decoded_object_feed_objects: Vec::new(),
         decoded_object_feed_recent_kills: Vec::new(),
+        continuity: viewer_core::RegionContinuitySummary::default(),
         observed_at_unix_ms: now_unix_ms(),
     }
 }
@@ -2004,6 +2005,7 @@ fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisua
         decoded_object_feed_export_truncated: false,
         decoded_object_feed_objects: Vec::new(),
         decoded_object_feed_recent_kills: Vec::new(),
+        continuity: viewer_core::RegionContinuitySummary::default(),
         observed_at_unix_ms: now_unix_ms(),
     };
 
@@ -2077,6 +2079,31 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
         })
         .collect();
     snapshot.decoded_object_feed_recent_kills = decoded.object_feed_recent_kills.clone();
+    snapshot.continuity = map_net_continuity_to_core(connection.continuity_summary());
+}
+
+fn map_net_continuity_to_core(
+    summary: &viewer_net::RegionContinuitySummary,
+) -> viewer_core::RegionContinuitySummary {
+    viewer_core::RegionContinuitySummary {
+        phase: match summary.phase {
+            viewer_net::HandoffPhase::None => viewer_core::HandoffPhase::None,
+            viewer_net::HandoffPhase::Crossed => viewer_core::HandoffPhase::Crossed,
+            viewer_net::HandoffPhase::Confirming => viewer_core::HandoffPhase::Confirming,
+            viewer_net::HandoffPhase::Completed => viewer_core::HandoffPhase::Completed,
+        },
+        active_region_coords: summary.active_region_coords,
+        previous_region_coords: summary.previous_region_coords,
+        neighbors: summary
+            .neighbors
+            .iter()
+            .map(|n| viewer_core::BoundedNeighborSummary {
+                region_handle: n.region_handle,
+                region_x: n.region_x,
+                region_y: n.region_y,
+            })
+            .collect(),
+    }
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -3660,10 +3687,6 @@ impl AppState {
         Ok(())
     }
 
-    fn extract_visible_texture_ids(&self, visibility_list: &[usize], cap: usize) -> Vec<AssetID> {
-        extract_visible_texture_ids_from_scene(&self.scene, visibility_list, cap)
-    }
-
     fn handle_input_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
@@ -4304,6 +4327,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: viewer_core::RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         }));
         assert!(should_apply_world_ingestion_seam(Some(&empty), &changed));
@@ -4346,6 +4370,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: viewer_core::RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         };
         let viewer_time_first =
@@ -4367,6 +4392,25 @@ mod tests {
             Some(&viewer_time_second),
             &coarse_neighbor_changed
         ));
+    }
+
+    #[test]
+    fn map_net_continuity_to_core_maps_all_fields() {
+        let mapped = map_net_continuity_to_core(&viewer_net::RegionContinuitySummary {
+            phase: viewer_net::HandoffPhase::Confirming,
+            active_region_coords: Some([1024, 2048]),
+            previous_region_coords: Some([1023, 2048]),
+            neighbors: vec![viewer_net::BoundedNeighborSummary {
+                region_handle: 0x0000040000000800,
+                region_x: 1024,
+                region_y: 2048,
+            }],
+        });
+        assert_eq!(mapped.phase, viewer_core::HandoffPhase::Confirming);
+        assert_eq!(mapped.active_region_coords, Some([1024, 2048]));
+        assert_eq!(mapped.previous_region_coords, Some([1023, 2048]));
+        assert_eq!(mapped.neighbors.len(), 1);
+        assert_eq!(mapped.neighbors[0].region_x, 1024);
     }
 
     #[test]
@@ -4487,6 +4531,7 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_feed_objects: Vec::new(),
             decoded_object_feed_recent_kills: Vec::new(),
+            continuity: viewer_core::RegionContinuitySummary::default(),
             observed_at_unix_ms: 1,
         };
         assert!(should_apply_live_visual_snapshot(None, Some(&first)));

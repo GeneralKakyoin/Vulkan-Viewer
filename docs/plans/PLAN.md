@@ -482,35 +482,173 @@ Bounded region-transition continuity is visible in diagnostics and scene behavio
 
 ---
 
-## R08 — Avatar appearance and attachment render foundation (concise)
+## R08 — Avatar appearance and attachment render foundation
 
-### Dependency notes
+### Goal
 
-Depends on `A06` asset/material inputs and `N07` continuity robustness.
+Establish a bounded avatar-render path that supports deterministic avatar body proxies and first attachment rendering through existing material/render contracts.
 
-### Non-goals
+### Why now
 
-Not complete animation/parity stack in one milestone.
+After `N07`, region continuity is bounded and stable enough to support richer presence visuals without collapsing scene ownership or renderer boundaries.
+
+### In scope
+
+* add bounded avatar appearance payload mapping into scene-facing renderable contracts
+* support deterministic attachment proxy rendering (small bounded attachment set)
+* preserve A06 material contract usage for avatar/attachment surfaces (no separate ad-hoc path)
+* add avatar/attachment lifecycle handling tied to seam-owned presence updates
+
+### Out of scope
+
+* full animation graph parity (skeletal retargeting, AO layers, full blend trees)
+* full baked texture pipeline parity
+* complete wearable/system-layer parity
+
+### Boundary check
+
+* `viewer_core` owns avatar/attachment scene-domain contracts and lifecycle semantics
+* `viewer_render` owns GPU pipelines and draw submission for avatar/attachment paths
+* `viewer_app` remains orchestration-only and does not own avatar render policy
+* `viewer_net`/`viewer_grid` own transport/semantic inputs, not render implementation details
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_R08.md`
+* review artifact `docs/reviews/REVIEW_plan_r08.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests in `viewer_core` + `viewer_render` for avatar/attachment lifecycle + mapping
+* `cargo test` when cross-crate behavior changes materially
+* `cargo run -p viewer_app` bounded visual smoke for avatar/attachment appearance stability
+
+### Exit criteria
+
+Avatar body proxies and bounded attachment proxies render deterministically and update/remove correctly through seam-driven lifecycle behavior.
 
 ---
 
-## U09 — Workflow depth and product usability expansion (concise)
+## U09 — Workflow depth and product usability expansion
 
-### Dependency notes
+### Goal
 
-Depends on credible world/avatar rendering outcomes from prior milestones.
+Improve day-to-day operator workflow so world continuity, avatar state, social interaction, and diagnostics can be monitored and acted on without leaving the app.
 
-### Non-goals
+### Why now
 
-Not giant catch-all parity bucket.
+`R08` introduces richer world/avatar output; `U09` is needed to keep debugging and user workflow clarity aligned with that increased runtime complexity.
+
+### In scope
+
+* extend diagnostics workflow for continuity + avatar-state visibility with clear status grouping
+* improve social/profile workflow depth (thread handling, profile refresh affordances, clearer stale/fresh semantics)
+* add bounded workflow shortcuts for common operator actions (focus/inspect/toggle diagnostics)
+* tighten failure-state messaging for reconnect, stale data, and partial-world states
+
+### Out of scope
+
+* full product UX parity sweep
+* in-app credential-entry/security redesign
+* broad UI framework redesign unrelated to workflow depth
+
+### Boundary check
+
+* `viewer_ui` owns presentation and user action emission
+* `viewer_app` owns orchestration and command handling
+* `viewer_core` remains source of truth for session/social/avatar/continuity state
+* no transport or render-policy ownership shift into UI
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_U09.md`
+* review artifact `docs/reviews/REVIEW_plan_u09.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests in touched UI/app/core modules
+* `cargo test` when workflow behavior changes materially
+* `cargo run -p viewer_app` workflow smoke covering continuity + social/profile loops
+
+### Exit criteria
+
+Operators can complete bounded continuity + social/profile workflows with explicit, stable status and failure presentation.
 
 ---
 
-## R10+ — Environment, polish, and parity expansion (concise)
+## A10 — Asset streaming continuity and cache discipline
+
+### Goal
+
+Strengthen asset continuity across region transitions using bounded streaming/caching policy that preserves determinism and avoids unbounded retention.
+
+### Why now
+
+After `N07` continuity and `R08` avatar/attachment surfaces, asset behavior across handoffs becomes the main stability bottleneck.
+
+### In scope
+
+* add bounded asset continuity policy for region transition windows (retain, promote, evict rules)
+* extend typed asset request prioritization for continuity-critical content (active + near-neighbor region scope only)
+* add deterministic fallback behavior when continuity assets are loading/missing during handoff
+* add cache metrics needed to validate continuity policy behavior
+
+### Out of scope
+
+* unbounded background prefetch
+* global long-lived asset residency policy
+* full CDN/capability parity for every asset class
+
+### Boundary check
+
+* `viewer_asset` owns fetch/decode/cache/eviction policy
+* `viewer_render` consumes asset-ready content but does not own asset policy
+* `viewer_app` coordinates policy inputs; it does not become cache owner
+* `viewer_net`/`viewer_grid` provide continuity context, not asset lifecycle implementation
+
+### Deliverables
+
+* expanded roadmap milestone definition (this section)
+* milestone plan artifact `docs/plans/PLAN_A10.md`
+* review artifact `docs/reviews/REVIEW_plan_a10.md`
+
+### Validation expectations
+
+* `cargo fmt`
+* `cargo check`
+* targeted tests for cache policy + continuity-window retention/eviction behavior
+* `cargo test` when cross-crate asset/render behavior changes materially
+* `cargo run -p viewer_app` continuity smoke across bounded transition scenarios
+
+### Exit criteria
+
+Continuity-critical assets remain stable through bounded transition windows with deterministic fallback and bounded cache growth.
+
+---
+
+## N11 — Region handoff hardening and transition diagnostics (concise)
 
 ### Dependency notes
 
-Begins only after stable world/object/avatar/workflow layers are proven.
+Depends on `N07` continuity baseline and `A10` continuity-aware asset policy.
+
+### Non-goals
+
+Not full teleport/session orchestration parity or unlimited region graph management.
+
+---
+
+## R12+ — Environment, polish, and parity expansion (concise)
+
+### Dependency notes
+
+Begins only after stable world/object/avatar/workflow/asset continuity layers are proven.
 
 ### Non-goals
 
@@ -527,7 +665,9 @@ The following order is intentional unless explicitly revised:
 3. `A02` before deeper asset-backed rendering
 4. `N03` before broad world-feed rendering expectations
 5. `U04` after first stable render+asset+feed triad
-6. later milestones continue dependency-led interleaving, not strict round-robin
+6. `R05` -> `A06` -> `N07` remains fixed as the first continuity/stability arc
+7. `R08` -> `U09` -> `A10` must complete before expanding `N11`
+8. later milestones continue dependency-led interleaving, not strict round-robin
 
 If a proposal violates order, the planner must justify and obtain explicit approval.
 
@@ -545,7 +685,7 @@ Each milestone must first be broken into an approved plan document:
 
 ---
 
-## How to plan future concise milestones (`R08+`)
+## How to plan future concise milestones (`N11+`)
 
 Milestones still listed as "(concise)" are roadmap placeholders, not implementation-ready plans.
 
@@ -631,9 +771,9 @@ Do not update this file for routine implementation churn.
 
 The next planning sequence is:
 
-1. `U04`
-2. `R05`
-3. `A06`
-4. `N07`
+1. `R08`
+2. `U09`
+3. `A10`
+4. `N11`
 
 Each requires its own approved `docs/plans/PLAN_<ID>.md` before implementation.

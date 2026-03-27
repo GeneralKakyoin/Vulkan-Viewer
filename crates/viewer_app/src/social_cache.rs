@@ -220,6 +220,7 @@ impl SocialCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_db_path() -> String {
@@ -227,7 +228,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        format!("/tmp/viewer_social_cache_test_{ts}.db")
+        let file = format!("viewer_social_cache_test_{}_{}.db", std::process::id(), ts);
+        let path: PathBuf = std::env::temp_dir().join(file);
+        path.to_string_lossy().into_owned()
     }
 
     #[test]
