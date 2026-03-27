@@ -3634,8 +3634,13 @@ impl AppState {
             }
         }
         if let Some((avatar_id, tab)) = pending_profile_refresh {
-            self.live_visual_state
-                .refresh_avatar_profile(avatar_id, tab);
+            let at = now_unix_ms();
+            let state = self.ensure_profile_state(&avatar_id);
+            if !profile_refresh_on_cooldown(at, state.last_refresh_unix_ms) {
+                state.last_refresh_unix_ms = Some(at);
+                self.live_visual_state
+                    .refresh_avatar_profile(avatar_id, tab);
+            }
         }
         if let Some(url) = pending_open_external_url {
             open_external_url(&url);
@@ -3721,6 +3726,17 @@ impl AppState {
     fn handle_input_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        apply_u09_shortcut(
+                            code,
+                            &mut self.ui.show_diagnostics,
+                            &mut self.ui.show_social,
+                            &mut self.ui.focus_continuity_requested,
+                            &mut self.ui.focus_social_requested,
+                        );
+                    }
+                }
                 self.input.handle_key_event(event);
             }
             WindowEvent::MouseInput { button, state, .. } => {
@@ -3749,6 +3765,34 @@ impl AppState {
             .as_mut()
             .expect("profile state should be initialized")
     }
+}
+
+fn apply_u09_shortcut(
+    code: KeyCode,
+    show_diagnostics: &mut bool,
+    show_social: &mut bool,
+    focus_continuity_requested: &mut bool,
+    focus_social_requested: &mut bool,
+) {
+    match code {
+        KeyCode::F1 => *show_diagnostics = !*show_diagnostics,
+        KeyCode::F2 => {
+            *show_diagnostics = true;
+            *focus_continuity_requested = true;
+        }
+        KeyCode::F3 => {
+            *show_social = true;
+            *focus_social_requested = true;
+        }
+        _ => {}
+    }
+}
+
+fn profile_refresh_on_cooldown(now_unix_ms: u64, last_refresh_unix_ms: Option<u64>) -> bool {
+    let Some(last_refresh) = last_refresh_unix_ms else {
+        return false;
+    };
+    now_unix_ms < last_refresh.saturating_add(viewer_core::PROFILE_REFRESH_COOLDOWN_MS)
 }
 
 fn extract_visible_texture_ids_from_scene(
@@ -4442,6 +4486,57 @@ mod tests {
         assert_eq!(mapped.previous_region_coords, Some([1023, 2048]));
         assert_eq!(mapped.neighbors.len(), 1);
         assert_eq!(mapped.neighbors[0].region_x, 1024);
+    }
+
+    #[test]
+    fn apply_u09_shortcut_routes_f1_f2_f3_as_bounded_policy() {
+        let mut show_diag = false;
+        let mut show_social = false;
+        let mut focus_cont = false;
+        let mut focus_social = false;
+
+        apply_u09_shortcut(
+            KeyCode::F1,
+            &mut show_diag,
+            &mut show_social,
+            &mut focus_cont,
+            &mut focus_social,
+        );
+        assert!(show_diag);
+        assert!(!show_social);
+        assert!(!focus_cont);
+        assert!(!focus_social);
+
+        apply_u09_shortcut(
+            KeyCode::F2,
+            &mut show_diag,
+            &mut show_social,
+            &mut focus_cont,
+            &mut focus_social,
+        );
+        assert!(show_diag);
+        assert!(focus_cont);
+        assert!(!focus_social);
+
+        show_social = false;
+        focus_social = false;
+        apply_u09_shortcut(
+            KeyCode::F3,
+            &mut show_diag,
+            &mut show_social,
+            &mut focus_cont,
+            &mut focus_social,
+        );
+        assert!(show_social);
+        assert!(focus_social);
+    }
+
+    #[test]
+    fn profile_refresh_on_cooldown_enforces_u09_window() {
+        let last = 1_000u64;
+        assert!(!profile_refresh_on_cooldown(last + 10_000, Some(last)));
+        assert!(profile_refresh_on_cooldown(last + 9_999, Some(last)));
+        assert!(!profile_refresh_on_cooldown(last + 1, None));
     }
 
     #[test]
