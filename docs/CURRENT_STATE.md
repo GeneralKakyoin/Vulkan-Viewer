@@ -3,6 +3,26 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (R16 Fix Pass)
+- **Recovering Cue Recency Fix**: `viewer_app::derive_transition_visual_cue(...)` now requires recent probe success before applying `Recovering`, preventing stale-success misclassification during later degraded windows.
+- **Cue Mapping Regression Coverage**: Added stale-probe cue tests in `viewer_app` to lock degraded/healthy fallback behavior when probe success is old.
+- **Expanded R16 Visual Evidence**: Added degraded and stalled screenshot captures under `artifacts/screenshots_r16_smoke/` and updated R16 completion/review artifacts.
+
+## Latest Notable Changes (R16 Completed)
+- **Transition Visual Cue Contract**: Added `TransitionVisualCue` enum and `TransitionVisualState` struct to `viewer_core` with sanitized-intensity baseline and 4 unit tests.
+- **Renderer Cue Integration**: Extended `EnvironmentUniform` with `cue_params` vec4 (112→128 bytes), added `cue_tint_color()` WGSL helper and bounded fragment tinting (≤18% max blend) in `viewer_render`. No new pipelines, bind groups, or shader files.
+- **Deterministic Mapping**: Added `derive_transition_visual_cue()` in `viewer_app` mapping `HandoffOutcome` + `last_probe_result` → `TransitionVisualState` with per-frame dirty-only update.
+- **UI Cue Diagnostics**: Added read-only "Render Cue" status line (colored label + intensity) to the Environment diagnostics panel in `viewer_ui`.
+- **R16 Validation**: `cargo fmt`, `cargo check --workspace`, `cargo test --workspace`, and screenshot smoke test all passed. Stable scene confirmed with no tint regression on healthy baseline.
+
+## Latest Notable Changes (U14 Completed)
+- **Bounded Recovery Controls**: Added `RecoveryAction`, `RecoveryResultCode`, and `RecoveryActionResult` to `viewer_core` for deterministic mapping of recovery operations. 
+- **Deterministic Action Debounce**: Implemented `compute_recovery_action` and `dispatch_recovery_action` over `last_probe_retry_ms` and `last_asset_refresh_ms` using standard boundaries in `viewer_app` (15s probe, 5s asset refresh).
+- **Explicit Visibility Statuses**: `viewer_ui` now reports and warns on failed assets (`failed_transport/decode/timeout`) mapping live bridge diagnostic failures into actionable operator statuses.
+- **Fixture Rejection Flushing**: Added `clear_failures` to `FixtureTextureCache` allowing active caches to immediately re-try assets after a failed fetch. 
+- **Continuity Probe Deferral**: The "Retry Continuity Probe" pathway is explicitly deferred to N11 (returns `Unavailable` and disabled in UI) until network probe features are wired.
+- **Validation passing**: `cargo fmt --all`, `cargo check --workspace`, `cargo test --workspace` all run optimally without impacting boundaries. 
+
 ## Latest Notable Changes (A13 Completed)
 - **Typed Live Fetch Contracts**: Added `AssetFetchRequest` and wired `LiveTextureProvider` to return `AssetFetchOutcome<DecodedRgbaImage>` so live status/failure semantics stay explicit through the cache boundary.
 - **Source Mode Controls**: Added `VIEWER_ASSET_SOURCE_MODE=fixture|auto|live` handling in `viewer_app` startup wiring to control live-provider attachment without crossing crate boundaries.
@@ -90,8 +110,8 @@ The Vulkan-Viewer is a high-performance Second Life compatible viewer built in R
 - **Crate Modernization**: Resolved all `wgpu` deprecation warnings in `viewer_render`.
 
 ## Active Milestone
-**Finalizing N11 / Resuming U09 Path**
-Focus: Wrap N11 continuity-aware handoff hardening and resume the workflow/usability depth of U09.
+**Finalizing U14 Operator Resilience**
+Focus: Wrap U14 workflow resilience and move dynamically forwards (the transition parity).
 
 ## System Components
 - `viewer_app`: Orchestration and worker state mapping (UI-agnostic).

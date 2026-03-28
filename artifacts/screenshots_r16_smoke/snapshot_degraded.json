@@ -1,0 +1,49 @@
+{
+  "source": "viewer_net_manual_example",
+  "logged_in": true,
+  "first_sim_endpoint": null,
+  "first_sim_region_x": null,
+  "first_sim_region_y": null,
+  "handshake_agent_movement_complete": false,
+  "traffic_summary_available": false,
+  "post_boundary_observations": 0,
+  "region_transition_control_observations": 0,
+  "crossed_region": 0,
+  "confirm_enable_simulator": 0,
+  "likely_broader_traffic": 0,
+  "unknown": 0,
+  "decoded_coarse_updates": 0,
+  "decoded_coarse_location_count": null,
+  "decoded_coarse_first_x": null,
+  "decoded_coarse_first_y": null,
+  "decoded_coarse_first_z": null,
+  "decoded_coarse_second_x": null,
+  "decoded_coarse_second_y": null,
+  "decoded_coarse_second_z": null,
+  "decoded_coarse_third_x": null,
+  "decoded_coarse_third_y": null,
+  "decoded_coarse_third_z": null,
+  "decoded_health_updates": 0,
+  "decoded_health_last_basis_points": null,
+  "decoded_viewer_time_updates": 0,
+  "decoded_viewer_time_body_len": null,
+  "decoded_viewer_time_signature": null,
+  "observed_at_unix_ms": 1774728645990,
+  "continuity": {
+    "phase": "Confirming",
+    "outcome": "Degraded",
+    "reason": "LateConfirmation",
+    "phase_age_ms": 5000,
+    "active_region_coords": [
+      1024,
+      2048
+    ],
+    "previous_region_coords": [
+      1023,
+      2048
+    ],
+    "neighbors": [],
+    "last_probe_result": "Success",
+    "last_probe_time_unix_ms": 1774728645990
+  }
+}

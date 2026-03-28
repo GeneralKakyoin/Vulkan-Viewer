@@ -97,7 +97,14 @@ struct AppState {
             BTreeMap<AssetID, viewer_asset::AssetFetchOutcome<viewer_asset::DecodedRgbaImage>>,
         >,
     >,
+    last_probe_retry_ms: Option<u64>,
+    last_asset_refresh_ms: Option<u64>,
+    last_recovery_result: Option<viewer_core::RecoveryActionResult>,
+    transition_visual_state: viewer_core::TransitionVisualState,
 }
+
+const RECOVERY_PROBE_COOLDOWN_MS: u64 = 15_000;
+const RECOVERY_ASSET_REFRESH_COOLDOWN_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StressTestMode {
@@ -460,6 +467,7 @@ enum LiveFeedUpdate {
         id: String,
         reason: viewer_asset::AssetFetchFailureReason,
     },
+    ContinuityProbeResult(viewer_core::ProbeResultCode),
 }
 
 #[derive(Debug, Clone)]
@@ -496,6 +504,9 @@ enum LiveFeedCommand {
         id: AssetID,
         priority: viewer_core::AssetPriority,
     },
+    ExecuteContinuityProbe {
+        queued_at_unix_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -531,6 +542,67 @@ impl viewer_asset::LiveTextureProvider for AppLiveTextureProvider {
         let mut results = self.results.lock().unwrap();
         Ok(results.remove(id))
     }
+}
+
+fn compute_recovery_action(
+    action: viewer_core::RecoveryAction,
+    now_ms: u64,
+    last_probe_ms: Option<u64>,
+    last_asset_ms: Option<u64>,
+    _probe_cooldown: u64,
+    asset_cooldown: u64,
+) -> (viewer_core::RecoveryActionResult, Option<u64>, Option<u64>) {
+    let mut new_probe = last_probe_ms;
+    let mut new_asset = last_asset_ms;
+
+    let (code, cooldown_remaining_ms) = match action {
+        viewer_core::RecoveryAction::RetryContinuityProbe => {
+            if let Some(last) = last_probe_ms {
+                let elapsed = now_ms.saturating_sub(last);
+                if elapsed < _probe_cooldown {
+                    (
+                        viewer_core::RecoveryResultCode::CooldownActive,
+                        Some(_probe_cooldown - elapsed),
+                    )
+                } else {
+                    new_probe = Some(now_ms);
+                    (viewer_core::RecoveryResultCode::Accepted, None)
+                }
+            } else {
+                new_probe = Some(now_ms);
+                (viewer_core::RecoveryResultCode::Accepted, None)
+            }
+        }
+        viewer_core::RecoveryAction::RefreshVisibleAssets => {
+            if let Some(last) = last_asset_ms {
+                let elapsed = now_ms.saturating_sub(last);
+                if elapsed < asset_cooldown {
+                    (
+                        viewer_core::RecoveryResultCode::CooldownActive,
+                        Some(asset_cooldown - elapsed),
+                    )
+                } else {
+                    new_asset = Some(now_ms);
+                    (viewer_core::RecoveryResultCode::Accepted, None)
+                }
+            } else {
+                new_asset = Some(now_ms);
+                (viewer_core::RecoveryResultCode::Accepted, None)
+            }
+        }
+        viewer_core::RecoveryAction::ClearRecoveryBanner => {
+            (viewer_core::RecoveryResultCode::Accepted, None)
+        }
+    };
+
+    let result = viewer_core::RecoveryActionResult {
+        action,
+        code,
+        detail: None,
+        cooldown_remaining_ms,
+    };
+
+    (result, new_probe, new_asset)
 }
 
 impl LiveVisualState {
@@ -606,7 +678,15 @@ impl LiveVisualState {
         updates
     }
 
-    fn send_chat(&self, text: String) {
+    fn execute_continuity_probe(&mut self) {
+        if let Some(tx) = &self.in_process_tx {
+            let _ = tx.send(LiveFeedCommand::ExecuteContinuityProbe {
+                queued_at_unix_ms: now_unix_ms(),
+            });
+        }
+    }
+
+    fn send_chat(&mut self, text: String) {
         if let Some(tx) = &self.in_process_tx {
             let _ = tx.send(LiveFeedCommand::SendChat {
                 text,
@@ -1586,6 +1666,50 @@ async fn run_in_process_live_feed(
                             }
                         });
                     }
+                    LiveFeedCommand::ExecuteContinuityProbe { queued_at_unix_ms } => {
+                        let started_at = now_unix_ms();
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "probe_execution",
+                            &format!(
+                                "continuity probe queued_ms={}",
+                                started_at.saturating_sub(queued_at_unix_ms)
+                            ),
+                        );
+                        let result = connection.execute_continuity_probe().await;
+                        let code = match result {
+                            Ok(()) => viewer_core::ProbeResultCode::Success,
+                            Err(err) => {
+                                let is_timeout = err.to_string().contains("timeout")
+                                    || match &err {
+                                        viewer_net::ConnectionError::Http(e) => e.is_timeout(),
+                                        _ => false,
+                                    };
+                                let status = match &err {
+                                    viewer_net::ConnectionError::HttpStatus { status, .. } => {
+                                        Some(status.as_u16())
+                                    }
+                                    viewer_net::ConnectionError::Http(e) => {
+                                        e.status().map(|s| s.as_u16())
+                                    }
+                                    _ => None,
+                                };
+                                viewer_grid::continuity::classify_probe_outcome(is_timeout, status)
+                            }
+                        };
+                        let _ = tx.send(LiveFeedUpdate::ContinuityProbeResult(code));
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "probe_execution",
+                            &format!(
+                                "continuity probe complete result={:?} delay_ms={}",
+                                code,
+                                now_unix_ms().saturating_sub(started_at)
+                            ),
+                        );
+                    }
                 }
             }
 
@@ -2307,6 +2431,59 @@ fn derive_environment_from_snapshot(
     }
 
     env.sanitized()
+}
+
+/// Derives the transition visual cue contract from the current continuity snapshot.
+///
+/// Mapping contract (deterministic, no runtime state dependencies):
+/// - Normal outcome => Healthy (no-op baseline)
+/// - Degraded outcome => Degraded cue with bounded intensity
+/// - Stalled outcome => Stalled cue with bounded intensity
+/// - If last probe result is Success after degraded/stalled => Recovering cue
+fn derive_transition_visual_cue(
+    snapshot: Option<&LiveVisualSnapshot>,
+) -> viewer_core::TransitionVisualState {
+    let Some(snapshot) = snapshot else {
+        return viewer_core::TransitionVisualState::default();
+    };
+
+    // Check for bounded recovery: probe must be successful and recent relative to snapshot time.
+    // Reuse the probe cooldown window to avoid stale success results driving "recovering" cues.
+    let has_recent_probe_success = matches!(
+        snapshot.continuity.last_probe_result,
+        Some(viewer_core::ProbeResultCode::Success)
+    ) && snapshot
+        .continuity
+        .last_probe_time_unix_ms
+        .map(|probe_time| {
+            snapshot.observed_at_unix_ms.saturating_sub(probe_time) <= RECOVERY_PROBE_COOLDOWN_MS
+        })
+        .unwrap_or(false);
+
+    let (cue, intensity) = match snapshot.continuity.outcome {
+        viewer_core::HandoffOutcome::Normal => {
+            if has_recent_probe_success
+                && snapshot.continuity.phase != viewer_core::HandoffPhase::None
+            {
+                // Recovering: probe success during an active (non-None) handoff
+                (viewer_core::TransitionVisualCue::Recovering, 0.5_f32)
+            } else {
+                (viewer_core::TransitionVisualCue::Healthy, 0.0_f32)
+            }
+        }
+        viewer_core::HandoffOutcome::Degraded => {
+            if has_recent_probe_success {
+                (viewer_core::TransitionVisualCue::Recovering, 0.6_f32)
+            } else {
+                (viewer_core::TransitionVisualCue::Degraded, 0.6_f32)
+            }
+        }
+        viewer_core::HandoffOutcome::Stalled => {
+            (viewer_core::TransitionVisualCue::Stalled, 0.9_f32)
+        }
+    };
+
+    viewer_core::TransitionVisualState { cue, intensity }.sanitized()
 }
 
 fn parse_wire_format(value: &str) -> LoginWireFormat {
@@ -3191,6 +3368,10 @@ impl ViewerApp {
             frame_counter: 0,
             captured_screenshots: 0,
             environment: viewer_core::EnvironmentState::default(),
+            last_probe_retry_ms: None,
+            last_asset_refresh_ms: None,
+            last_recovery_result: None,
+            transition_visual_state: viewer_core::TransitionVisualState::default(),
         };
 
         match state.stress_test_mode {
@@ -3206,6 +3387,39 @@ impl ViewerApp {
 }
 
 impl AppState {
+    fn dispatch_recovery_action(
+        &mut self,
+        action: viewer_core::RecoveryAction,
+        now_ms: u64,
+    ) -> viewer_core::RecoveryActionResult {
+        let (result, new_probe_ms, new_asset_ms) = compute_recovery_action(
+            action,
+            now_ms,
+            self.last_probe_retry_ms,
+            self.last_asset_refresh_ms,
+            RECOVERY_PROBE_COOLDOWN_MS,
+            RECOVERY_ASSET_REFRESH_COOLDOWN_MS,
+        );
+
+        if result.code == viewer_core::RecoveryResultCode::Accepted {
+            if action == viewer_core::RecoveryAction::RefreshVisibleAssets {
+                self.fixture_texture_missing_logged.clear();
+                self.fixture_texture_cache.clear_failures();
+            }
+        }
+
+        self.last_probe_retry_ms = new_probe_ms;
+        self.last_asset_refresh_ms = new_asset_ms;
+
+        if action == viewer_core::RecoveryAction::ClearRecoveryBanner {
+            self.last_recovery_result = None;
+        } else {
+            self.last_recovery_result = Some(result.clone());
+        }
+
+        result
+    }
+
     fn spawn_geometry_torture_test(&mut self) {
         use viewer_core::{
             GeometrySource, HoleType, InstanceRole, PathType, ProfileType, Transform, VolumeParams,
@@ -3465,6 +3679,18 @@ impl AppState {
 
         for update in self.live_visual_state.drain_worker_updates() {
             match update {
+                LiveFeedUpdate::ContinuityProbeResult(code) => {
+                    self.last_recovery_result = Some(viewer_core::RecoveryActionResult {
+                        action: viewer_core::RecoveryAction::RetryContinuityProbe,
+                        code: viewer_core::RecoveryResultCode::Completed(code),
+                        detail: None,
+                        cooldown_remaining_ms: None,
+                    });
+                    if let Some(snapshot) = &mut self.live_visual_state.snapshot {
+                        snapshot.continuity.last_probe_result = Some(code);
+                        snapshot.continuity.last_probe_time_unix_ms = Some(now_unix_ms());
+                    }
+                }
                 LiveFeedUpdate::Snapshot(snapshot) => {
                     self.live_visual_state.snapshot = Some(snapshot);
                 }
@@ -3722,6 +3948,10 @@ impl AppState {
         if self.environment != next_environment {
             self.environment = next_environment;
         }
+        let next_cue = derive_transition_visual_cue(next_live_visual_snapshot.as_ref());
+        if self.transition_visual_state != next_cue {
+            self.transition_visual_state = next_cue;
+        }
         let next_world_ingestion_seam =
             WorldObjectIngestionAdapter::adapt(next_live_visual_snapshot.as_ref())
                 .with_avatar_attachments(&self.world_avatars);
@@ -3782,6 +4012,9 @@ impl AppState {
         let mut pending_profile_tab_select: Option<(String, AvatarProfileTab)> = None;
         let mut pending_profile_refresh: Option<(String, Option<AvatarProfileTab>)> = None;
         let mut pending_open_external_url: Option<String> = None;
+        let mut pending_retry_continuity_probe = false;
+        let mut pending_refresh_visible_assets = false;
+        let mut pending_clear_recovery_banner = false;
 
         // Prepare dynamic geometry
         for &id in &visibility_list {
@@ -3852,6 +4085,7 @@ impl AppState {
             &camera,
             &self.scene,
             &self.environment,
+            &self.transition_visual_state,
             &visibility_list,
             self.app_start_time.elapsed().as_secs_f32(),
             screenshot_path.as_deref(),
@@ -3882,7 +4116,21 @@ impl AppState {
                     visible_proxies: metrics.visible_proxies,
                     fixture_texture_metrics: self.fixture_texture_cache.metrics,
                     environment: &self.environment,
+                    transition_visual_state: &self.transition_visual_state,
                     show_chat_window: self.stress_test_mode != StressTestMode::Screenshot,
+                    last_recovery_result: self.last_recovery_result.as_ref(),
+                    can_retry_probe: match self.last_probe_retry_ms {
+                        Some(last) => {
+                            now_unix_ms().saturating_sub(last) >= RECOVERY_PROBE_COOLDOWN_MS
+                        }
+                        None => true,
+                    },
+                    can_refresh_assets: match self.last_asset_refresh_ms {
+                        Some(last) => {
+                            now_unix_ms().saturating_sub(last) >= RECOVERY_ASSET_REFRESH_COOLDOWN_MS
+                        }
+                        None => true,
+                    },
                 });
                 pending_chat_send = actions.nearby_chat_send;
                 pending_direct_im_send = actions.direct_im_send;
@@ -3890,8 +4138,33 @@ impl AppState {
                 pending_profile_tab_select = actions.select_avatar_profile_tab;
                 pending_profile_refresh = actions.refresh_avatar_profile;
                 pending_open_external_url = actions.open_external_url;
+                pending_retry_continuity_probe = actions.retry_continuity_probe;
+                pending_refresh_visible_assets = actions.refresh_visible_assets;
+                pending_clear_recovery_banner = actions.clear_recovery_banner;
             },
         );
+
+        if pending_retry_continuity_probe {
+            let result = self.dispatch_recovery_action(
+                viewer_core::RecoveryAction::RetryContinuityProbe,
+                now_unix_ms(),
+            );
+            if result.code == viewer_core::RecoveryResultCode::Accepted {
+                self.live_visual_state.execute_continuity_probe();
+            }
+        }
+        if pending_refresh_visible_assets {
+            self.dispatch_recovery_action(
+                viewer_core::RecoveryAction::RefreshVisibleAssets,
+                now_unix_ms(),
+            );
+        }
+        if pending_clear_recovery_banner {
+            self.dispatch_recovery_action(
+                viewer_core::RecoveryAction::ClearRecoveryBanner,
+                now_unix_ms(),
+            );
+        }
 
         if let Some(text) = pending_chat_send {
             self.chat_state.mark_sending();
@@ -4994,6 +5267,7 @@ mod tests {
                 region_x: 1024,
                 region_y: 2048,
             }],
+            ..Default::default()
         });
         assert_eq!(mapped.phase, viewer_core::HandoffPhase::Confirming);
         assert_eq!(mapped.active_region_coords, Some([1024, 2048]));
@@ -5018,6 +5292,78 @@ mod tests {
         assert!(env.fog.density > viewer_core::EnvironmentState::default().fog.density);
         assert!(env.fog.end > env.fog.start);
         assert!((env.time_of_day_normalized - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_returns_healthy_when_no_snapshot() {
+        let cue = derive_transition_visual_cue(None);
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Healthy);
+        assert_eq!(cue.intensity, 0.0);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_healthy_outcome_yields_healthy() {
+        let snapshot = offline_snapshot();
+        // Default snapshot has Normal outcome, None phase
+        let cue = derive_transition_visual_cue(Some(&snapshot));
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Healthy);
+        assert_eq!(cue.intensity, 0.0);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_degraded_outcome_yields_degraded() {
+        let mut snapshot = offline_snapshot();
+        snapshot.continuity.outcome = viewer_core::HandoffOutcome::Degraded;
+        snapshot.continuity.last_probe_result = None;
+        let cue = derive_transition_visual_cue(Some(&snapshot));
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Degraded);
+        assert!(cue.intensity > 0.0);
+        assert!(cue.intensity <= 1.0);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_stalled_outcome_yields_stalled() {
+        let mut snapshot = offline_snapshot();
+        snapshot.continuity.outcome = viewer_core::HandoffOutcome::Stalled;
+        let cue = derive_transition_visual_cue(Some(&snapshot));
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Stalled);
+        assert!(cue.intensity > 0.0);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_probe_success_on_degraded_yields_recovering() {
+        let mut snapshot = offline_snapshot();
+        snapshot.continuity.outcome = viewer_core::HandoffOutcome::Degraded;
+        snapshot.continuity.last_probe_result = Some(viewer_core::ProbeResultCode::Success);
+        snapshot.continuity.last_probe_time_unix_ms = Some(snapshot.observed_at_unix_ms);
+        let cue = derive_transition_visual_cue(Some(&snapshot));
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Recovering);
+        assert!(cue.intensity > 0.0);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_stale_probe_success_on_degraded_stays_degraded() {
+        let mut snapshot = offline_snapshot();
+        snapshot.continuity.outcome = viewer_core::HandoffOutcome::Degraded;
+        snapshot.continuity.last_probe_result = Some(viewer_core::ProbeResultCode::Success);
+        snapshot.continuity.last_probe_time_unix_ms =
+            Some(snapshot.observed_at_unix_ms - (RECOVERY_PROBE_COOLDOWN_MS + 1));
+        let cue = derive_transition_visual_cue(Some(&snapshot));
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Degraded);
+        assert!(cue.intensity > 0.0);
+    }
+
+    #[test]
+    fn derive_transition_visual_cue_stale_probe_success_with_active_normal_stays_healthy() {
+        let mut snapshot = offline_snapshot();
+        snapshot.continuity.outcome = viewer_core::HandoffOutcome::Normal;
+        snapshot.continuity.phase = viewer_core::HandoffPhase::Confirming;
+        snapshot.continuity.last_probe_result = Some(viewer_core::ProbeResultCode::Success);
+        snapshot.continuity.last_probe_time_unix_ms =
+            Some(snapshot.observed_at_unix_ms - (RECOVERY_PROBE_COOLDOWN_MS + 1));
+        let cue = derive_transition_visual_cue(Some(&snapshot));
+        assert_eq!(cue.cue, viewer_core::TransitionVisualCue::Healthy);
+        assert_eq!(cue.intensity, 0.0);
     }
 
     #[test]
@@ -5309,6 +5655,7 @@ mod tests {
                 region_x: 1025,
                 region_y: 2048,
             }],
+            ..Default::default()
         };
 
         let mapped = build_asset_priority_hints(&ids, &visible, Some(&continuity));
@@ -5343,9 +5690,131 @@ mod tests {
                 region_x: 1025,
                 region_y: 2048,
             }],
+            ..Default::default()
         };
         let mapped = build_asset_priority_hints(&ids, &visible, Some(&continuity));
         assert_eq!(mapped[0].priority, viewer_core::AssetPriority::Active);
         assert_eq!(mapped[1].priority, viewer_core::AssetPriority::Neighbor);
+    }
+
+    #[test]
+    fn recovery_action_respects_cooldowns_and_updates_time() {
+        let (result, new_probe, new_asset) = compute_recovery_action(
+            viewer_core::RecoveryAction::RefreshVisibleAssets,
+            1000,
+            None,
+            None,
+            5000,
+            2000,
+        );
+        assert_eq!(result.code, viewer_core::RecoveryResultCode::Accepted);
+        assert_eq!(new_probe, None);
+        assert_eq!(new_asset, Some(1000));
+
+        // Try again during cooldown
+        let (result2, new_probe2, new_asset2) = compute_recovery_action(
+            viewer_core::RecoveryAction::RefreshVisibleAssets,
+            2000, // 1 second later
+            new_probe,
+            new_asset,
+            5000,
+            2000,
+        );
+        assert_eq!(
+            result2.code,
+            viewer_core::RecoveryResultCode::CooldownActive
+        );
+        assert_eq!(result2.cooldown_remaining_ms, Some(1000));
+        assert_eq!(new_probe2, None);
+        assert_eq!(new_asset2, Some(1000)); // Timestamp unchanged
+
+        // Try after cooldown
+        let (result3, new_probe3, new_asset3) = compute_recovery_action(
+            viewer_core::RecoveryAction::RefreshVisibleAssets,
+            4000, // 3 seconds later
+            new_probe2,
+            new_asset2,
+            5000,
+            2000,
+        );
+        assert_eq!(result3.code, viewer_core::RecoveryResultCode::Accepted);
+        assert_eq!(new_probe3, None);
+        assert_eq!(new_asset3, Some(4000)); // Timestamp updated
+    }
+
+    #[test]
+    fn recovery_action_repeated_spam_blocks_and_does_not_advance_time() {
+        let mut last_ms = None;
+        for i in 0..10 {
+            let now = 1000 + i * 100; // Incrementing by 100ms
+            let (result, _, new_asset) = compute_recovery_action(
+                viewer_core::RecoveryAction::RefreshVisibleAssets,
+                now,
+                None,
+                last_ms,
+                5000,
+                2000,
+            );
+            if i == 0 {
+                assert_eq!(result.code, viewer_core::RecoveryResultCode::Accepted);
+            } else {
+                assert_eq!(result.code, viewer_core::RecoveryResultCode::CooldownActive);
+            }
+            last_ms = new_asset;
+        }
+
+        assert_eq!(last_ms, Some(1000)); // Timestamp is still from the first accepted attempt
+    }
+
+    #[test]
+    fn probe_cooldown_rejection() {
+        let mut last_ms = None;
+        let mut codes = Vec::new();
+
+        // 0ms: First probe accepted
+        let (res, next, _) = compute_recovery_action(
+            viewer_core::RecoveryAction::RetryContinuityProbe,
+            0,
+            last_ms,
+            None,
+            15000,
+            5000,
+        );
+        codes.push(res.code);
+        last_ms = next;
+
+        // 10000ms: Still in 15s cooldown
+        let (res, next, _) = compute_recovery_action(
+            viewer_core::RecoveryAction::RetryContinuityProbe,
+            10000,
+            last_ms,
+            None,
+            15000,
+            5000,
+        );
+        codes.push(res.code);
+        last_ms = next; // Bookkeeping should not change on rejection
+
+        // 16000ms: Cooldown expired
+        let (res, next, _) = compute_recovery_action(
+            viewer_core::RecoveryAction::RetryContinuityProbe,
+            16000,
+            last_ms,
+            None,
+            15000,
+            5000,
+        );
+        codes.push(res.code);
+        last_ms = next;
+
+        assert_eq!(
+            codes,
+            vec![
+                viewer_core::RecoveryResultCode::Accepted,
+                viewer_core::RecoveryResultCode::CooldownActive,
+                viewer_core::RecoveryResultCode::Accepted,
+            ]
+        );
+        assert_eq!(last_ms, Some(16000));
     }
 }
