@@ -108,6 +108,12 @@ impl FixtureTextureCache {
         self.budget_bytes
     }
 
+    /// Clears negative/missing cache entries so recovery actions can retry immediately.
+    pub fn clear_failures(&mut self) {
+        self.negative.clear();
+        self.negative_set.clear();
+    }
+
     pub fn current_bytes(&self) -> usize {
         self.current_bytes
     }

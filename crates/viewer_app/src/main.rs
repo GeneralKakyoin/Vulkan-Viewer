@@ -99,6 +99,7 @@ struct AppState {
     >,
     last_probe_retry_ms: Option<u64>,
     last_asset_refresh_ms: Option<u64>,
+    probe_in_flight: bool,
     last_recovery_result: Option<viewer_core::RecoveryActionResult>,
     transition_visual_state: viewer_core::TransitionVisualState,
 }
@@ -549,7 +550,9 @@ fn compute_recovery_action(
     now_ms: u64,
     last_probe_ms: Option<u64>,
     last_asset_ms: Option<u64>,
-    _probe_cooldown: u64,
+    probe_available: bool,
+    probe_in_flight: bool,
+    probe_cooldown: u64,
     asset_cooldown: u64,
 ) -> (viewer_core::RecoveryActionResult, Option<u64>, Option<u64>) {
     let mut new_probe = last_probe_ms;
@@ -557,12 +560,16 @@ fn compute_recovery_action(
 
     let (code, cooldown_remaining_ms) = match action {
         viewer_core::RecoveryAction::RetryContinuityProbe => {
-            if let Some(last) = last_probe_ms {
+            if !probe_available {
+                (viewer_core::RecoveryResultCode::Unavailable, None)
+            } else if probe_in_flight {
+                (viewer_core::RecoveryResultCode::Unavailable, None)
+            } else if let Some(last) = last_probe_ms {
                 let elapsed = now_ms.saturating_sub(last);
-                if elapsed < _probe_cooldown {
+                if elapsed < probe_cooldown {
                     (
                         viewer_core::RecoveryResultCode::CooldownActive,
-                        Some(_probe_cooldown - elapsed),
+                        Some(probe_cooldown - elapsed),
                     )
                 } else {
                     new_probe = Some(now_ms);
@@ -598,7 +605,15 @@ fn compute_recovery_action(
     let result = viewer_core::RecoveryActionResult {
         action,
         code,
-        detail: None,
+        detail: match action {
+            viewer_core::RecoveryAction::RetryContinuityProbe if !probe_available => Some(
+                String::from("continuity probe unavailable in current startup mode"),
+            ),
+            viewer_core::RecoveryAction::RetryContinuityProbe if probe_in_flight => {
+                Some(String::from("continuity probe already in flight"))
+            }
+            _ => None,
+        },
         cooldown_remaining_ms,
     };
 
@@ -678,12 +693,15 @@ impl LiveVisualState {
         updates
     }
 
-    fn execute_continuity_probe(&mut self) {
+    fn execute_continuity_probe(&mut self) -> bool {
         if let Some(tx) = &self.in_process_tx {
-            let _ = tx.send(LiveFeedCommand::ExecuteContinuityProbe {
-                queued_at_unix_ms: now_unix_ms(),
-            });
+            return tx
+                .send(LiveFeedCommand::ExecuteContinuityProbe {
+                    queued_at_unix_ms: now_unix_ms(),
+                })
+                .is_ok();
         }
+        false
     }
 
     fn send_chat(&mut self, text: String) {
@@ -3370,6 +3388,7 @@ impl ViewerApp {
             environment: viewer_core::EnvironmentState::default(),
             last_probe_retry_ms: None,
             last_asset_refresh_ms: None,
+            probe_in_flight: false,
             last_recovery_result: None,
             transition_visual_state: viewer_core::TransitionVisualState::default(),
         };
@@ -3397,6 +3416,8 @@ impl AppState {
             now_ms,
             self.last_probe_retry_ms,
             self.last_asset_refresh_ms,
+            self.live_visual_state.in_process_enabled,
+            self.probe_in_flight,
             RECOVERY_PROBE_COOLDOWN_MS,
             RECOVERY_ASSET_REFRESH_COOLDOWN_MS,
         );
@@ -3410,6 +3431,11 @@ impl AppState {
 
         self.last_probe_retry_ms = new_probe_ms;
         self.last_asset_refresh_ms = new_asset_ms;
+        if action == viewer_core::RecoveryAction::RetryContinuityProbe
+            && result.code == viewer_core::RecoveryResultCode::Accepted
+        {
+            self.probe_in_flight = true;
+        }
 
         if action == viewer_core::RecoveryAction::ClearRecoveryBanner {
             self.last_recovery_result = None;
@@ -3680,6 +3706,7 @@ impl AppState {
         for update in self.live_visual_state.drain_worker_updates() {
             match update {
                 LiveFeedUpdate::ContinuityProbeResult(code) => {
+                    self.probe_in_flight = false;
                     self.last_recovery_result = Some(viewer_core::RecoveryActionResult {
                         action: viewer_core::RecoveryAction::RetryContinuityProbe,
                         code: viewer_core::RecoveryResultCode::Completed(code),
@@ -4121,9 +4148,11 @@ impl AppState {
                     last_recovery_result: self.last_recovery_result.as_ref(),
                     can_retry_probe: match self.last_probe_retry_ms {
                         Some(last) => {
-                            now_unix_ms().saturating_sub(last) >= RECOVERY_PROBE_COOLDOWN_MS
+                            self.live_visual_state.in_process_enabled
+                                && !self.probe_in_flight
+                                && now_unix_ms().saturating_sub(last) >= RECOVERY_PROBE_COOLDOWN_MS
                         }
-                        None => true,
+                        None => self.live_visual_state.in_process_enabled && !self.probe_in_flight,
                     },
                     can_refresh_assets: match self.last_asset_refresh_ms {
                         Some(last) => {
@@ -4150,7 +4179,16 @@ impl AppState {
                 now_unix_ms(),
             );
             if result.code == viewer_core::RecoveryResultCode::Accepted {
-                self.live_visual_state.execute_continuity_probe();
+                if !self.live_visual_state.execute_continuity_probe() {
+                    self.probe_in_flight = false;
+                    self.last_probe_retry_ms = None;
+                    self.last_recovery_result = Some(viewer_core::RecoveryActionResult {
+                        action: viewer_core::RecoveryAction::RetryContinuityProbe,
+                        code: viewer_core::RecoveryResultCode::Unavailable,
+                        detail: Some(String::from("failed to queue continuity probe command")),
+                        cooldown_remaining_ms: None,
+                    });
+                }
             }
         }
         if pending_refresh_visible_assets {
@@ -5704,6 +5742,8 @@ mod tests {
             1000,
             None,
             None,
+            true,
+            false,
             5000,
             2000,
         );
@@ -5717,6 +5757,8 @@ mod tests {
             2000, // 1 second later
             new_probe,
             new_asset,
+            true,
+            false,
             5000,
             2000,
         );
@@ -5734,6 +5776,8 @@ mod tests {
             4000, // 3 seconds later
             new_probe2,
             new_asset2,
+            true,
+            false,
             5000,
             2000,
         );
@@ -5752,6 +5796,8 @@ mod tests {
                 now,
                 None,
                 last_ms,
+                true,
+                false,
                 5000,
                 2000,
             );
@@ -5777,6 +5823,8 @@ mod tests {
             0,
             last_ms,
             None,
+            true,
+            false,
             15000,
             5000,
         );
@@ -5789,6 +5837,8 @@ mod tests {
             10000,
             last_ms,
             None,
+            true,
+            false,
             15000,
             5000,
         );
@@ -5801,6 +5851,8 @@ mod tests {
             16000,
             last_ms,
             None,
+            true,
+            false,
             15000,
             5000,
         );
@@ -5816,5 +5868,45 @@ mod tests {
             ]
         );
         assert_eq!(last_ms, Some(16000));
+    }
+
+    #[test]
+    fn probe_retry_rejected_when_unavailable() {
+        let (result, new_probe, _) = compute_recovery_action(
+            viewer_core::RecoveryAction::RetryContinuityProbe,
+            1_000,
+            None,
+            None,
+            false,
+            false,
+            15_000,
+            5_000,
+        );
+        assert_eq!(result.code, viewer_core::RecoveryResultCode::Unavailable);
+        assert_eq!(
+            result.detail.as_deref(),
+            Some("continuity probe unavailable in current startup mode")
+        );
+        assert_eq!(new_probe, None);
+    }
+
+    #[test]
+    fn probe_retry_rejected_when_in_flight() {
+        let (result, new_probe, _) = compute_recovery_action(
+            viewer_core::RecoveryAction::RetryContinuityProbe,
+            2_000,
+            Some(1_000),
+            None,
+            true,
+            true,
+            15_000,
+            5_000,
+        );
+        assert_eq!(result.code, viewer_core::RecoveryResultCode::Unavailable);
+        assert_eq!(
+            result.detail.as_deref(),
+            Some("continuity probe already in flight")
+        );
+        assert_eq!(new_probe, Some(1_000));
     }
 }

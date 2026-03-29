@@ -1426,6 +1426,31 @@ impl Connection {
         summary
     }
 
+    /// Execute a bounded continuity probe against currently available simulator capabilities.
+    pub async fn execute_continuity_probe(&self) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let seed_caps = self.fetch_seed_capabilities().await?;
+        if let Some(url) = seed_caps.entries.get("SimulatorFeatures")
+            && !url.trim().is_empty()
+        {
+            let _ = self.fetch_simulator_features_once(url).await?;
+            return Ok(());
+        }
+        if let Some(url) = seed_caps.entries.get("MapLayer")
+            && !url.trim().is_empty()
+        {
+            let _ = self.fetch_map_layer_once(url).await?;
+            return Ok(());
+        }
+
+        Err(ConnectionError::MissingCapability(String::from(
+            "SimulatorFeatures/MapLayer",
+        )))
+    }
+
     pub fn record_region_continuity_observation(&mut self, summary: RegionContinuitySummary) {
         // Guard: do not move backwards in handoff phase priority unless it's a reset to None
         let current_priority = self.continuity_summary.phase.priority();
@@ -1458,6 +1483,8 @@ impl Connection {
             outcome: summary.outcome,
             reason: summary.reason,
             phase_age_ms,
+            last_probe_result: summary.last_probe_result,
+            last_probe_time_unix_ms: summary.last_probe_time_unix_ms,
             active_region_coords,
             previous_region_coords,
             neighbors,
@@ -1470,6 +1497,8 @@ impl Connection {
             outcome: self.continuity_summary.outcome,
             reason: self.continuity_summary.reason,
             phase_age_ms: 0,
+            last_probe_result: self.continuity_summary.last_probe_result,
+            last_probe_time_unix_ms: self.continuity_summary.last_probe_time_unix_ms,
             active_region_coords: self.continuity_summary.active_region_coords,
             previous_region_coords: self.continuity_summary.previous_region_coords,
             neighbors: self.continuity_summary.neighbors.clone(),
@@ -3575,6 +3604,8 @@ impl Connection {
             outcome: viewer_core::HandoffOutcome::Normal,
             reason: viewer_core::HandoffReason::None,
             phase_age_ms: 0,
+            last_probe_result: None,
+            last_probe_time_unix_ms: None,
             active_region_coords: Some([
                 bootstrap.first_sim.region_x,
                 bootstrap.first_sim.region_y,
@@ -9895,6 +9926,8 @@ mod tests {
             outcome: viewer_core::HandoffOutcome::Normal,
             reason: viewer_core::HandoffReason::None,
             phase_age_ms: 0,
+            last_probe_result: None,
+            last_probe_time_unix_ms: None,
             active_region_coords: Some([1000, 1001]),
             previous_region_coords: Some([999, 1001]),
             neighbors,
@@ -9913,6 +9946,8 @@ mod tests {
             outcome: viewer_core::HandoffOutcome::Normal,
             reason: viewer_core::HandoffReason::None,
             phase_age_ms: 0,
+            last_probe_result: None,
+            last_probe_time_unix_ms: None,
             active_region_coords: Some([1000, 1001]),
             previous_region_coords: None,
             neighbors: Vec::new(),
@@ -9934,6 +9969,8 @@ mod tests {
             outcome: viewer_core::HandoffOutcome::Normal,
             reason: viewer_core::HandoffReason::None,
             phase_age_ms: 0,
+            last_probe_result: None,
+            last_probe_time_unix_ms: None,
             active_region_coords: Some([1000, 1001]),
             previous_region_coords: Some([999, 1001]),
             neighbors: Vec::new(),

@@ -1,30 +1,37 @@
-# HANDOFF: R16 Review Fixes Applied
+# HANDOFF: N15 Continuity Probe Command Wiring
 
 ## What Changed
-
-- Fixed R16 cue mapping bug: `derive_transition_visual_cue(...)` now requires bounded probe recency before selecting `Recovering`.
-- Added regression tests in `viewer_app` to prevent stale probe-success misclassification.
-- Captured degraded and stalled screenshot smoke evidence under `artifacts/screenshots_r16_smoke/`.
-- Updated `docs/reports/REPORT_R16_completion.md` and `docs/reviews/REVIEW_IMPL_R16.md` to reflect the fixes and evidence.
+- Implemented `Retry Continuity Probe` as a live worker command path (UI intent -> app dispatch -> net probe execution -> result update).
+- Added deterministic retry guards in `viewer_app`:
+  - cooldown enforcement (`RECOVERY_PROBE_COOLDOWN_MS`)
+  - single-flight rejection when probe already in flight
+  - unavailable mapping when probe command cannot be queued
+- Preserved probe result propagation to continuity diagnostics:
+  - `continuity.last_probe_result`
+  - `continuity.last_probe_time_unix_ms`
+- Added diagnostics status line text for last recovery action in `viewer_ui`.
+- Added/updated N15 artifacts:
+  - `docs/reviews/REVIEW_PLAN_N15.md`
+  - `docs/reviews/REVIEW_IMPL_N15.md`
+  - `docs/reports/REPORT_N15.md`
+  - `docs/plans/DEFERRED_FEATURES.md` promotion for U14 deferred probe wiring
 
 ## Validation Run
-
-- `cargo test -p viewer_app --bin viewer_app derive_transition_visual_cue_`: PASSED (7 tests)
-- `cargo run -p viewer_app` with degraded snapshot screenshot smoke: PASSED (2 captures)
-- `cargo run -p viewer_app` with stalled snapshot screenshot smoke: PASSED (2 captures)
+- `cargo fmt --all`: PASSED
+- `cargo check --workspace`: PASSED
+- `cargo test -p viewer_core -p viewer_ui -p viewer_app -p viewer_net`: PASSED
+- `cargo test --workspace`: PASSED
+- `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot VIEWER_TEST_SCREENSHOT_DIR=artifacts/screenshots_n15_smoke VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES=1 VIEWER_TEST_SCREENSHOT_MAX_FRAMES=1 cargo run -p viewer_app`: PASSED
+- Screenshot manually reviewed: `artifacts/screenshots_n15_smoke/viewer_test_0001.png`
 
 ## Exact Current State
-
-- R16 cue contract is wired and now recency-safe for recovering classification.
-- R16 completion report includes healthy/degraded/stalled screenshot evidence.
-- R16 implementation review is approved after fixes.
+- N15 bounded continuity probe retry path is wired and validated offline.
+- Retry probe now exposes explicit unavailable/in-flight/cooldown/completed statuses through existing recovery result surfaces.
+- Workspace still reports non-blocking warning in `viewer_render` (`DEBUG_CLIP_SPACE_TRIANGLE` dead code).
 
 ## Exact Next Step
-
-- Proceed with `A17` implementation per `docs/plans/PLAN_A17.md`.
-- After `A17`, prioritize `A19` for visible world-object live mesh+texture parity.
+- Run connected live validation for retry-probe behavior and continuity diagnostics transitions with valid `VIEWER_LOGIN_*` environment credentials.
 
 ## Blockers / Risks
-
-- No blocker for proceeding to `A17`.
-- Minor tuning risk remains: cue intensity subtlety may need follow-up based on operator feedback.
+- Connected verification remains pending due credential/environment dependency.
+- No `docs/plans/PLAN_N16.md` exists in this workspace; only `PLAN_N15.md` was implementable in this pass.

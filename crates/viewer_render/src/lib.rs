@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use viewer_core::{
     AlphaMode, AssetID, AvatarRenderMode, Camera, GeometrySource, MaterialDescriptor, MeshKind,
-    Scene, Vertex, flatten_mat4,
+    Scene, TransitionVisualCue, TransitionVisualState, Vertex, flatten_mat4,
 };
 use wgpu::util::DeviceExt;
 use wgpu::{
@@ -277,7 +277,7 @@ impl RenderBackend {
 
         let environment_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("environment_uniform_buffer"),
-            size: 112, // 7 * vec4<f32> (16 bytes each) = 112 bytes
+            size: 128, // 8 * vec4<f32> (16 bytes each) = 128 bytes
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -773,6 +773,7 @@ impl RenderBackend {
         camera: &Camera,
         scene: &Scene,
         environment: &viewer_core::EnvironmentState,
+        transition_visual_state: &TransitionVisualState,
         visibility_list: &[usize],
         time: f32,
         capture_path: Option<&Path>,
@@ -803,7 +804,7 @@ impl RenderBackend {
             .create_view(&TextureViewDescriptor::default());
 
         self.update_camera_uniform(camera);
-        self.upload_environment_uniforms(environment);
+        self.upload_environment_uniforms(environment, transition_visual_state);
         let clear_color = blend_clear_color_from_environment(environment);
         let sorted_visibility = build_draw_list(
             &scene.instances,
@@ -1295,9 +1296,20 @@ impl RenderBackend {
         );
     }
 
-    fn upload_environment_uniforms(&self, env: &viewer_core::EnvironmentState) {
+    fn upload_environment_uniforms(
+        &self,
+        env: &viewer_core::EnvironmentState,
+        transition_visual_state: &TransitionVisualState,
+    ) {
         let env = env.sanitized();
-        let env_uniform: [f32; 28] = [
+        let cue = transition_visual_state.sanitized();
+        let mode_index = match cue.cue {
+            TransitionVisualCue::Healthy => 0.0,
+            TransitionVisualCue::Degraded => 1.0,
+            TransitionVisualCue::Stalled => 2.0,
+            TransitionVisualCue::Recovering => 3.0,
+        };
+        let env_uniform: [f32; 32] = [
             env.ambient.color[0],
             env.ambient.color[1],
             env.ambient.color[2],
@@ -1324,6 +1336,10 @@ impl RenderBackend {
             0.0,
             env.time_of_day_normalized,
             0.0,
+            0.0,
+            0.0,
+            mode_index,
+            cue.intensity,
             0.0,
             0.0,
         ];
@@ -1484,6 +1500,7 @@ struct EnvironmentUniform {
     fog_params: vec4<f32>, // x: density, y: start, z: end, w: unused
     flags: vec4<f32>,      // x: fog enabled, y: sky enabled
     time_params: vec4<f32>, // x: time-of-day [0..1]
+    cue_params: vec4<f32>, // x: mode_index, y: intensity
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -1556,6 +1573,20 @@ fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
         let exp_factor = 1.0 - exp(-density * fog_distance);
         let fog_factor = min(linear_factor, exp_factor);
         final_color = vec4<f32>(mix(final_color.rgb, env.fog_color.rgb, fog_factor), final_color.a);
+    }
+
+    let cue_mode = u32(env.cue_params.x);
+    let cue_strength = clamp(env.cue_params.y, 0.0, 1.0) * 0.18;
+    if (cue_mode != 0u && cue_strength > 0.0) {
+        var cue_color = vec3<f32>(1.0, 1.0, 1.0);
+        if (cue_mode == 1u) {
+            cue_color = vec3<f32>(1.0, 0.75, 0.2); // degraded
+        } else if (cue_mode == 2u) {
+            cue_color = vec3<f32>(1.0, 0.3, 0.3); // stalled
+        } else if (cue_mode == 3u) {
+            cue_color = vec3<f32>(0.4, 1.0, 0.55); // recovering
+        }
+        final_color = vec4<f32>(mix(final_color.rgb, final_color.rgb * cue_color, cue_strength), final_color.a);
     }
 
     return final_color;

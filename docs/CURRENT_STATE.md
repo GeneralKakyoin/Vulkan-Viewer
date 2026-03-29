@@ -3,6 +3,30 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (N15 Completed)
+- **Recovery probe command path completed**: `Retry Continuity Probe` now executes through the live worker command lane instead of remaining deferred/unavailable.
+- **Bounded guard semantics enforced**: retry behavior now applies both cooldown and explicit single-flight protection for in-flight probe requests.
+- **Operator status messaging improved**: diagnostics now show explicit recovery action status text (`accepted`, `cooldown`, `completed`, `unavailable`) for probe and asset actions.
+- **Deferred promotion synced**: the U14 deferred probe-command candidate is now marked `promoted` in `docs/plans/DEFERRED_FEATURES.md`.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check --workspace`
+  - `cargo test -p viewer_core -p viewer_ui -p viewer_app -p viewer_net`
+  - `cargo test --workspace`
+  - `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot VIEWER_TEST_SCREENSHOT_DIR=artifacts/screenshots_n15_smoke VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES=1 VIEWER_TEST_SCREENSHOT_MAX_FRAMES=1 cargo run -p viewer_app`
+  - manual screenshot review: `artifacts/screenshots_n15_smoke/viewer_test_0001.png`
+
+## Latest Notable Changes (Workspace Parity Repair N11-R16)
+- **Cross-crate parity restored**: repaired API drift between `viewer_app` and sibling crates (`viewer_core`, `viewer_grid`, `viewer_net`, `viewer_render`, `viewer_ui`, `viewer_asset`) so the workspace builds again.
+- **Recovery + probe path reconnected**: added/verified recovery contracts, continuity probe execution entrypoint, and cache failure-reset hook used by operator recovery controls.
+- **Transition cue wiring restored**: transition cue contracts and render uniform cue params are now aligned with app/UI wiring, including diagnostics display.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check --workspace`
+  - `cargo test -p viewer_core -p viewer_grid -p viewer_net -p viewer_render -p viewer_ui -p viewer_asset -p viewer_app`
+  - offline screenshot smoke under `artifacts/screenshots_parity_repair_smoke/`
+- **Current state**: app startup and rendering smoke run passes again on this branch; feature surfaces for `N11`, `R12`, `A13`, `U14`, and `R16` are present in code and validated via targeted tests.
+
 ## Latest Notable Changes (R16 Fix Pass)
 - **Recovering Cue Recency Fix**: `viewer_app::derive_transition_visual_cue(...)` now requires recent probe success before applying `Recovering`, preventing stale-success misclassification during later degraded windows.
 - **Cue Mapping Regression Coverage**: Added stale-probe cue tests in `viewer_app` to lock degraded/healthy fallback behavior when probe success is old.

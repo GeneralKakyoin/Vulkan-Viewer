@@ -800,6 +800,74 @@ pub enum HandoffReason {
     NetworkJitter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProbeResultCode {
+    #[default]
+    Success,
+    Timeout,
+    TransportError,
+    HttpFailure,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RecoveryAction {
+    #[default]
+    RetryContinuityProbe,
+    RefreshVisibleAssets,
+    ClearRecoveryBanner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RecoveryResultCode {
+    #[default]
+    Accepted,
+    CooldownActive,
+    Unavailable,
+    Completed(ProbeResultCode),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RecoveryActionResult {
+    pub action: RecoveryAction,
+    pub code: RecoveryResultCode,
+    pub cooldown_remaining_ms: Option<u64>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TransitionVisualCue {
+    #[default]
+    Healthy,
+    Degraded,
+    Stalled,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TransitionVisualState {
+    pub cue: TransitionVisualCue,
+    pub intensity: f32,
+}
+
+impl Default for TransitionVisualState {
+    fn default() -> Self {
+        Self {
+            cue: TransitionVisualCue::Healthy,
+            intensity: 0.0,
+        }
+    }
+}
+
+impl TransitionVisualState {
+    pub fn sanitized(self) -> Self {
+        Self {
+            cue: self.cue,
+            intensity: self.intensity.clamp(0.0, 1.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct BoundedNeighborSummary {
     pub region_handle: u64,
@@ -813,6 +881,10 @@ pub struct RegionContinuitySummary {
     pub outcome: HandoffOutcome,
     pub reason: HandoffReason,
     pub phase_age_ms: u64,
+    #[serde(default)]
+    pub last_probe_result: Option<ProbeResultCode>,
+    #[serde(default)]
+    pub last_probe_time_unix_ms: Option<u64>,
     pub active_region_coords: Option<[u32; 2]>,
     pub previous_region_coords: Option<[u32; 2]>,
     pub neighbors: Vec<BoundedNeighborSummary>,
@@ -4943,6 +5015,8 @@ mod tests {
             outcome: HandoffOutcome::Normal,
             reason: HandoffReason::None,
             phase_age_ms: 0,
+            last_probe_result: None,
+            last_probe_time_unix_ms: None,
             active_region_coords: Some([1024, 2048]),
             previous_region_coords: Some([1023, 2048]),
             neighbors: vec![BoundedNeighborSummary {

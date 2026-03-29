@@ -1,4 +1,6 @@
-use viewer_core::{HandoffOutcome, HandoffPhase, HandoffReason, RegionContinuitySummary};
+use viewer_core::{
+    HandoffOutcome, HandoffPhase, HandoffReason, ProbeResultCode, RegionContinuitySummary,
+};
 
 /// Semantic classifier for region handoff diagnostics.
 ///
@@ -37,6 +39,18 @@ pub fn classify_handoff_diagnostics(
     }
 }
 
+/// Classifies a one-shot continuity probe result into a stable diagnostic code.
+pub fn classify_probe_outcome(is_timeout: bool, status: Option<u16>) -> ProbeResultCode {
+    if is_timeout {
+        return ProbeResultCode::Timeout;
+    }
+    match status {
+        Some(code) if (200..300).contains(&code) => ProbeResultCode::Success,
+        Some(_) => ProbeResultCode::HttpFailure,
+        None => ProbeResultCode::TransportError,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +76,25 @@ mod tests {
         let (outcome, reason) = classify_handoff_diagnostics(&summary);
         assert_eq!(outcome, HandoffOutcome::Stalled);
         assert_eq!(reason, HandoffReason::StaleWindowExceeded);
+    }
+
+    #[test]
+    fn probe_outcome_classification_prefers_timeout() {
+        assert_eq!(
+            classify_probe_outcome(true, Some(200)),
+            ProbeResultCode::Timeout
+        );
+        assert_eq!(
+            classify_probe_outcome(false, Some(200)),
+            ProbeResultCode::Success
+        );
+        assert_eq!(
+            classify_probe_outcome(false, Some(502)),
+            ProbeResultCode::HttpFailure
+        );
+        assert_eq!(
+            classify_probe_outcome(false, None),
+            ProbeResultCode::TransportError
+        );
     }
 }

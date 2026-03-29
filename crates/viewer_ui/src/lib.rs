@@ -4,8 +4,9 @@ use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, HandoffOutcome, HandoffReason, LiveVisualSnapshot, ProfileFreshness,
-    ProfileLoadStatus, RuntimeRelayLevel, SessionUxReason, SessionUxStatus, SocialState,
+    ChatSendStatus, ChatState, HandoffOutcome, HandoffReason, LiveVisualSnapshot, ProbeResultCode,
+    ProfileFreshness, ProfileLoadStatus, RecoveryAction, RecoveryActionResult, RecoveryResultCode,
+    RuntimeRelayLevel, SessionUxReason, SessionUxStatus, SocialState, TransitionVisualState,
     WorldAvatarPlaceholder,
 };
 use wgpu::{
@@ -249,6 +250,9 @@ pub struct UiActions {
     pub select_avatar_profile_tab: Option<(String, AvatarProfileTab)>,
     pub refresh_avatar_profile: Option<(String, Option<AvatarProfileTab>)>,
     pub open_external_url: Option<String>,
+    pub retry_continuity_probe: bool,
+    pub refresh_visible_assets: bool,
+    pub clear_recovery_banner: bool,
 }
 
 pub struct RenderInput<'a> {
@@ -277,6 +281,10 @@ pub struct RenderInput<'a> {
     pub visible_proxies: usize,
     pub fixture_texture_metrics: viewer_core::AssetContinuityMetrics,
     pub environment: &'a viewer_core::EnvironmentState,
+    pub transition_visual_state: &'a TransitionVisualState,
+    pub last_recovery_result: Option<&'a RecoveryActionResult>,
+    pub can_retry_probe: bool,
+    pub can_refresh_assets: bool,
     pub show_chat_window: bool,
 }
 
@@ -322,6 +330,43 @@ fn session_reason_label(reason: SessionUxReason) -> &'static str {
         SessionUxReason::LoginUpdateRequired => "login-update-required",
         SessionUxReason::ConnectionLost => "connection-lost",
         SessionUxReason::Other => "other",
+    }
+}
+
+fn probe_result_label(code: ProbeResultCode) -> &'static str {
+    match code {
+        ProbeResultCode::Success => "success",
+        ProbeResultCode::Timeout => "timeout",
+        ProbeResultCode::TransportError => "transport-error",
+        ProbeResultCode::HttpFailure => "http-failure",
+        ProbeResultCode::Unavailable => "unavailable",
+    }
+}
+
+fn recovery_result_label(result: &RecoveryActionResult) -> String {
+    let action = match result.action {
+        RecoveryAction::RetryContinuityProbe => "retry continuity probe",
+        RecoveryAction::RefreshVisibleAssets => "refresh visible assets",
+        RecoveryAction::ClearRecoveryBanner => "clear recovery banner",
+    };
+    let status = match result.code {
+        RecoveryResultCode::Accepted => "accepted".to_string(),
+        RecoveryResultCode::CooldownActive => {
+            if let Some(remaining) = result.cooldown_remaining_ms {
+                format!("cooldown ({} ms remaining)", remaining)
+            } else {
+                String::from("cooldown")
+            }
+        }
+        RecoveryResultCode::Unavailable => String::from("unavailable"),
+        RecoveryResultCode::Completed(code) => {
+            format!("completed ({})", probe_result_label(code))
+        }
+    };
+    if let Some(detail) = &result.detail {
+        format!("{action}: {status} - {detail}")
+    } else {
+        format!("{action}: {status}")
     }
 }
 
@@ -505,6 +550,10 @@ impl UiSystem {
             visible_proxies,
             fixture_texture_metrics,
             environment,
+            transition_visual_state,
+            last_recovery_result,
+            can_retry_probe,
+            can_refresh_assets,
             show_chat_window: _show_chat_window,
         } = input;
         if surface_size.width == 0 || surface_size.height == 0 {
@@ -647,6 +696,10 @@ impl UiSystem {
                                 "Fog: density={:.3}, start={:.1}, end={:.1}",
                                 environment.fog.density, environment.fog.start, environment.fog.end
                             ));
+                            ui.label(format!(
+                                "Render Cue: {:?} ({:.2})",
+                                transition_visual_state.cue, transition_visual_state.intensity
+                            ));
                         });
 
                     egui::CollapsingHeader::new("Camera")
@@ -689,6 +742,37 @@ impl UiSystem {
                             }
                             for line in live_visual_lines(live_visual) {
                                 ui.label(line);
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    can_retry_probe,
+                                    egui::Button::new("Retry Continuity Probe"),
+                                )
+                                .clicked()
+                            {
+                                actions.retry_continuity_probe = true;
+                            }
+                            if ui
+                                .add_enabled(
+                                    can_refresh_assets,
+                                    egui::Button::new("Refresh Visible Assets"),
+                                )
+                                .clicked()
+                            {
+                                actions.refresh_visible_assets = true;
+                            }
+                            if last_recovery_result.is_some()
+                                && ui.button("Clear Recovery Banner").clicked()
+                            {
+                                actions.clear_recovery_banner = true;
+                            }
+                            if let Some(result) = last_recovery_result {
+                                ui.separator();
+                                ui.label(format!(
+                                    "Recovery status: {}",
+                                    recovery_result_label(result)
+                                ));
                             }
                         });
 
