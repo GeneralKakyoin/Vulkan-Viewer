@@ -534,3 +534,45 @@ more than one session to establish correctly.
 **Files affected:** `viewer_net` startup control helpers, object-ingress staged control-block planning.
 
 ---
+
+## L38 — When bounded forensics show `unclassified=none` while `RegionHandshake` stays absent, the next branch should move to ACK/control timing rather than receive surfacing
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 30, 2026 ACK/receive forensics slice with bounded live startup transcript summaries.
+
+**What happened:** The new startup and first-steady-state forensic relays showed that raw packet message numbers were already being surfaced and none remained in the unclassified bucket, yet `RegionHandshake` and `ObjectUpdate*` were still absent while pending ACK IDs continued to accumulate. That ruled out receive-path surfacing/classification as the primary next branch on the current path.
+
+**Rule for future plans:** After bounded first-simulator forensics show `unclassified=none` and `RegionHandshake` is still absent, do not spend the next slice on receive classification/surfacing tweaks. Move the next plan to ACK/control timing or another tighter protocol control prerequisite instead.
+
+**Files affected:** object-ingress forensics planning, `viewer_net` startup control/ACK follow-up work, `viewer_app` relay interpretation.
+
+---
+
+## L39 — Explicit ACK flush timing can drain the first-simulator ACK queue without restoring `RegionHandshake` or object ingress
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 bounded live validation after adding an explicit `PacketAck` flush on the active `SocialCircuit`.
+
+**What happened:** The new ACK-flush slice succeeded mechanically: the queue drained to zero and an explicit outbound `PacketAck` was observed on-wire. Even so, the run still showed `region_handshake_updates=0` and `update_messages=0 total_objects=0`.
+
+**Rule for future plans:** Do not assume that draining the pending ACK queue is sufficient to unlock object ingress. If explicit ACK flush timing succeeds mechanically but `RegionHandshake` and `ObjectUpdate*` remain absent, use the newly surfaced packet mix to choose the next clue-driven slice instead of stacking more ACK guesses immediately.
+
+**Files affected:** `viewer_net` ACK/control follow-up work, `viewer_app` live-worker timing, post-ACK object-ingress planning.
+
+---
+
+## L40 — Once cross-protocol diagnostics prove simulator-host `:12043` caps are present and only a one-shot `EventQueueGet` start appears, prioritize persistent EventQueue behavior over more LLUDP startup guesses
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 30, 2026 parallel-protocol startup investigation using Firestorm source, `Firestorms.pcapng`, and the new bounded live transcript.
+
+**What happened:** The viewer successfully fetched first-region capabilities on simulator-host HTTPS `:12043` and surfaced a single `EventQueueGet:start ack=0 ...` in the bounded run, but still never surfaced `RegionHandshake`, `RegionHandshakeReply`, or `ObjectUpdate*`. Firestorm source showed that the corresponding path is implemented as a persistent `LLEventPoll`, not sparse one-shot probing.
+
+**Rule for future plans:** After diagnostics show the simulator-host capability lane is present and the current viewer only starts a one-shot `EventQueueGet`, stop promoting more standalone LLUDP startup packets first. Move the next branch to persistent EventQueue behavior before widening into other capability families or returning to UDP ordering guesses.
+
+**Files affected:** object-ingress planning, `viewer_net` capability/event-queue follow-up, `viewer_app` live startup diagnostics.
+
+---

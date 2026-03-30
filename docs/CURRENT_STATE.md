@@ -3,6 +3,61 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (Object Ingress Parallel Protocol Startup Investigation)
+- **Cross-protocol startup diagnostics are now live**: the bounded worker now reports seed-cap fetches, capability-family inventory, simulator-host `EventQueueGet` scheduling, and the existing LLUDP startup timeline in one place.
+- **The current capability lane is now explicit**: the March 30, 2026 bounded run shows `EventQueueGet`, `AgentProfile`, `GetDisplayNames`, `SimulatorFeatures`, and `MapLayer` all resolving to simulator-host HTTPS on `:12043`, while `GetTexture` and `ViewerAsset` resolve to asset CDN URLs.
+- **The current gap is narrower than “missing all caps”**: the same run shows `EventQueueGet:start ack=0` on the simulator-host URL, but no surfaced `EventQueueGet` completion before shutdown, while `RegionHandshake`, `RegionHandshakeReply`, and `ObjectUpdate*` all remain absent.
+- **Firestorm evidence now points at the next branch**: source and `Firestorms.pcapng` confirm substantial simulator-host `:12043` activity in parallel with LLUDP, with Firestorm’s `EventQueueGet` implemented as a persistent `LLEventPoll`.
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_PERSISTENT_EVENT_QUEUE_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+    - `artifacts/logs/live_parallel_protocol_2026-03-30.out.log`
+    - `artifacts/logs/live_parallel_protocol_2026-03-30.err.log`
+  - `tshark` extraction:
+    - `artifacts/logs/firestorm_parallel_protocol_timing_2026-03-30.csv`
+
+## Latest Notable Changes (Object Ingress ACK Flush Timing)
+- **Explicit ACK flush path added**: `viewer_net` now sends bounded explicit `PacketAck` datagrams on the active first-simulator `SocialCircuit`, and `viewer_app` triggers that flush at the approved startup and first steady-state checkpoints.
+- **The ACK queue now drains**: the bounded March 30, 2026 run showed startup `pending=0`, a first steady-state flush of `3` ACK IDs, and first steady-state `pending=0`.
+- **Object ingress remained blocked**: even after the queue drain, the run still ended with `update_messages=0 total_objects=0 region_handshake_updates=0`.
+- **New clue surfaced after the flush**: previously unnamed packets `0x00000016` and `0xffff0105` appeared in the first steady-state window; Firestorm message-template lookup identifies them as `CameraConstraint` and `GenericMessage`.
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_POST_ACK_UNKNOWN_CLASSIFICATION_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured log: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Object Ingress ACK/Receive Forensics Completed)
+- **Bounded startup forensics are now live**: `viewer_net` and `viewer_app` now emit ACK queue, appended-ACK usage, raw packet-number, unclassified-packet, first-observation timeline, and ordered transcript summaries for the first-simulator startup path.
+- **The live bounded run narrowed the next branch**: the March 30, 2026 connected run showed `unclassified=none` at startup and first steady state, while `RegionHandshake` and `ObjectUpdate*` still remained absent.
+- **ACK timing is now the selected next behavior-change target**: the same run showed pending ACK IDs growing from `4` to `8` while appended ACK usage occurred only once, so the next active plan is `docs/plans/PLAN_OBJECT_INGRESS_ACK_FLUSH_TIMING_2026-03-30.md`.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Gemini CLI Repo Integration)
+- **Gemini CLI is now a documented second-eye tool**: `docs/agents/GEMINI.md` now describes the local CLI workflow, verified smoke command, recommended headless usage, and explicitly forbids Gemini from being the primary planner or decision-maker.
+- **Codex discovery path is explicit**: `docs/agents/CODEX.md` and `docs/agents/RUNBOOK.md` now point Codex toward Gemini CLI only for second-eye review and bounded repo-risk analysis.
+- **Repo-local Gemini skill added for Codex**: `.agents/skills/use_gemini_cli/SKILL.md` now gives Codex a concise triggerable path for invoking Gemini CLI without inventing ad hoc prompts.
+- **Validation**:
+  - `gemini -p "Reply with exactly the single word OK."`
+
+## Latest Notable Changes (Object Ingress Next-Step Roadmap)
+- **Roadmap artifact added for the current blocker**: `docs/plans/PLAN_OBJECT_INGRESS_NEXT_STEP_ROADMAP_2026-03-30.md` turns the object-ingress investigation into an explicit decision tree.
+- **The roadmap did its job**: the bounded ACK/control/receive observability slice is now complete and used to choose the next active branch.
+- **Selected branch is explicit**: the next behavior-change plan is `docs/plans/PLAN_OBJECT_INGRESS_ACK_FLUSH_TIMING_2026-03-30.md`.
+- **Plan audit added to the roadmap**: older startup/socket plans with unmatched report names were reconciled as completed or superseded, and the current active unfinished implementation plan is now `PLAN_OBJECT_INGRESS_ACK_FLUSH_TIMING_2026-03-30.md`.
+
 ## Latest Notable Changes (Object Ingress ACK/Receive Planning)
 - **Remaining concerns are now unified in one plan**: `docs/plans/PLAN_OBJECT_INGRESS_ACK_AND_RECEIVE_FORENSICS_2026-03-30.md` addresses ACK timing, receive-path observability gaps, `RegionHandshake` progression, and startup ordering as one staged investigation surface.
 - **Next step is observability, not another startup message**: after `AgentHeightWidth`, `SetAlwaysRun`, and the observed startup `AgentAnimation` all failed independently, the next approved direction is bounded ACK/control/receive transcript instrumentation on the same one-port path.

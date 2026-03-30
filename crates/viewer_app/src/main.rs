@@ -25,10 +25,10 @@ use viewer_grid::{
     GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
 };
 use viewer_net::{
-    AgentProfileData, Connection, ConnectionConfig, ConnectionError,
+    AgentProfileData, CapabilityUrlFamily, Connection, ConnectionConfig, ConnectionError,
     FirstSimulatorInboundTrafficScope, LoginFallbackClassifiedReason, LoginFallbackOutcome,
-    LoginTrace, LoginWireFormat, NearbyChatMessage, SocialCircuit, SocialEvent,
-    poll_event_queue_url_once,
+    LoginTrace, LoginWireFormat, NearbyChatMessage, SeedCapabilityInventoryEntry, SocialCircuit,
+    SocialEvent, classify_capability_url, poll_event_queue_url_once,
 };
 use viewer_render::RenderBackend;
 use viewer_ui::{RenderInput, UiSystem};
@@ -1139,6 +1139,8 @@ async fn run_in_process_live_feed(
         let agent_update_keepalive_interval_ticks = agent_update_keepalive_interval_ticks(&config);
         let mut last_agent_update_tick = None;
         let mut first_sim_socket_steady_state_summary_emitted = false;
+        let mut protocol_events = Vec::<String>::new();
+        let mut capability_inventory_summary = String::from("none");
         let mut social_circuit: Option<SocialCircuit> = connection
             .open_social_circuit(&config.receive_bind)
             .await
@@ -1161,6 +1163,13 @@ async fn run_in_process_live_feed(
                     &format!("startup social activation failed: {err}"),
                 );
             } else {
+                let _ = flush_pending_first_sim_ack_ids(
+                    &mut connection,
+                    circuit,
+                    &tx,
+                    "after_startup_social_prime",
+                )
+                .await;
                 last_agent_update_tick = Some(worker_tick);
             }
             emit_first_simulator_socket_summary(&tx, &connection, "after_startup_social_prime");
@@ -1173,7 +1182,28 @@ async fn run_in_process_live_feed(
             );
         }
 
-        let capabilities = connection.fetch_seed_capabilities().await.ok();
+        push_protocol_event(&mut protocol_events, "seed_caps:start");
+        let capabilities = match connection.fetch_seed_capabilities().await {
+            Ok(caps) => {
+                let inventory = connection.summarize_seed_capability_inventory(&caps);
+                capability_inventory_summary = summarize_seed_capability_inventory(&inventory);
+                push_protocol_event(
+                    &mut protocol_events,
+                    format!("seed_caps:ok {}", capability_inventory_summary),
+                );
+                Some(caps)
+            }
+            Err(err) => {
+                push_protocol_event(&mut protocol_events, format!("seed_caps:err {err}"));
+                emit_relay(
+                    &tx,
+                    RuntimeRelayLevel::Warn,
+                    "parallel_protocol",
+                    &format!("seed capability fetch failed: {err}"),
+                );
+                None
+            }
+        };
         let event_queue_url = capabilities
             .as_ref()
             .and_then(|caps| caps.entries.get("EventQueueGet"))
@@ -1197,12 +1227,28 @@ async fn run_in_process_live_feed(
         if !bootstrap_friend_ids.is_empty() {
             let mut resolved_count = 0usize;
             if let Some(url) = display_names_url.as_deref() {
+                push_protocol_event(
+                    &mut protocol_events,
+                    format!(
+                        "GetDisplayNames:start ids={} {}",
+                        bootstrap_friend_ids.len(),
+                        format_classified_url(url)
+                    ),
+                );
                 match connection
                     .resolve_avatar_display_names(url, &bootstrap_friend_ids)
                     .await
                 {
                     Ok(names) => {
                         resolved_count = names.len();
+                        push_protocol_event(
+                            &mut protocol_events,
+                            format!(
+                                "GetDisplayNames:ok resolved={} {}",
+                                resolved_count,
+                                format_classified_url(url)
+                            ),
+                        );
                         for entry in names {
                             let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
                                 id: entry.id,
@@ -1212,6 +1258,10 @@ async fn run_in_process_live_feed(
                         }
                     }
                     Err(err) => {
+                        push_protocol_event(
+                            &mut protocol_events,
+                            format!("GetDisplayNames:err {err} {}", format_classified_url(url)),
+                        );
                         emit_relay(
                             &tx,
                             RuntimeRelayLevel::Warn,
@@ -1223,6 +1273,14 @@ async fn run_in_process_live_feed(
             }
             if resolved_count == 0 {
                 if let Some(profile_url) = agent_profile_url.as_deref() {
+                    push_protocol_event(
+                        &mut protocol_events,
+                        format!(
+                            "AgentProfile:start ids={} {}",
+                            bootstrap_friend_ids.len(),
+                            format_classified_url(profile_url)
+                        ),
+                    );
                     let mut profile_count = 0usize;
                     for id in &bootstrap_friend_ids {
                         if let Ok(profile) = connection.fetch_agent_profile(profile_url, id).await
@@ -1236,6 +1294,14 @@ async fn run_in_process_live_feed(
                             });
                         }
                     }
+                    push_protocol_event(
+                        &mut protocol_events,
+                        format!(
+                            "AgentProfile:ok resolved={} {}",
+                            profile_count,
+                            format_classified_url(profile_url)
+                        ),
+                    );
                     emit_relay(
                         &tx,
                         RuntimeRelayLevel::Info,
@@ -1266,6 +1332,16 @@ async fn run_in_process_live_feed(
         update_live_visual_from_connection(&mut snapshot, &connection);
         snapshot.source = String::from("viewer_app_in_process:ready");
         emit_object_feed_startup_summary(&tx, &snapshot, &connection);
+        emit_parallel_protocol_summary(
+            &tx,
+            &connection,
+            "startup",
+            &capability_inventory_summary,
+            &protocol_events,
+            event_queue_url.as_deref(),
+            event_ack,
+            0,
+        );
         let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
         let _ = tx.send(LiveFeedUpdate::WorldAvatars {
             avatars: extract_worker_world_avatar_samples(&connection, &local_agent_id),
@@ -1876,6 +1952,14 @@ async fn run_in_process_live_feed(
                 {
                     let url = url.to_string();
                     let ack = event_ack;
+                    push_protocol_event(
+                        &mut protocol_events,
+                        format!(
+                            "EventQueueGet:start ack={} {}",
+                            ack,
+                            format_classified_url(&url)
+                        ),
+                    );
                     let timeout =
                         std::time::Duration::from_millis(config.event_queue_poll_timeout_ms);
                     event_queue_poll_task = Some(tokio::spawn(async move {
@@ -1890,9 +1974,19 @@ async fn run_in_process_live_feed(
                     match task.await {
                         Ok(Ok(poll)) => {
                             event_queue_consecutive_failures = 0;
+                            let previous_ack = event_ack;
                             if let Some(next_ack) = poll.id {
                                 event_ack = next_ack;
                             }
+                            push_protocol_event(
+                                &mut protocol_events,
+                                format!(
+                                    "EventQueueGet:ok ack_in={} ack_out={} events={}",
+                                    previous_ack,
+                                    event_ack,
+                                    poll.events.len()
+                                ),
+                            );
                             for message in connection.extract_nearby_chat_messages(&poll) {
                                 let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
                                     id: now_unix_ms(),
@@ -1906,6 +2000,13 @@ async fn run_in_process_live_feed(
                         Ok(Err(err)) => {
                             event_queue_consecutive_failures =
                                 event_queue_consecutive_failures.saturating_add(1);
+                            push_protocol_event(
+                                &mut protocol_events,
+                                format!(
+                                    "EventQueueGet:err count={} {}",
+                                    event_queue_consecutive_failures, err
+                                ),
+                            );
                             let should_log = event_queue_consecutive_failures == 1
                                 || event_queue_consecutive_failures.is_multiple_of(10);
                             if should_log {
@@ -1936,6 +2037,10 @@ async fn run_in_process_live_feed(
                             }
                         }
                         Err(join_err) => {
+                            push_protocol_event(
+                                &mut protocol_events,
+                                format!("EventQueueGet:task_err {join_err}"),
+                            );
                             emit_relay(
                                 &tx,
                                 RuntimeRelayLevel::Warn,
@@ -1987,6 +2092,14 @@ async fn run_in_process_live_feed(
                 if !unresolved_ids.is_empty() {
                     let mut resolved_any = false;
                     if let Some(url) = display_names_url.as_deref() {
+                        push_protocol_event(
+                            &mut protocol_events,
+                            format!(
+                                "GetDisplayNames:start ids={} {}",
+                                unresolved_ids.len(),
+                                format_classified_url(url)
+                            ),
+                        );
                         match connection
                             .resolve_avatar_display_names(url, &unresolved_ids)
                             .await
@@ -1995,6 +2108,14 @@ async fn run_in_process_live_feed(
                                 if !names.is_empty() {
                                     resolved_any = true;
                                 }
+                                push_protocol_event(
+                                    &mut protocol_events,
+                                    format!(
+                                        "GetDisplayNames:ok resolved={} {}",
+                                        names.len(),
+                                        format_classified_url(url)
+                                    ),
+                                );
                                 for entry in names {
                                     known_avatar_name_ids.insert(entry.id.clone());
                                     if bootstrap_friend_id_set.contains(&entry.id) {
@@ -2013,6 +2134,13 @@ async fn run_in_process_live_feed(
                                 }
                             }
                             Err(err) => {
+                                push_protocol_event(
+                                    &mut protocol_events,
+                                    format!(
+                                        "GetDisplayNames:err {err} {}",
+                                        format_classified_url(url)
+                                    ),
+                                );
                                 emit_relay(
                                     &tx,
                                     RuntimeRelayLevel::Warn,
@@ -2023,6 +2151,14 @@ async fn run_in_process_live_feed(
                         }
                     }
                     if !resolved_any && let Some(profile_url) = agent_profile_url.as_deref() {
+                        push_protocol_event(
+                            &mut protocol_events,
+                            format!(
+                                "AgentProfile:start ids={} {}",
+                                unresolved_ids.len(),
+                                format_classified_url(profile_url)
+                            ),
+                        );
                         let mut profile_resolved = 0usize;
                         for id in &unresolved_ids {
                             if let Ok(profile) =
@@ -2046,6 +2182,14 @@ async fn run_in_process_live_feed(
                                 }
                             }
                         }
+                        push_protocol_event(
+                            &mut protocol_events,
+                            format!(
+                                "AgentProfile:ok resolved={} {}",
+                                profile_resolved,
+                                format_classified_url(profile_url)
+                            ),
+                        );
                         if profile_resolved > 0 {
                             emit_relay(
                                 &tx,
@@ -2061,10 +2205,34 @@ async fn run_in_process_live_feed(
                 }
             }
             if !first_sim_socket_steady_state_summary_emitted && social_circuit.is_some() {
+                if let Some(circuit) = social_circuit.as_ref() {
+                    let _ = flush_pending_first_sim_ack_ids(
+                        &mut connection,
+                        circuit,
+                        &tx,
+                        "after_first_steady_state_window",
+                    )
+                    .await;
+                }
                 emit_first_simulator_socket_summary(
                     &tx,
                     &connection,
                     "after_first_steady_state_window",
+                );
+                emit_first_simulator_forensics_summary(
+                    &tx,
+                    &connection,
+                    "after_first_steady_state_window",
+                );
+                emit_parallel_protocol_summary(
+                    &tx,
+                    &connection,
+                    "after_first_steady_state_window",
+                    &capability_inventory_summary,
+                    &protocol_events,
+                    event_queue_url.as_deref(),
+                    event_ack,
+                    event_queue_consecutive_failures,
                 );
                 first_sim_socket_steady_state_summary_emitted = true;
             }
@@ -2452,6 +2620,7 @@ fn emit_object_feed_startup_summary(
             receive_kinds,
         ),
     );
+    emit_first_simulator_forensics_summary(tx, connection, "startup");
 }
 
 fn emit_object_feed_tick_summary(tx: &mpsc::Sender<LiveFeedUpdate>, snapshot: &LiveVisualSnapshot) {
@@ -2499,6 +2668,68 @@ fn emit_first_simulator_socket_summary(
             summary.reused_retained_probe_events,
             summary.send_events,
             summary.receive_events,
+        ),
+    );
+}
+
+fn emit_first_simulator_forensics_summary(
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    connection: &Connection,
+    label: &str,
+) {
+    let ack = connection.summarize_first_simulator_ack_forensics();
+    let receive = connection.summarize_first_simulator_receive_forensics();
+    let timeline = connection.summarize_first_simulator_startup_timeline();
+    let transcript = connection.summarize_first_simulator_startup_transcript(8);
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "first_sim_forensics",
+        &format!(
+            "{label} ack: pending={} preview={} appended_sends={} last_appended={} explicit_packet_ack={} first_packet_ack_idx={}",
+            ack.pending_ack_count,
+            format_u32_list_hex(&ack.pending_ack_ids_preview),
+            ack.outbound_appended_ack_sends,
+            format_u32_list_hex(&ack.outbound_appended_ack_ids_last),
+            ack.explicit_packet_ack_receives,
+            format_optional_index(ack.first_packet_ack_receive_index),
+        ),
+    );
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "first_sim_forensics",
+        &format!(
+            "{label} recv: obs={} raw={} unclassified={} typed={}",
+            receive.receive_observations,
+            format_message_number_counts(&receive.raw_packet_message_numbers),
+            format_message_number_counts(&receive.unclassified_packet_message_numbers),
+            format_receive_kind_counts(&receive.typed_kind_counts),
+        ),
+    );
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "first_sim_forensics",
+        &format!(
+            "{label} timeline: region_handshake={} region_handshake_reply={} amc={} packet_ack={} camera_constraint={} generic_message={} object_update={}",
+            format_optional_index(timeline.first_region_handshake_index),
+            format_optional_index(timeline.first_region_handshake_reply_index),
+            format_optional_index(timeline.first_agent_movement_complete_index),
+            format_optional_index(timeline.first_packet_ack_index),
+            format_optional_index(timeline.first_camera_constraint_index),
+            format_optional_index(timeline.first_generic_message_index),
+            format_optional_index(timeline.first_object_update_index),
+        ),
+    );
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "first_sim_forensics",
+        &format!(
+            "{label} transcript: sends={} receives={}",
+            format_transcript_side(&transcript.send_events),
+            format_transcript_side(&transcript.receive_events),
         ),
     );
 }
@@ -2555,6 +2786,161 @@ fn summarize_receive_kinds(connection: &Connection) -> String {
         .map(|(kind, count)| format!("{kind}:{count}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn format_optional_index(index: Option<usize>) -> String {
+    index
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| String::from("none"))
+}
+
+fn format_u32_list_hex(values: &[u32]) -> String {
+    if values.is_empty() {
+        return String::from("none");
+    }
+    values
+        .iter()
+        .map(|value| format!("0x{value:08x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_message_number_counts(entries: &[(u32, usize)]) -> String {
+    if entries.is_empty() {
+        return String::from("none");
+    }
+    entries
+        .iter()
+        .map(|(message_number, count)| format!("0x{message_number:08x}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_receive_kind_counts(
+    entries: &[(viewer_net::FirstSimulatorInboundMessageKind, usize)],
+) -> String {
+    if entries.is_empty() {
+        return String::from("none");
+    }
+    entries
+        .iter()
+        .map(|(kind, count)| format!("{kind:?}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_transcript_side(entries: &[String]) -> String {
+    if entries.is_empty() {
+        return String::from("none");
+    }
+    entries.join(" | ")
+}
+
+fn push_protocol_event(events: &mut Vec<String>, entry: impl Into<String>) {
+    const MAX_PROTOCOL_EVENTS: usize = 24;
+    if events.len() >= MAX_PROTOCOL_EVENTS {
+        events.remove(0);
+    }
+    events.push(entry.into());
+}
+
+fn format_capability_url_family(family: CapabilityUrlFamily) -> &'static str {
+    match family {
+        CapabilityUrlFamily::SimulatorHost12043 => "simhost:12043",
+        CapabilityUrlFamily::SimulatorHost12046 => "simhost:12046",
+        CapabilityUrlFamily::AssetCdn => "asset-cdn",
+        CapabilityUrlFamily::BakeTextureCdn => "bake-texture-cdn",
+        CapabilityUrlFamily::MapCdn => "map-cdn",
+        CapabilityUrlFamily::PhoenixViewer => "phoenixviewer",
+        CapabilityUrlFamily::Analytics => "analytics",
+        CapabilityUrlFamily::GenericWeb => "generic-web",
+        CapabilityUrlFamily::Unknown => "unknown",
+    }
+}
+
+fn format_classified_url(url: &str) -> String {
+    let classification = classify_capability_url(url);
+    let host = classification.host.unwrap_or_else(|| String::from("?"));
+    match classification.port {
+        Some(port) => format!(
+            "{}@{}:{}",
+            format_capability_url_family(classification.family),
+            host,
+            port
+        ),
+        None => format!(
+            "{}@{}",
+            format_capability_url_family(classification.family),
+            host
+        ),
+    }
+}
+
+fn summarize_seed_capability_inventory(entries: &[SeedCapabilityInventoryEntry]) -> String {
+    if entries.is_empty() {
+        return String::from("none");
+    }
+
+    let mut family_counts = BTreeMap::<String, usize>::new();
+    for entry in entries {
+        let family = format_capability_url_family(entry.classification.family).to_string();
+        *family_counts.entry(family).or_default() += 1;
+    }
+
+    let families = family_counts
+        .into_iter()
+        .map(|(family, count)| format!("{family}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let entries_text = entries
+        .iter()
+        .map(|entry| {
+            let host = entry.classification.host.as_deref().unwrap_or("?");
+            let family = format_capability_url_family(entry.classification.family);
+            match entry.classification.port {
+                Some(port) => format!("{}={family}@{host}:{port}", entry.name),
+                None => format!("{}={family}@{host}", entry.name),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("families={families} entries={entries_text}")
+}
+
+fn emit_parallel_protocol_summary(
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    connection: &Connection,
+    label: &str,
+    capability_inventory: &str,
+    protocol_events: &[String],
+    event_queue_url: Option<&str>,
+    event_ack: u64,
+    event_queue_consecutive_failures: u32,
+) {
+    let region = connection.summarize_region_transition_control();
+    let event_queue = event_queue_url
+        .map(format_classified_url)
+        .unwrap_or_else(|| String::from("none"));
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "parallel_protocol",
+        &format!("{label} caps: {capability_inventory}"),
+    );
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "parallel_protocol",
+        &format!(
+            "{label} flow: event_queue_url={event_queue} event_ack={} eq_failures={} region_ctrl={} crossed={} confirm={} events={}",
+            event_ack,
+            event_queue_consecutive_failures,
+            region.observations,
+            region.crossed_region,
+            region.confirm_enable_simulator,
+            format_transcript_side(protocol_events),
+        ),
+    );
 }
 
 fn startup_social_drain_packet_budget(config: &InProcessLiveFeedConfig) -> usize {
@@ -2693,6 +3079,24 @@ async fn prime_startup_social_circuit(
         .await?;
     connection.send_retrieve_instant_messages(circuit).await?;
     drain_startup_social_circuit(connection, circuit, tx, local_agent_id, config).await
+}
+
+async fn flush_pending_first_sim_ack_ids(
+    connection: &mut Connection,
+    circuit: &SocialCircuit,
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    label: &str,
+) -> Result<(), viewer_net::ConnectionError> {
+    let flushed = connection.flush_pending_ack_ids_on_circuit(circuit).await?;
+    if flushed > 0 {
+        emit_relay(
+            tx,
+            RuntimeRelayLevel::Info,
+            "first_sim_ack",
+            &format!("{label}: flushed {flushed} pending ack ids"),
+        );
+    }
+    Ok(())
 }
 
 fn agent_update_keepalive_interval_ticks(config: &InProcessLiveFeedConfig) -> u64 {

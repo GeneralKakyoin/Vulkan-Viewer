@@ -80,6 +80,7 @@ const LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID: u8 = 13;
 const LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID: u8 = 14;
 const LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID: u8 = 15;
 const LLUDP_KILL_OBJECT_HIGH_ID: u8 = 16;
+const LLUDP_CAMERA_CONSTRAINT_HIGH_ID: u8 = 22;
 const LLUDP_AGENT_UPDATE_HIGH_ID: u8 = 4;
 const LLUDP_AGENT_ANIMATION_HIGH_ID: u8 = 5;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
@@ -890,6 +891,7 @@ pub struct FirstSimulatorHandshakeSendDiagnostic {
     pub target: String,
     pub packet_id: u32,
     pub packet_message_number: Option<u32>,
+    pub appended_ack_ids: Vec<u32>,
     pub payload_len: usize,
     pub elapsed_ms: u128,
     pub success: bool,
@@ -930,12 +932,13 @@ pub struct FirstSimulatorSocketDiagnosticSummary {
     pub split_local_port_detected: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FirstSimulatorInboundMessageKind {
     TestMessage,
     PacketAck,
     AgentMovementComplete,
     RegionHandshake,
+    RegionHandshakeReply,
     HealthMessage,
     LayerData,
     ChatFromSimulator,
@@ -948,6 +951,8 @@ pub enum FirstSimulatorInboundMessageKind {
     AttachedSound,
     CrossedRegion,
     ConfirmEnableSimulator,
+    CameraConstraint,
+    GenericMessage,
     ObjectUpdate,
     ObjectUpdateCompressed,
     ObjectUpdateCached,
@@ -1150,6 +1155,41 @@ pub struct SimulatorPayloadDecodeSummary {
     pub object_feed_recent_kills: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorAckForensicsSummary {
+    pub pending_ack_count: usize,
+    pub pending_ack_ids_preview: Vec<u32>,
+    pub outbound_appended_ack_sends: usize,
+    pub outbound_appended_ack_ids_last: Vec<u32>,
+    pub explicit_packet_ack_receives: usize,
+    pub first_packet_ack_receive_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorReceiveForensicsSummary {
+    pub receive_observations: usize,
+    pub typed_kind_counts: Vec<(FirstSimulatorInboundMessageKind, usize)>,
+    pub raw_packet_message_numbers: Vec<(u32, usize)>,
+    pub unclassified_packet_message_numbers: Vec<(u32, usize)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorStartupTimelineSummary {
+    pub first_region_handshake_index: Option<usize>,
+    pub first_region_handshake_reply_index: Option<usize>,
+    pub first_agent_movement_complete_index: Option<usize>,
+    pub first_packet_ack_index: Option<usize>,
+    pub first_camera_constraint_index: Option<usize>,
+    pub first_generic_message_index: Option<usize>,
+    pub first_object_update_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorStartupTranscriptSummary {
+    pub send_events: Vec<String>,
+    pub receive_events: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirstSimulatorHandshakeProbeReport {
     pub observations: Vec<FirstSimulatorHandshakeProbeObservation>,
@@ -1162,6 +1202,33 @@ pub struct FirstSimulatorHandshakeProbeReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SeedCapabilityMap {
     pub entries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CapabilityUrlFamily {
+    SimulatorHost12043,
+    SimulatorHost12046,
+    AssetCdn,
+    BakeTextureCdn,
+    MapCdn,
+    PhoenixViewer,
+    Analytics,
+    GenericWeb,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityUrlClassification {
+    pub family: CapabilityUrlFamily,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedCapabilityInventoryEntry {
+    pub name: String,
+    pub classification: CapabilityUrlClassification,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1622,6 +1689,197 @@ impl Connection {
 
     pub fn simulator_payload_decode_summary(&self) -> &SimulatorPayloadDecodeSummary {
         &self.simulator_payload_decode_summary
+    }
+
+    pub fn summarize_first_simulator_ack_forensics(&self) -> FirstSimulatorAckForensicsSummary {
+        let outbound_appended_ack_sends = self
+            .first_simulator_handshake_send_diagnostics
+            .iter()
+            .filter(|diag| !diag.appended_ack_ids.is_empty())
+            .count();
+        let outbound_appended_ack_ids_last = self
+            .first_simulator_handshake_send_diagnostics
+            .iter()
+            .rev()
+            .find(|diag| !diag.appended_ack_ids.is_empty())
+            .map(|diag| diag.appended_ack_ids.clone())
+            .unwrap_or_default();
+        let explicit_packet_ack_receives = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .filter(|diag| diag.kind == FirstSimulatorInboundMessageKind::PacketAck)
+            .count();
+        let first_packet_ack_receive_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::PacketAck)
+            .map(|diag| diag.observation_index);
+
+        FirstSimulatorAckForensicsSummary {
+            pending_ack_count: self.pending_first_simulator_ack_ids.len(),
+            pending_ack_ids_preview: self
+                .pending_first_simulator_ack_ids
+                .iter()
+                .take(8)
+                .copied()
+                .collect(),
+            outbound_appended_ack_sends,
+            outbound_appended_ack_ids_last,
+            explicit_packet_ack_receives,
+            first_packet_ack_receive_index,
+        }
+    }
+
+    pub fn summarize_first_simulator_receive_forensics(
+        &self,
+    ) -> FirstSimulatorReceiveForensicsSummary {
+        let mut typed_kind_counts: BTreeMap<FirstSimulatorInboundMessageKind, usize> =
+            BTreeMap::new();
+        let mut raw_packet_message_numbers: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut unclassified_packet_message_numbers: BTreeMap<u32, usize> = BTreeMap::new();
+
+        for diag in &self.first_simulator_handshake_receive_diagnostics {
+            *typed_kind_counts.entry(diag.kind).or_default() += 1;
+            if let Some(message_number) = diag.packet_message_number {
+                *raw_packet_message_numbers
+                    .entry(message_number)
+                    .or_default() += 1;
+                if diag.scope == FirstSimulatorInboundTrafficScope::Unknown
+                    || diag.kind == FirstSimulatorInboundMessageKind::Irrelevant
+                {
+                    *unclassified_packet_message_numbers
+                        .entry(message_number)
+                        .or_default() += 1;
+                }
+            }
+        }
+
+        FirstSimulatorReceiveForensicsSummary {
+            receive_observations: self.first_simulator_handshake_receive_diagnostics.len(),
+            typed_kind_counts: typed_kind_counts.into_iter().collect(),
+            raw_packet_message_numbers: raw_packet_message_numbers.into_iter().collect(),
+            unclassified_packet_message_numbers: unclassified_packet_message_numbers
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    pub fn summarize_first_simulator_startup_timeline(
+        &self,
+    ) -> FirstSimulatorStartupTimelineSummary {
+        let first_region_handshake_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::RegionHandshake)
+            .map(|diag| diag.observation_index);
+        let first_region_handshake_reply_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::RegionHandshakeReply)
+            .map(|diag| diag.observation_index);
+        let first_agent_movement_complete_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete)
+            .map(|diag| diag.observation_index);
+        let first_packet_ack_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::PacketAck)
+            .map(|diag| diag.observation_index);
+        let first_camera_constraint_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::CameraConstraint)
+            .map(|diag| diag.observation_index);
+        let first_generic_message_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| diag.kind == FirstSimulatorInboundMessageKind::GenericMessage)
+            .map(|diag| diag.observation_index);
+        let first_object_update_index = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .find(|diag| {
+                matches!(
+                    diag.kind,
+                    FirstSimulatorInboundMessageKind::ObjectUpdate
+                        | FirstSimulatorInboundMessageKind::ObjectUpdateCompressed
+                        | FirstSimulatorInboundMessageKind::ObjectUpdateCached
+                        | FirstSimulatorInboundMessageKind::ImprovedTerseObjectUpdate
+                )
+            })
+            .map(|diag| diag.observation_index);
+
+        FirstSimulatorStartupTimelineSummary {
+            first_region_handshake_index,
+            first_region_handshake_reply_index,
+            first_agent_movement_complete_index,
+            first_packet_ack_index,
+            first_camera_constraint_index,
+            first_generic_message_index,
+            first_object_update_index,
+        }
+    }
+
+    pub fn summarize_first_simulator_startup_transcript(
+        &self,
+        tail_len: usize,
+    ) -> FirstSimulatorStartupTranscriptSummary {
+        let send_events = self
+            .first_simulator_handshake_send_diagnostics
+            .iter()
+            .rev()
+            .take(tail_len)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|diag| {
+                let label = diag
+                    .packet_message_number
+                    .map(first_simulator_message_label)
+                    .unwrap_or_else(|| String::from("unknown"));
+                let ack_suffix = if diag.appended_ack_ids.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ack={}", format_u32_hex_list(&diag.appended_ack_ids))
+                };
+                format!(
+                    "{}:{}#{}",
+                    first_simulator_action_label(diag.action),
+                    label,
+                    diag.packet_id
+                ) + &ack_suffix
+            })
+            .collect();
+        let receive_events = self
+            .first_simulator_handshake_receive_diagnostics
+            .iter()
+            .rev()
+            .take(tail_len)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|diag| {
+                let label = match diag.packet_message_number {
+                    Some(message_number) => first_simulator_message_label(message_number),
+                    None => format!("{:?}", diag.kind),
+                };
+                format!("{}:{}", diag.observation_index, label)
+            })
+            .collect();
+
+        FirstSimulatorStartupTranscriptSummary {
+            send_events,
+            receive_events,
+        }
+    }
+
+    pub fn summarize_seed_capability_inventory(
+        &self,
+        map: &SeedCapabilityMap,
+    ) -> Vec<SeedCapabilityInventoryEntry> {
+        summarize_seed_capability_inventory(map)
     }
 
     fn object_feed_upsert(&mut self, local_id: u32, scale_centi: Option<[u16; 3]>) {
@@ -3554,6 +3812,36 @@ impl Connection {
             .await
     }
 
+    pub async fn flush_pending_ack_ids_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<usize, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let mut flushed = 0usize;
+        while !self.pending_first_simulator_ack_ids.is_empty() {
+            let batch_len = self
+                .pending_first_simulator_ack_ids
+                .len()
+                .min(LLUDP_MAX_APPENDED_ACKS);
+            let ack_batch = self.pending_first_simulator_ack_ids[..batch_len].to_vec();
+            let payload =
+                encode_packet_ack_payload(self.next_first_simulator_packet_id(), &ack_batch)?;
+            self.send_first_simulator_handshake_datagram_with_socket(
+                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                &circuit.target,
+                &payload,
+                &circuit.socket,
+            )
+            .await?;
+            self.pending_first_simulator_ack_ids
+                .drain(0..ack_batch.len());
+            flushed = flushed.saturating_add(ack_batch.len());
+        }
+        Ok(flushed)
+    }
+
     pub async fn send_agent_update_on_circuit(
         &mut self,
         circuit: &SocialCircuit,
@@ -4279,6 +4567,7 @@ impl Connection {
                         target: target_text.clone(),
                         packet_id,
                         packet_message_number,
+                        appended_ack_ids: ack_batch.clone(),
                         payload_len: outbound_payload.len(),
                         elapsed_ms: 0,
                         success: false,
@@ -4316,6 +4605,7 @@ impl Connection {
                         target: target_text,
                         packet_id,
                         packet_message_number,
+                        appended_ack_ids: ack_batch,
                         payload_len: outbound_payload.len(),
                         elapsed_ms,
                         success: true,
@@ -4335,6 +4625,7 @@ impl Connection {
                         target: target_text.clone(),
                         packet_id,
                         packet_message_number,
+                        appended_ack_ids: ack_batch,
                         payload_len: outbound_payload.len(),
                         elapsed_ms,
                         success: false,
@@ -4354,6 +4645,7 @@ impl Connection {
                         target: target_text.clone(),
                         packet_id,
                         packet_message_number,
+                        appended_ack_ids: ack_batch,
                         payload_len: outbound_payload.len(),
                         elapsed_ms,
                         success: false,
@@ -4723,6 +5015,22 @@ fn encode_agent_data_update_request_payload(
     Ok(encode_lludp_low_frequency_packet(
         packet_id,
         LLUDP_AGENT_DATA_UPDATE_REQUEST_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_packet_ack_payload(packet_id: u32, ack_ids: &[u32]) -> Result<Vec<u8>, ConnectionError> {
+    let ack_count = u8::try_from(ack_ids.len()).map_err(|_| {
+        ConnectionError::CapabilityDecode(String::from("too many packet ack ids in one datagram"))
+    })?;
+    let mut body = Vec::with_capacity(1 + ack_ids.len() * 4);
+    body.push(ack_count);
+    for ack_id in ack_ids {
+        body.extend_from_slice(&ack_id.to_le_bytes());
+    }
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_PACKET_ACK_LOW_ID,
         &body,
     ))
 }
@@ -5323,6 +5631,15 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::RegionHandshakeReply,
+                scope: FirstSimulatorInboundTrafficScope::BootstrapRelevant,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::HealthMessage,
@@ -5426,6 +5743,24 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == u32::from(LLUDP_CAMERA_CONSTRAINT_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::CameraConstraint,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_GENERIC_MESSAGE_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::GenericMessage,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         _ => None,
     }
 }
@@ -5472,6 +5807,157 @@ fn to_region_transition_control_kind(
         }
         _ => None,
     }
+}
+
+fn first_simulator_action_label(action: FirstSimulatorHandshakeAction) -> &'static str {
+    match action {
+        FirstSimulatorHandshakeAction::UseCircuitCode => "send",
+        FirstSimulatorHandshakeAction::CompleteAgentMovement => "send",
+    }
+}
+
+fn first_simulator_message_label(message_number: u32) -> String {
+    let name = match message_number {
+        num if num == u32::from(LLUDP_USE_CIRCUIT_CODE_LOW_ID) => "UseCircuitCode",
+        num if num == lludp_low_frequency_message_number(LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID) => {
+            "CompleteAgentMovement"
+        }
+        num if num == u32::from(LLUDP_OBJECT_UPDATE_HIGH_ID) => "ObjectUpdate",
+        num if num == u32::from(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID) => "ObjectUpdateCompressed",
+        num if num == u32::from(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID) => "ObjectUpdateCached",
+        num if num == u32::from(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID) => {
+            "ImprovedTerseObjectUpdate"
+        }
+        num if num == u32::from(LLUDP_KILL_OBJECT_HIGH_ID) => "KillObject",
+        num if num == lludp_low_frequency_message_number(LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID) => {
+            "AgentMovementComplete"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_TEST_MESSAGE_LOW_ID) => {
+            "TestMessage"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID) => "PacketAck",
+        num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) => {
+            "RegionHandshake"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID) => {
+            "RegionHandshakeReply"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_GENERIC_MESSAGE_LOW_ID) => {
+            "GenericMessage"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) => {
+            "HealthMessage"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID) => {
+            "ChatFromSimulator"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID) => {
+            "SimulatorViewerTimeMessage"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_ENABLE_SIMULATOR_LOW_ID) => {
+            "EnableSimulator"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_AGENT_DATA_UPDATE_LOW_ID) => {
+            "AgentDataUpdate"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_AGENT_THROTTLE_LOW_ID) => {
+            "AgentThrottle"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID) => {
+            "AgentHeightWidth"
+        }
+        num if num == u32::from(LLUDP_AGENT_UPDATE_HIGH_ID) => "AgentUpdate",
+        num if num == u32::from(LLUDP_AGENT_ANIMATION_HIGH_ID) => "AgentAnimation",
+        num if num == lludp_low_frequency_message_number(LLUDP_SET_ALWAYS_RUN_LOW_ID) => {
+            "SetAlwaysRun"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_MUTE_LIST_REQUEST_LOW_ID) => {
+            "MuteListRequest"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_MONEY_BALANCE_REQUEST_LOW_ID) => {
+            "MoneyBalanceRequest"
+        }
+        num if num
+            == lludp_low_frequency_message_number(LLUDP_AGENT_DATA_UPDATE_REQUEST_LOW_ID) =>
+        {
+            "AgentDataUpdateRequest"
+        }
+        num if num == lludp_low_frequency_message_number(LLUDP_ONLINE_NOTIFICATION_LOW_ID) => {
+            "OnlineNotification"
+        }
+        num if num == lludp_medium_frequency_message_number(LLUDP_VIEWER_EFFECT_MEDIUM_ID) => {
+            "ViewerEffect"
+        }
+        num if num
+            == lludp_medium_frequency_message_number(LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID) =>
+        {
+            "CoarseLocationUpdate"
+        }
+        num if num == lludp_medium_frequency_message_number(LLUDP_ATTACHED_SOUND_MEDIUM_ID) => {
+            "AttachedSound"
+        }
+        num if num == lludp_medium_frequency_message_number(LLUDP_CROSSED_REGION_MEDIUM_ID) => {
+            "CrossedRegion"
+        }
+        num if num
+            == lludp_medium_frequency_message_number(LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID) =>
+        {
+            "ConfirmEnableSimulator"
+        }
+        num if num == u32::from(LLUDP_CAMERA_CONSTRAINT_HIGH_ID) => "CameraConstraint",
+        num if num == u32::from(LLUDP_LAYER_DATA_HIGH_ID) => "LayerData",
+        _ => "Unknown",
+    };
+    format!("{name}(0x{message_number:08x})")
+}
+
+fn format_u32_hex_list(values: &[u32]) -> String {
+    values
+        .iter()
+        .map(|value| format!("0x{value:08x}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub fn classify_capability_url(url: &str) -> CapabilityUrlClassification {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return CapabilityUrlClassification::default();
+    };
+    let host = parsed.host_str().map(|value| value.to_ascii_lowercase());
+    let port = parsed.port_or_known_default();
+    let family = match (host.as_deref(), port) {
+        (Some(host), Some(12043))
+            if host.starts_with("simhost-") || host.ends_with(".agni.secondlife.io") =>
+        {
+            CapabilityUrlFamily::SimulatorHost12043
+        }
+        (Some(host), Some(12046))
+            if host.starts_with("simhost-") || host.ends_with(".agni.secondlife.io") =>
+        {
+            CapabilityUrlFamily::SimulatorHost12046
+        }
+        (Some(host), _) if host.contains("asset-cdn.") => CapabilityUrlFamily::AssetCdn,
+        (Some(host), _) if host.contains("bake-texture.") => CapabilityUrlFamily::BakeTextureCdn,
+        (Some(host), _) if host.contains("maps-cdn") => CapabilityUrlFamily::MapCdn,
+        (Some(host), _) if host.contains("phoenixviewer.com") => CapabilityUrlFamily::PhoenixViewer,
+        (Some(host), _) if host.contains("google-analytics.com") => CapabilityUrlFamily::Analytics,
+        (Some(_), Some(80 | 443)) => CapabilityUrlFamily::GenericWeb,
+        (Some(_), _) => CapabilityUrlFamily::GenericWeb,
+        _ => CapabilityUrlFamily::Unknown,
+    };
+    CapabilityUrlClassification { family, host, port }
+}
+
+pub fn summarize_seed_capability_inventory(
+    map: &SeedCapabilityMap,
+) -> Vec<SeedCapabilityInventoryEntry> {
+    map.entries
+        .iter()
+        .map(|(name, url)| SeedCapabilityInventoryEntry {
+            name: name.clone(),
+            classification: classify_capability_url(url),
+        })
+        .collect()
 }
 
 fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocationUpdate> {
@@ -9604,6 +10090,19 @@ mod tests {
         );
         assert_eq!(region.packet_message_number, Some(0xffff0094));
 
+        let region_reply =
+            classify_first_simulator_inbound_message(&make_low_frequency_packet(149));
+        assert_eq!(
+            region_reply.kind,
+            FirstSimulatorInboundMessageKind::RegionHandshakeReply
+        );
+        assert_eq!(
+            region_reply.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+        );
+        assert_eq!(region_reply.signal, "packet:0xffff0095");
+        assert_eq!(region_reply.packet_message_number, Some(0xffff0095));
+
         let health = classify_first_simulator_inbound_message(&make_low_frequency_packet(138));
         assert_eq!(health.kind, FirstSimulatorInboundMessageKind::HealthMessage);
         assert_eq!(
@@ -9788,6 +10287,32 @@ mod tests {
             to_region_transition_control_kind(confirm_enable.kind),
             Some(RegionTransitionControlKind::ConfirmEnableSimulator)
         );
+
+        let camera_constraint =
+            classify_first_simulator_inbound_message(&make_high_frequency_packet(22));
+        assert_eq!(
+            camera_constraint.kind,
+            FirstSimulatorInboundMessageKind::CameraConstraint
+        );
+        assert_eq!(
+            camera_constraint.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(camera_constraint.signal, "packet:0x00000016");
+        assert_eq!(camera_constraint.packet_message_number, Some(0x00000016));
+
+        let generic_message =
+            classify_first_simulator_inbound_message(&make_low_frequency_packet(261));
+        assert_eq!(
+            generic_message.kind,
+            FirstSimulatorInboundMessageKind::GenericMessage
+        );
+        assert_eq!(
+            generic_message.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(generic_message.signal, "packet:0xffff0105");
+        assert_eq!(generic_message.packet_message_number, Some(0xffff0105));
 
         let json_fallback =
             classify_first_simulator_inbound_message(br#"{"message":"AgentMovementComplete"}"#);
@@ -11306,6 +11831,263 @@ mod tests {
         );
         assert_eq!(update[update.len() - 1], 2);
         assert!(connection.pending_first_simulator_ack_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flush_pending_ack_ids_on_circuit_sends_explicit_packet_ack_and_drains_queue() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (ack_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("PacketAck should arrive");
+            buf[..ack_len].to_vec()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection.pending_first_simulator_ack_ids = vec![0x01020304, 0x05060708];
+
+        let flushed = connection
+            .flush_pending_ack_ids_on_circuit(&circuit)
+            .await
+            .expect("ack flush should send");
+
+        let ack_packet = listener_task.await.expect("listener should complete");
+        let header =
+            decode_first_simulator_packet_header(&ack_packet).expect("ack packet should decode");
+        let body = header.body(&ack_packet).expect("ack body should decode");
+
+        assert_eq!(
+            header.message_number,
+            lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID)
+        );
+        assert_eq!(body[0], 2);
+        assert_eq!(
+            u32::from_le_bytes(body[1..5].try_into().unwrap()),
+            0x01020304
+        );
+        assert_eq!(
+            u32::from_le_bytes(body[5..9].try_into().unwrap()),
+            0x05060708
+        );
+        assert_eq!(flushed, 2);
+        assert!(connection.pending_first_simulator_ack_ids.is_empty());
+    }
+
+    #[test]
+    fn summarize_first_simulator_ack_forensics_reports_pending_and_appended_ack_state() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.pending_first_simulator_ack_ids = vec![0x01020304, 0x05060708];
+        connection.first_simulator_handshake_send_diagnostics.push(
+            FirstSimulatorHandshakeSendDiagnostic {
+                action: FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                target: String::from("127.0.0.1:13001"),
+                packet_id: 7,
+                packet_message_number: Some(u32::from(LLUDP_AGENT_UPDATE_HIGH_ID)),
+                appended_ack_ids: vec![0x0A0B0C0D],
+                payload_len: 42,
+                elapsed_ms: 1,
+                success: true,
+                error: None,
+            },
+        );
+        connection
+            .first_simulator_handshake_receive_diagnostics
+            .push(FirstSimulatorHandshakeReceiveDiagnostic {
+                observation_index: 3,
+                kind: FirstSimulatorInboundMessageKind::PacketAck,
+                scope: FirstSimulatorInboundTrafficScope::TransportControl,
+                payload_len: 12,
+                stage_before: None,
+                stage_after: None,
+                advanced_stage: false,
+                signal: String::from("packet:0xfffffffb"),
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(lludp_low_frequency_message_number(
+                    LLUDP_PACKET_ACK_LOW_ID,
+                )),
+            });
+
+        let summary = connection.summarize_first_simulator_ack_forensics();
+
+        assert_eq!(summary.pending_ack_count, 2);
+        assert_eq!(
+            summary.pending_ack_ids_preview,
+            vec![0x01020304, 0x05060708]
+        );
+        assert_eq!(summary.outbound_appended_ack_sends, 1);
+        assert_eq!(summary.outbound_appended_ack_ids_last, vec![0x0A0B0C0D]);
+        assert_eq!(summary.explicit_packet_ack_receives, 1);
+        assert_eq!(summary.first_packet_ack_receive_index, Some(3));
+    }
+
+    #[test]
+    fn summarize_first_simulator_receive_forensics_and_timeline_report_observed_packets() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        connection
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(
+                LLUDP_REGION_HANDSHAKE_LOW_ID,
+            ))
+            .expect("region handshake should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(
+                LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID,
+            ))
+            .expect("region handshake reply should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(
+                LLUDP_PACKET_ACK_LOW_ID,
+            ))
+            .expect("packet ack should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(
+                LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID,
+            ))
+            .expect("agent movement complete should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_high_frequency_packet(
+                LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID,
+            ))
+            .expect("object update cached should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_high_frequency_packet(
+                LLUDP_CAMERA_CONSTRAINT_HIGH_ID,
+            ))
+            .expect("camera constraint should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_low_frequency_packet(
+                LLUDP_GENERIC_MESSAGE_LOW_ID,
+            ))
+            .expect("generic message should observe");
+        connection
+            .observe_first_simulator_inbound_payload(&make_medium_frequency_packet(0x99))
+            .expect("unknown packet should observe");
+
+        let receive_summary = connection.summarize_first_simulator_receive_forensics();
+        let timeline = connection.summarize_first_simulator_startup_timeline();
+        let transcript = connection.summarize_first_simulator_startup_transcript(4);
+
+        assert_eq!(receive_summary.receive_observations, 8);
+        assert!(
+            receive_summary
+                .typed_kind_counts
+                .iter()
+                .any(
+                    |(kind, count)| *kind == FirstSimulatorInboundMessageKind::RegionHandshake
+                        && *count == 1
+                )
+        );
+        assert!(receive_summary.raw_packet_message_numbers.iter().any(
+            |(message_number, count)| *message_number
+                == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID)
+                && *count == 1
+        ));
+        assert_eq!(receive_summary.unclassified_packet_message_numbers.len(), 1);
+        assert_eq!(timeline.first_region_handshake_index, Some(1));
+        assert_eq!(timeline.first_region_handshake_reply_index, Some(2));
+        assert_eq!(timeline.first_packet_ack_index, Some(3));
+        assert_eq!(timeline.first_agent_movement_complete_index, Some(4));
+        assert_eq!(timeline.first_camera_constraint_index, Some(6));
+        assert_eq!(timeline.first_generic_message_index, Some(7));
+        assert_eq!(timeline.first_object_update_index, Some(5));
+        assert_eq!(transcript.receive_events.len(), 4);
+    }
+
+    #[test]
+    fn capability_url_classification_groups_simhost_and_cdn_families() {
+        let simhost = classify_capability_url(
+            "https://simhost-01eb29dc5b0bc96b7.agni.secondlife.io:12043/cap/example",
+        );
+        assert_eq!(simhost.family, CapabilityUrlFamily::SimulatorHost12043);
+        assert_eq!(
+            simhost.host.as_deref(),
+            Some("simhost-01eb29dc5b0bc96b7.agni.secondlife.io")
+        );
+        assert_eq!(simhost.port, Some(12043));
+
+        let asset_cdn =
+            classify_capability_url("http://asset-cdn.glb.agni.lindenlab.com/?texture_id=test");
+        assert_eq!(asset_cdn.family, CapabilityUrlFamily::AssetCdn);
+
+        let bake = classify_capability_url(
+            "http://bake-texture.glb.agni.lindenlab.com/texture/avatar/head/hash",
+        );
+        assert_eq!(bake.family, CapabilityUrlFamily::BakeTextureCdn);
+
+        let inventory = summarize_seed_capability_inventory(&SeedCapabilityMap {
+            entries: BTreeMap::from([
+                (
+                    String::from("EventQueueGet"),
+                    String::from(
+                        "https://simhost-01eb29dc5b0bc96b7.agni.secondlife.io:12043/cap/event",
+                    ),
+                ),
+                (
+                    String::from("GetTexture"),
+                    String::from("http://asset-cdn.glb.agni.lindenlab.com/?texture_id=test"),
+                ),
+            ]),
+        });
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(
+            inventory[0].classification.family,
+            CapabilityUrlFamily::SimulatorHost12043
+        );
+        assert_eq!(
+            inventory[1].classification.family,
+            CapabilityUrlFamily::AssetCdn
+        );
     }
 
     #[test]
