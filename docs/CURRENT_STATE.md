@@ -3,6 +3,77 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (Object Ingress ACK/Receive Planning)
+- **Remaining concerns are now unified in one plan**: `docs/plans/PLAN_OBJECT_INGRESS_ACK_AND_RECEIVE_FORENSICS_2026-03-30.md` addresses ACK timing, receive-path observability gaps, `RegionHandshake` progression, and startup ordering as one staged investigation surface.
+- **Next step is observability, not another startup message**: after `AgentHeightWidth`, `SetAlwaysRun`, and the observed startup `AgentAnimation` all failed independently, the next approved direction is bounded ACK/control/receive transcript instrumentation on the same one-port path.
+
+## Latest Notable Changes (Object Ingress AgentAnimation)
+- **Third control-block promotion added**: `viewer_net` now sends the observed startup `AgentAnimation` packet in the control flow after `AgentUpdate` and before `SetAlwaysRun`.
+- **Targeted coverage updated**: startup interest tests now lock the ordered quintet `AgentThrottle` -> `AgentHeightWidth` -> `AgentUpdate` -> `AgentAnimation` -> `SetAlwaysRun`.
+- **Connected result remained blocked**: the bounded March 30, 2026 run stayed on one port (`59553`, `split=false`), but `update_messages=0 total_objects=0 region_handshake_updates=0` still did not change.
+- **Current state**: the staged control-block message promotions are now exhausted without restoring object ingress. The next likely blocker is ACK/control-reply behavior rather than another single startup message.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured log: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Object Ingress SetAlwaysRun)
+- **Second control-block promotion added**: `viewer_net` now sends `SetAlwaysRun` (`Low 88`) in the startup control flow after `AgentUpdate`.
+- **Targeted coverage updated**: startup interest tests now lock the ordered quartet `AgentThrottle` -> `AgentHeightWidth` -> `AgentUpdate` -> `SetAlwaysRun`.
+- **Connected result remained blocked**: the bounded March 30, 2026 run stayed on one port (`49475`, `split=false`) and showed `SetAlwaysRun` on-wire (`0xffff0058`), but `update_messages=0 total_objects=0 region_handshake_updates=0` still did not change.
+- **Current state**: `SetAlwaysRun` alone is not sufficient. The later `AgentAnimation` promotion is now also ruled out as a sufficient fix.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Object Ingress AgentHeightWidth)
+- **First control-block promotion added**: `viewer_net` now sends `AgentHeightWidth` (`Low 83`) in startup interest flow, placed after `AgentThrottle` and before `AgentUpdate`.
+- **Targeted coverage updated**: startup interest tests now lock the ordered trio `AgentThrottle` -> `AgentHeightWidth` -> `AgentUpdate`.
+- **Connected result remained blocked**: the bounded March 30, 2026 run stayed on one port (`63178`, `split=false`), but `update_messages=0 total_objects=0 region_handshake_updates=0` still did not change.
+- **Current state**: `AgentHeightWidth` alone is not sufficient. The later `SetAlwaysRun` promotion is now also ruled out as a sufficient fix.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured log: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Object Ingress Control-Block Planning)
+- **New Firestorm pcap refined the working pre-burst block**: `Test.pcapng` on `16.144.39.130:13001` shows a richer working sequence than the earlier captures, including `AgentHeightWidth` between `AgentThrottle` and `AgentUpdate`.
+- **Next plan is deliberately incremental**: `docs/plans/PLAN_OBJECT_INGRESS_CONTROL_BLOCK_PARITY_2026-03-30.md` stages the control-block work so we add one packet at a time instead of mirroring the whole block.
+- **First promotion candidate is explicit**: `AgentHeightWidth` (`Low 83`) is the next smallest newly confirmed missing packet on the working Firestorm path.
+
+## Latest Notable Changes (Object Ingress Post-AMC Request Parity)
+- **Bounded startup request subset added**: `viewer_net` and `viewer_app` now send startup `MuteListRequest`, `MoneyBalanceRequest`, and `AgentDataUpdateRequest` on the active retained first-simulator circuit.
+- **`LayerData` is now a named inbound kind**: first-simulator classification can now surface `LayerData` in startup receive summaries instead of leaving it implicit in packet captures.
+- **Connected result remained blocked**: the bounded March 30, 2026 run on local port `53392` showed the new startup requests on-wire (`0xffff0106`, `0xffff0139`, `0xffff0182`) but still reported `update_messages=0 total_objects=0 region_handshake_updates=0`.
+- **Current state**: the narrowed startup request subset is not sufficient by itself. The first staged control-block promotion (`AgentHeightWidth`) is now also ruled out as a sufficient fix.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Object Ingress Runtime Socket Forensics)
+- **Bounded first-simulator socket diagnostics added**: `viewer_net` now records first-simulator probe bind, fresh bind, retain, reuse, send, and receive events with local address/port context.
+- **Worker relay summaries added**: `viewer_app` now emits startup and first-steady-state socket summaries so connected runs expose the actual local UDP port path.
+- **Live runtime question answered**: the bounded March 30, 2026 connected run showed a single local port `65241` across `after_probe`, `after_open_social_circuit`, `after_startup_social_prime`, and `after_first_steady_state_window`, all with `split=false`.
+- **Blocked state remained unchanged**: even on that one-port path, `object_feed` stayed `update_messages=0 total_objects=0 region_handshake_updates=0`.
+- **Wire evidence refined the blocker further**: `improved.pcapng` confirms the app receives same-port simulator traffic including repeated `LayerData`, `CoarseLocationUpdate`, `AttachedSound`, `ViewerEffect`, `TestMessage`, `SimulatorViewerTimeMessage`, `ChatFromSimulator`, `AgentDataUpdate`, and `AgentMovementComplete`, but still no `ObjectUpdate*`.
+- **Current state**: runtime split-port/socket continuity is no longer the best live explanation for missing object ingress on the current code path. The completed next slice was `docs/plans/PLAN_OBJECT_INGRESS_POST_AMC_REQUEST_PARITY_2026-03-30.md`.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
 ## Latest Notable Changes (Object Ingress PCAP Forensics)
 - **Preserved runtime evidence added**: the Firestorm and app packet captures are now preserved under `artifacts/pcaps/` with a manifest and stable sha256 hashes.
 - **Firestorm pre-burst sequence externally confirmed**: the preserved Firestorm capture on `16.144.39.130:13001` shows `AgentUpdate`, `AgentAnimation`, `SetAlwaysRun`, `PacketAck`, `MuteListRequest`, `MoneyBalanceRequest`, and `AgentDataUpdateRequest` immediately before the first `ObjectUpdateCached` burst.

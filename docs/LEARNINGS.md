@@ -450,3 +450,87 @@ more than one session to establish correctly.
 **Files affected:** first-simulator transport debugging, pcap preservation artifacts, follow-up object-ingress planning.
 
 ---
+
+## L32 — Once live diagnostics prove one-port continuity, socket reuse should stop being treated as the primary blocker
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 connected validation after implementing bounded first-simulator socket diagnostics and worker relay summaries.
+
+**What happened:** The live run showed one local UDP port (`65241`) across probe, social-circuit open, startup prime, and the first steady-state polling window, all with `split=false`. The viewer still received ongoing same-port simulator traffic, but `object_feed` remained at `update_messages=0 total_objects=0`.
+
+**Rule for future plans:** When live diagnostics show one shared first-simulator local port end to end, do not keep spending slices on socket continuity alone. Move the next plan to message/control parity or inbound classification on that same port unless newer wire evidence contradicts the diagnostics.
+
+**Files affected:** `viewer_net` runtime socket diagnostics, `viewer_app` relay summaries, object-ingress follow-up planning.
+
+---
+
+## L33 — Received same-port simulator traffic can still be the wrong class of data for object ingress
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Inspecting the March 30, 2026 `improved.pcapng` capture after live socket diagnostics had already proven one-port continuity.
+
+**What happened:** The viewer app was clearly receiving real simulator traffic on the correct first-simulator port, but the dominant inbound packets were `LayerData`, `CoarseLocationUpdate`, `AttachedSound`, `ViewerEffect`, `TestMessage`, and related control/social traffic rather than `ObjectUpdate*`. That means "we are receiving data from the simulator" is not enough to claim object ingress is working.
+
+**Rule for future plans:** When debugging missing world objects, distinguish receipt of any simulator traffic from receipt of the specific `ObjectUpdate*` family. Treat `LayerData` and other same-port traffic as important observability signal, but do not count it as object-feed success or use it to prematurely shift the investigation toward HTTP asset fetches.
+
+**Files affected:** first-simulator traffic classification, object-ingress follow-up planning, pcap-driven diagnostics.
+
+---
+
+## L34 — Startup `MuteListRequest`, `MoneyBalanceRequest`, and `AgentDataUpdateRequest` parity does not by itself restore object ingress
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 connected validation after adding the Firestorm-evidenced startup request subset on the already-confirmed one-port first-simulator path.
+
+**What happened:** The live run showed the viewer sending `MuteListRequest` (`262`), `MoneyBalanceRequest` (`313`), and `AgentDataUpdateRequest` (`386`) on the retained simulator port, but `object_feed` still remained at `update_messages=0 total_objects=0 region_handshake_updates=0`.
+
+**Rule for future plans:** Once the one-port path is proven and this startup request subset is on-wire, do not spend another slice re-tuning the same requests. Move the next plan to a later control/reply gap such as `SetAlwaysRun`, `AgentAnimation`, or a deeper receive-path comparison.
+
+**Files affected:** `viewer_net` startup request helpers, `viewer_app` startup prime path, object-ingress follow-up planning.
+
+---
+
+## L35 — `AgentHeightWidth` alone does not restore object ingress on the current one-port path
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Running the March 30, 2026 connected validation after promoting `AgentHeightWidth` as the first staged control-block packet from the newer Firestorm `Test.pcapng` evidence.
+
+**What happened:** The viewer stayed on one retained first-simulator port and successfully inserted `AgentHeightWidth` into the startup control sequence, but `object_feed` still remained at `update_messages=0 total_objects=0 region_handshake_updates=0`.
+
+**Rule for future plans:** Once `AgentHeightWidth` is on-wire and live ingress is still zero, do not spend another slice re-tuning the same packet or its static dimensions alone. Promote the next smallest later control-block candidate or a tighter ACK-timing slice instead.
+
+**Files affected:** `viewer_net` startup control helpers, object-ingress staged control-block planning.
+
+---
+
+## L36 — `SetAlwaysRun` alone does not restore object ingress on the current one-port path
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Running the March 30, 2026 connected validation after promoting `SetAlwaysRun` as the next staged control-block packet following `AgentHeightWidth`.
+
+**What happened:** The viewer stayed on one retained first-simulator port and successfully inserted `SetAlwaysRun` into the startup control sequence, but `object_feed` still remained at `update_messages=0 total_objects=0 region_handshake_updates=0`.
+
+**Rule for future plans:** Once `SetAlwaysRun` is on-wire and live ingress is still zero, do not spend another slice re-tuning that packet alone. Move the next staged promotion to `AgentAnimation` or to a tighter ACK-timing investigation.
+
+**Files affected:** `viewer_net` startup control helpers, object-ingress staged control-block planning.
+
+---
+
+## L37 — The observed startup `AgentAnimation` packet alone does not restore object ingress on the current one-port path
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Running the March 30, 2026 connected validation after promoting the observed Firestorm startup `AgentAnimation` packet following `AgentHeightWidth` and `SetAlwaysRun`.
+
+**What happened:** The viewer stayed on one retained first-simulator port and inserted the observed startup `AgentAnimation` packet into the startup control sequence, but `object_feed` still remained at `update_messages=0 total_objects=0 region_handshake_updates=0`.
+
+**Rule for future plans:** Once the observed startup `AgentAnimation` packet is on-wire and live ingress is still zero, stop promoting more standalone startup control messages. Move the next plan to ACK/control-reply behavior instead.
+
+**Files affected:** `viewer_net` startup control helpers, object-ingress staged control-block planning.
+
+---

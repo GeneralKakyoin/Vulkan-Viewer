@@ -1125,6 +1125,7 @@ async fn run_in_process_live_feed(
                     config.stop_on_region_control,
                 )
                 .await;
+            emit_first_simulator_socket_summary(&tx, &connection, "after_probe");
         }
 
         let mut event_ack = 0u64;
@@ -1137,10 +1138,12 @@ async fn run_in_process_live_feed(
         let mut worker_tick: u64 = 0;
         let agent_update_keepalive_interval_ticks = agent_update_keepalive_interval_ticks(&config);
         let mut last_agent_update_tick = None;
+        let mut first_sim_socket_steady_state_summary_emitted = false;
         let mut social_circuit: Option<SocialCircuit> = connection
             .open_social_circuit(&config.receive_bind)
             .await
             .ok();
+        emit_first_simulator_socket_summary(&tx, &connection, "after_open_social_circuit");
         if let Some(circuit) = social_circuit.as_ref() {
             if let Err(err) = prime_startup_social_circuit(
                 &mut connection,
@@ -1160,6 +1163,7 @@ async fn run_in_process_live_feed(
             } else {
                 last_agent_update_tick = Some(worker_tick);
             }
+            emit_first_simulator_socket_summary(&tx, &connection, "after_startup_social_prime");
         } else {
             emit_relay(
                 &tx,
@@ -1809,6 +1813,11 @@ async fn run_in_process_live_feed(
                             .open_social_circuit(&config.receive_bind)
                             .await
                             .ok();
+                        emit_first_simulator_socket_summary(
+                            &tx,
+                            &connection,
+                            "after_social_circuit_reopen",
+                        );
                         if let Some(circuit) = social_circuit.as_ref() {
                             if let Err(prime_err) =
                                 connection.send_startup_interest_messages(circuit).await
@@ -1822,6 +1831,11 @@ async fn run_in_process_live_feed(
                             } else {
                                 last_agent_update_tick = Some(worker_tick);
                             }
+                            emit_first_simulator_socket_summary(
+                                &tx,
+                                &connection,
+                                "after_reopen_social_prime",
+                            );
                         }
                         if social_circuit.is_none() {
                             emit_relay(
@@ -2045,6 +2059,14 @@ async fn run_in_process_live_feed(
                         }
                     }
                 }
+            }
+            if !first_sim_socket_steady_state_summary_emitted && social_circuit.is_some() {
+                emit_first_simulator_socket_summary(
+                    &tx,
+                    &connection,
+                    "after_first_steady_state_window",
+                );
+                first_sim_socket_steady_state_summary_emitted = true;
             }
             worker_tick = worker_tick.saturating_add(1);
             tokio::time::sleep(std::time::Duration::from_millis(config.worker_tick_ms)).await;
@@ -2446,6 +2468,79 @@ fn emit_object_feed_tick_summary(tx: &mpsc::Sender<LiveFeedUpdate>, snapshot: &L
     );
 }
 
+fn emit_first_simulator_socket_summary(
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    connection: &Connection,
+    label: &str,
+) {
+    let summary = connection.summarize_first_simulator_socket_diagnostics();
+    let ports = if summary.unique_local_ports.is_empty() {
+        String::from("none")
+    } else {
+        summary
+            .unique_local_ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let tail = summarize_first_simulator_socket_tail(connection, 5);
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "first_sim_socket",
+        &format!(
+            "{label}: ports={ports} split={} events={} probe_binds={} fresh_binds={} retained={} reused={} sends={} receives={} tail={tail}",
+            summary.split_local_port_detected,
+            summary.events,
+            summary.probe_bind_events,
+            summary.fresh_bind_events,
+            summary.retained_probe_events,
+            summary.reused_retained_probe_events,
+            summary.send_events,
+            summary.receive_events,
+        ),
+    );
+}
+
+fn summarize_first_simulator_socket_tail(connection: &Connection, limit: usize) -> String {
+    let diagnostics = connection.first_simulator_socket_diagnostics();
+    if diagnostics.is_empty() {
+        return String::from("none");
+    }
+    let start = diagnostics.len().saturating_sub(limit);
+    diagnostics[start..]
+        .iter()
+        .map(format_first_simulator_socket_diagnostic)
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn format_first_simulator_socket_diagnostic(
+    diagnostic: &viewer_net::FirstSimulatorSocketDiagnostic,
+) -> String {
+    let local_addr = diagnostic.local_addr.as_deref().unwrap_or("?");
+    let remote_target = diagnostic.remote_target.as_deref().unwrap_or("?");
+    let message_number = diagnostic
+        .packet_message_number
+        .map(|number| format!("{number:#x}"))
+        .unwrap_or_else(|| String::from("-"));
+    let payload_len = diagnostic
+        .payload_len
+        .map(|len| len.to_string())
+        .unwrap_or_else(|| String::from("-"));
+    format!(
+        "#{}:{:?}@{}->{} m={} len={} {}",
+        diagnostic.event_index,
+        diagnostic.kind,
+        local_addr,
+        remote_target,
+        message_number,
+        payload_len,
+        diagnostic.reason,
+    )
+}
+
 fn summarize_receive_kinds(connection: &Connection) -> String {
     let mut counts = BTreeMap::<String, usize>::new();
     for diag in connection.first_simulator_handshake_receive_diagnostics() {
@@ -2593,6 +2688,9 @@ async fn prime_startup_social_circuit(
         .send_pending_region_handshake_reply(circuit)
         .await?;
     connection.send_startup_interest_messages(circuit).await?;
+    connection
+        .send_startup_request_parity_messages(circuit)
+        .await?;
     connection.send_retrieve_instant_messages(circuit).await?;
     drain_startup_social_circuit(connection, circuit, tx, local_agent_id, config).await
 }

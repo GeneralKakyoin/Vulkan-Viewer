@@ -21,6 +21,25 @@ See:
 - `docs/RESEARCH/OBJECT_INGRESS_PCAP_FORENSICS_2026-03-30.md`
 - `docs/plans/PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
 
+## Update (2026-03-30): Live Runtime Socket Forensics Disproved The Current Split-Port Hypothesis
+
+The bounded connected validation for `docs/plans/PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md` showed one local UDP port (`65241`) across:
+- probe
+- social-circuit open
+- startup prime
+- the first steady-state polling window
+
+Every one of those live relay summaries reported `split=false`.
+
+What this means now:
+- the current code path no longer appears to lose object ingress because startup and steady-state traffic are on different local ports
+- the older historical split-port hypothesis below is still useful context, but it is no longer the best current explanation for the live blocked path
+- the next likely blocker is post-`AgentMovementComplete` message/control parity or a decode/classification gap on that same one-port flow
+
+See:
+- `docs/reports/REPORT_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
+- `docs/reviews/REVIEW_IMPL_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
+
 ## Problem Statement
 
 The viewer completes login, establishes a simulator connection, and receives ongoing UDP traffic (layer data, ping checks, coarse location), but **zero ObjectUpdate packets** are ever classified or decoded. The object feed remains permanently empty.
@@ -123,3 +142,63 @@ Create a single persistent socket at startup and use it for both the handshake p
 
 ### Firestorm Comparison
 - Compare the viewer's inbound traffic counts against a fresh Firestorm capture to confirm order-of-magnitude parity
+
+## 2026-03-30 Post-AMC Parity Result
+
+- The bounded startup request subset is now live on the retained first-simulator circuit:
+  - `MuteListRequest` (`0xffff0106`)
+  - `MoneyBalanceRequest` (`0xffff0139`)
+  - `AgentDataUpdateRequest` (`0xffff0182`)
+- The bounded connected run still showed:
+  - `update_messages=0`
+  - `total_objects=0`
+  - `region_handshake_updates=0`
+- Practical meaning: the next blocker is later than this startup request subset.
+
+## 2026-03-30 Firestorm Control-Block Clue
+
+- `Test.pcapng` refines the working Firestorm pre-burst control block on `16.144.39.130:13001`.
+- Newly surfaced concrete packet:
+  - `AgentHeightWidth` (`Low 83`)
+- Working Firestorm order immediately before object ingress:
+  - `RegionHandshakeReply`
+  - `PacketAck`
+  - `AgentThrottle`
+  - `AgentHeightWidth`
+  - `AgentUpdate`
+  - `AgentAnimation`
+  - `SetAlwaysRun`
+  - `PacketAck`
+  - `MuteListRequest`
+  - `MoneyBalanceRequest`
+  - `AgentDataUpdateRequest`
+  - inbound `PacketAck`
+  - inbound `ObjectUpdateCached` burst
+- Practical meaning: the next incremental promotion should be `AgentHeightWidth`, not a broad control-block mirror.
+
+## 2026-03-30 AgentHeightWidth Result
+
+- `AgentHeightWidth` is now present in the startup control flow.
+- Live result on the retained one-port path still showed:
+  - `update_messages=0`
+  - `total_objects=0`
+  - `region_handshake_updates=0`
+- Practical meaning: the next blocker is later than `AgentHeightWidth` alone.
+
+## 2026-03-30 SetAlwaysRun Result
+
+- `SetAlwaysRun` is now present in the startup control flow (`0xffff0058`).
+- Live result on the retained one-port path still showed:
+  - `update_messages=0`
+  - `total_objects=0`
+  - `region_handshake_updates=0`
+- Practical meaning: the next blocker is later than `SetAlwaysRun` alone.
+
+## 2026-03-30 AgentAnimation Result
+
+- The observed startup `AgentAnimation` packet is now present in the startup control flow.
+- Live result on the retained one-port path still showed:
+  - `update_messages=0`
+  - `total_objects=0`
+  - `region_handshake_updates=0`
+- Practical meaning: the next blocker is no longer best explained by another missing standalone startup message; ACK/control-reply behavior is now the stronger remaining suspect.

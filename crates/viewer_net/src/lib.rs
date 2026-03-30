@@ -39,9 +39,12 @@ const LLUDP_LOW_FREQUENCY_PREFIX: u32 = 0xFFFF0000;
 const LLUDP_MTU_BYTES: usize = 1200;
 const LLUDP_MAX_APPENDED_ACKS: usize = 250;
 const MAX_PENDING_FIRST_SIMULATOR_ACK_IDS: usize = 512;
+const MAX_FIRST_SIMULATOR_SOCKET_DIAGNOSTICS: usize = 128;
 const LLUDP_USE_CIRCUIT_CODE_LOW_ID: u16 = 3;
 const LLUDP_CHAT_FROM_VIEWER_LOW_ID: u16 = 80;
 const LLUDP_AGENT_THROTTLE_LOW_ID: u16 = 81;
+const LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID: u16 = 83;
+const LLUDP_SET_ALWAYS_RUN_LOW_ID: u16 = 88;
 const LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID: u16 = 249;
 const LLUDP_TEST_MESSAGE_LOW_ID: u16 = 1;
 const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
@@ -51,7 +54,10 @@ const LLUDP_CHAT_FROM_SIMULATOR_LOW_ID: u16 = 139;
 const LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID: u16 = 150;
 const LLUDP_ENABLE_SIMULATOR_LOW_ID: u16 = 151;
 const LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID: u16 = 250;
+const LLUDP_MUTE_LIST_REQUEST_LOW_ID: u16 = 262;
+const LLUDP_MONEY_BALANCE_REQUEST_LOW_ID: u16 = 313;
 const LLUDP_AGENT_DATA_UPDATE_LOW_ID: u16 = 387;
+const LLUDP_AGENT_DATA_UPDATE_REQUEST_LOW_ID: u16 = 386;
 const LLUDP_PACKET_ACK_LOW_ID: u16 = 0xFFFB;
 const LLUDP_ONLINE_NOTIFICATION_LOW_ID: u16 = 322;
 const LLUDP_CHANGE_USER_RIGHTS_LOW_ID: u16 = 321;
@@ -68,12 +74,14 @@ const LLUDP_AVATAR_NOTES_REPLY_LOW_ID: u16 = 176;
 const LLUDP_AVATAR_PICKS_REPLY_LOW_ID: u16 = 178;
 const LLUDP_PICK_INFO_REPLY_LOW_ID: u16 = 184;
 const LLUDP_GENERIC_MESSAGE_LOW_ID: u16 = 261;
+const LLUDP_LAYER_DATA_HIGH_ID: u8 = 11;
 const LLUDP_OBJECT_UPDATE_HIGH_ID: u8 = 12;
 const LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID: u8 = 13;
 const LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID: u8 = 14;
 const LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID: u8 = 15;
 const LLUDP_KILL_OBJECT_HIGH_ID: u8 = 16;
 const LLUDP_AGENT_UPDATE_HIGH_ID: u8 = 4;
+const LLUDP_AGENT_ANIMATION_HIGH_ID: u8 = 5;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
@@ -88,7 +96,10 @@ const MAX_CONTINUITY_OBSERVATIONS: usize = 16;
 // Firestorm reference capture `artifacts/logs/firestorm_agvproto_capture_2026-03-29_211128.log`
 // shows this throttle mix immediately after AMC, before object ingress starts.
 const STARTUP_AGENT_THROTTLES: [f32; 7] = [450.0, 310.0, 62.0, 62.0, 1528.0, 1528.0, 560.0];
+const STARTUP_AGENT_HEIGHT: u16 = 720;
+const STARTUP_AGENT_WIDTH: u16 = 1280;
 const STARTUP_AGENT_UPDATE_FAR: f32 = 96.0;
+const STARTUP_AGENT_ANIMATION_ID: &str = "efcf670c-2d18-8128-973a-034ebc806b67";
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "AgentProfile",
@@ -886,12 +897,47 @@ pub struct FirstSimulatorHandshakeSendDiagnostic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FirstSimulatorSocketDiagnosticKind {
+    ProbeBind,
+    FreshBind,
+    RetainProbeSocket,
+    ReuseRetainedProbeSocket,
+    Send,
+    Receive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorSocketDiagnostic {
+    pub event_index: usize,
+    pub kind: FirstSimulatorSocketDiagnosticKind,
+    pub reason: String,
+    pub local_addr: Option<String>,
+    pub remote_target: Option<String>,
+    pub packet_message_number: Option<u32>,
+    pub payload_len: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorSocketDiagnosticSummary {
+    pub events: usize,
+    pub unique_local_ports: Vec<u16>,
+    pub probe_bind_events: usize,
+    pub fresh_bind_events: usize,
+    pub retained_probe_events: usize,
+    pub reused_retained_probe_events: usize,
+    pub send_events: usize,
+    pub receive_events: usize,
+    pub split_local_port_detected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FirstSimulatorInboundMessageKind {
     TestMessage,
     PacketAck,
     AgentMovementComplete,
     RegionHandshake,
     HealthMessage,
+    LayerData,
     ChatFromSimulator,
     SimulatorViewerTimeMessage,
     EnableSimulator,
@@ -999,6 +1045,7 @@ pub struct RegionTransitionControlSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EarlySimulatorTrafficKind {
     HealthMessage,
+    LayerData,
     ChatFromSimulator,
     SimulatorViewerTimeMessage,
     OnlineNotification,
@@ -1020,6 +1067,7 @@ pub struct EarlySimulatorTrafficObservation {
 pub struct EarlySimulatorTrafficSummary {
     pub observations: usize,
     pub health_message: usize,
+    pub layer_data: usize,
     pub chat_from_simulator: usize,
     pub simulator_viewer_time_message: usize,
     pub online_notification: usize,
@@ -1365,6 +1413,7 @@ pub struct Connection {
     retained_probe_socket: Option<UdpSocket>,
     first_simulator_handshake_send_diagnostics: Vec<FirstSimulatorHandshakeSendDiagnostic>,
     first_simulator_handshake_receive_diagnostics: Vec<FirstSimulatorHandshakeReceiveDiagnostic>,
+    first_simulator_socket_diagnostics: Vec<FirstSimulatorSocketDiagnostic>,
     early_simulator_traffic_observations: Vec<EarlySimulatorTrafficObservation>,
     region_transition_control_observations: Vec<RegionTransitionControlObservation>,
     simulator_payload_decode_summary: SimulatorPayloadDecodeSummary,
@@ -1396,6 +1445,7 @@ impl Connection {
             retained_probe_socket: None,
             first_simulator_handshake_send_diagnostics: Vec::new(),
             first_simulator_handshake_receive_diagnostics: Vec::new(),
+            first_simulator_socket_diagnostics: Vec::new(),
             early_simulator_traffic_observations: Vec::new(),
             region_transition_control_observations: Vec::new(),
             simulator_payload_decode_summary: SimulatorPayloadDecodeSummary::default(),
@@ -1437,6 +1487,44 @@ impl Connection {
         &self,
     ) -> &[FirstSimulatorHandshakeReceiveDiagnostic] {
         &self.first_simulator_handshake_receive_diagnostics
+    }
+
+    pub fn first_simulator_socket_diagnostics(&self) -> &[FirstSimulatorSocketDiagnostic] {
+        &self.first_simulator_socket_diagnostics
+    }
+
+    pub fn summarize_first_simulator_socket_diagnostics(
+        &self,
+    ) -> FirstSimulatorSocketDiagnosticSummary {
+        let mut summary = FirstSimulatorSocketDiagnosticSummary {
+            events: self.first_simulator_socket_diagnostics.len(),
+            ..FirstSimulatorSocketDiagnosticSummary::default()
+        };
+        let mut ports = BTreeSet::new();
+        for diag in &self.first_simulator_socket_diagnostics {
+            if let Some(port) = diag
+                .local_addr
+                .as_deref()
+                .and_then(parse_socket_port_from_text)
+            {
+                ports.insert(port);
+            }
+            match diag.kind {
+                FirstSimulatorSocketDiagnosticKind::ProbeBind => summary.probe_bind_events += 1,
+                FirstSimulatorSocketDiagnosticKind::FreshBind => summary.fresh_bind_events += 1,
+                FirstSimulatorSocketDiagnosticKind::RetainProbeSocket => {
+                    summary.retained_probe_events += 1
+                }
+                FirstSimulatorSocketDiagnosticKind::ReuseRetainedProbeSocket => {
+                    summary.reused_retained_probe_events += 1
+                }
+                FirstSimulatorSocketDiagnosticKind::Send => summary.send_events += 1,
+                FirstSimulatorSocketDiagnosticKind::Receive => summary.receive_events += 1,
+            }
+        }
+        summary.unique_local_ports = ports.into_iter().collect();
+        summary.split_local_port_detected = summary.unique_local_ports.len() > 1;
+        summary
     }
 
     pub fn early_simulator_traffic_observations(&self) -> &[EarlySimulatorTrafficObservation] {
@@ -1608,6 +1696,7 @@ impl Connection {
             summary.observations += 1;
             match observation.kind {
                 EarlySimulatorTrafficKind::HealthMessage => summary.health_message += 1,
+                EarlySimulatorTrafficKind::LayerData => summary.layer_data += 1,
                 EarlySimulatorTrafficKind::ChatFromSimulator => summary.chat_from_simulator += 1,
                 EarlySimulatorTrafficKind::SimulatorViewerTimeMessage => {
                     summary.simulator_viewer_time_message += 1
@@ -1670,6 +1759,7 @@ impl Connection {
         self.retained_probe_socket = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.first_simulator_socket_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
         self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
@@ -1843,6 +1933,7 @@ impl Connection {
         self.retained_probe_socket = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.first_simulator_socket_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
         self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
@@ -2317,6 +2408,35 @@ impl Connection {
         self.pending_first_simulator_ack_ids[..batch_len].to_vec()
     }
 
+    fn record_first_simulator_socket_diagnostic(
+        &mut self,
+        kind: FirstSimulatorSocketDiagnosticKind,
+        reason: impl Into<String>,
+        local_addr: Option<String>,
+        remote_target: Option<String>,
+        packet_message_number: Option<u32>,
+        payload_len: Option<usize>,
+    ) {
+        if self.first_simulator_socket_diagnostics.len() >= MAX_FIRST_SIMULATOR_SOCKET_DIAGNOSTICS {
+            self.first_simulator_socket_diagnostics.remove(0);
+        }
+        let next_event_index = self
+            .first_simulator_socket_diagnostics
+            .last()
+            .map(|diag| diag.event_index.saturating_add(1))
+            .unwrap_or(1);
+        self.first_simulator_socket_diagnostics
+            .push(FirstSimulatorSocketDiagnostic {
+                event_index: next_event_index,
+                kind,
+                reason: reason.into(),
+                local_addr,
+                remote_target,
+                packet_message_number,
+                payload_len,
+            });
+    }
+
     pub async fn receive_first_simulator_handshake_datagram_once(
         &mut self,
         bind: &str,
@@ -2332,10 +2452,19 @@ impl Connection {
                 reason: err.to_string(),
             }
         })?;
+        let local_addr = socket_local_addr_text(&socket);
+        self.record_first_simulator_socket_diagnostic(
+            FirstSimulatorSocketDiagnosticKind::FreshBind,
+            "receive_first_simulator_handshake_datagram_once",
+            local_addr.clone(),
+            None,
+            None,
+            None,
+        );
         let mut buf = vec![0u8; 2048];
 
         let recv = timeout(wait_timeout, socket.recv_from(&mut buf)).await;
-        let (received_len, _) = match recv {
+        let (received_len, sender) = match recv {
             Ok(Ok(parts)) => parts,
             Ok(Err(err)) => {
                 return Err(ConnectionError::FirstSimulatorReceiveFailed {
@@ -2350,6 +2479,16 @@ impl Connection {
                 });
             }
         };
+
+        self.record_first_simulator_socket_diagnostic(
+            FirstSimulatorSocketDiagnosticKind::Receive,
+            "receive_first_simulator_handshake_datagram_once",
+            local_addr,
+            Some(sender.to_string()),
+            decode_first_simulator_packet_header(&buf[..received_len])
+                .map(|header| header.message_number),
+            Some(received_len),
+        );
 
         self.observe_first_simulator_inbound_payload(&buf[..received_len])
     }
@@ -2428,6 +2567,24 @@ impl Connection {
                 reason: err.to_string(),
             }
         })?;
+        let probe_local_addr = socket_local_addr_text(&socket);
+        let probe_remote_target =
+            self.first_simulator_handshake_prerequisites
+                .as_ref()
+                .map(|prerequisites| {
+                    format!(
+                        "{}:{}",
+                        prerequisites.target.sim_ip, prerequisites.target.sim_port
+                    )
+                });
+        self.record_first_simulator_socket_diagnostic(
+            FirstSimulatorSocketDiagnosticKind::ProbeBind,
+            "probe_first_simulator_handshake_window_with_policy",
+            probe_local_addr.clone(),
+            probe_remote_target.clone(),
+            None,
+            None,
+        );
 
         let current_stage = self
             .first_simulator_handshake_state
@@ -2551,7 +2708,7 @@ impl Connection {
                 wait_timeout
             };
             let recv = timeout(recv_timeout, socket.recv_from(&mut buf)).await;
-            let (received_len, _) = match recv {
+            let (received_len, sender) = match recv {
                 Ok(Ok(parts)) => parts,
                 Ok(Err(err)) => {
                     return Err(ConnectionError::FirstSimulatorReceiveFailed {
@@ -2564,6 +2721,15 @@ impl Connection {
                     break;
                 }
             };
+            self.record_first_simulator_socket_diagnostic(
+                FirstSimulatorSocketDiagnosticKind::Receive,
+                "probe_first_simulator_handshake_window_with_policy",
+                probe_local_addr.clone(),
+                Some(sender.to_string()),
+                decode_first_simulator_packet_header(&buf[..received_len])
+                    .map(|header| header.message_number),
+                Some(received_len),
+            );
 
             let classification =
                 self.observe_first_simulator_inbound_payload(&buf[..received_len])?;
@@ -2703,6 +2869,14 @@ impl Connection {
             None
         };
 
+        self.record_first_simulator_socket_diagnostic(
+            FirstSimulatorSocketDiagnosticKind::RetainProbeSocket,
+            "probe_first_simulator_handshake_window_with_policy",
+            probe_local_addr,
+            probe_remote_target,
+            None,
+            None,
+        );
         self.retained_probe_socket = Some(socket);
 
         Ok(FirstSimulatorHandshakeProbeReport {
@@ -3179,7 +3353,7 @@ impl Connection {
         if receive_max_packets == 0 {
             return Ok(Vec::new());
         }
-        let (prerequisites, socket) = self.prepare_chat_socket(bind).await?;
+        let (prerequisites, socket) = self.prepare_chat_socket(bind, "send_nearby_chat").await?;
 
         let chat_payload = encode_chat_from_viewer_payload(
             &prerequisites,
@@ -3249,7 +3423,9 @@ impl Connection {
         if receive_max_packets == 0 {
             return Ok(Vec::new());
         }
-        let (_prerequisites, socket) = self.prepare_chat_socket(bind).await?;
+        let (_prerequisites, socket) = self
+            .prepare_chat_socket(bind, "poll_nearby_chat_udp")
+            .await?;
         self.receive_nearby_chat_on_socket(&socket, bind, receive_timeout, receive_max_packets)
             .await
     }
@@ -3287,9 +3463,22 @@ impl Connection {
             .clone()
             .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
         let socket = if let Some(socket) = self.retained_probe_socket.take() {
+            self.record_first_simulator_socket_diagnostic(
+                FirstSimulatorSocketDiagnosticKind::ReuseRetainedProbeSocket,
+                "open_social_circuit",
+                socket_local_addr_text(&socket),
+                Some(format!(
+                    "{}:{}",
+                    prerequisites.target.sim_ip, prerequisites.target.sim_port
+                )),
+                None,
+                None,
+            );
             socket
         } else {
-            self.prepare_chat_socket(bind).await?.1
+            self.prepare_chat_socket(bind, "open_social_circuit")
+                .await?
+                .1
         };
         Ok(SocialCircuit {
             bind: bind.to_string(),
@@ -3346,7 +3535,23 @@ impl Connection {
             return Err(ConnectionError::InvalidState(self.state));
         }
         self.send_agent_throttle_on_circuit(circuit).await?;
-        self.send_agent_update_on_circuit(circuit, true).await
+        self.send_agent_height_width_on_circuit(circuit).await?;
+        self.send_agent_update_on_circuit(circuit, true).await?;
+        self.send_agent_animation_on_circuit(circuit).await?;
+        self.send_set_always_run_on_circuit(circuit, false).await
+    }
+
+    pub async fn send_startup_request_parity_messages(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        self.send_mute_list_request_on_circuit(circuit).await?;
+        self.send_money_balance_request_on_circuit(circuit).await?;
+        self.send_agent_data_update_request_on_circuit(circuit)
+            .await
     }
 
     pub async fn send_agent_update_on_circuit(
@@ -3460,6 +3665,139 @@ impl Connection {
         .await
     }
 
+    async fn send_agent_height_width_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_agent_height_width_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            0,
+            STARTUP_AGENT_HEIGHT,
+            STARTUP_AGENT_WIDTH,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    async fn send_set_always_run_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+        always_run: bool,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_set_always_run_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            always_run,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    async fn send_agent_animation_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_agent_animation_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            STARTUP_AGENT_ANIMATION_ID,
+            false,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    async fn send_mute_list_request_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_mute_list_request_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    async fn send_money_balance_request_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_money_balance_request_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    async fn send_agent_data_update_request_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_agent_data_update_request_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
     fn agent_update_camera_center(&self) -> [f32; 3] {
         self.simulator_payload_decode_summary
             .agent_movement_complete_last_position
@@ -3556,12 +3894,13 @@ impl Connection {
         let mut requested_classified_details = BTreeSet::new();
         let mut buf = vec![0u8; 4096];
         let started = Instant::now();
+        let local_addr = socket_local_addr_text(&circuit.socket);
         for _ in 0..receive_max_packets {
             if started.elapsed() > Duration::from_secs(8) {
                 break;
             }
             let recv = timeout(receive_timeout, circuit.socket.recv_from(&mut buf)).await;
-            let (received_len, _) = match recv {
+            let (received_len, sender) = match recv {
                 Ok(Ok(parts)) => parts,
                 Ok(Err(err)) => {
                     return Err(ConnectionError::FirstSimulatorReceiveFailed {
@@ -3572,6 +3911,14 @@ impl Connection {
                 Err(_) => break,
             };
             let packet = &buf[..received_len];
+            self.record_first_simulator_socket_diagnostic(
+                FirstSimulatorSocketDiagnosticKind::Receive,
+                "fetch_agent_profile_legacy",
+                local_addr.clone(),
+                Some(sender.to_string()),
+                decode_first_simulator_packet_header(packet).map(|header| header.message_number),
+                Some(received_len),
+            );
             let _ = self.observe_first_simulator_inbound_payload(packet);
             if let Some(profile) = decode_legacy_avatar_properties_reply(packet, avatar_id) {
                 out.id = profile.id;
@@ -3688,9 +4035,10 @@ impl Connection {
         let _ = self.send_pending_region_handshake_reply(circuit).await?;
         let mut events = Vec::new();
         let mut buf = vec![0u8; 4096];
+        let local_addr = socket_local_addr_text(&circuit.socket);
         for _ in 0..receive_max_packets {
             let recv = timeout(receive_timeout, circuit.socket.recv_from(&mut buf)).await;
-            let (received_len, _) = match recv {
+            let (received_len, sender) = match recv {
                 Ok(Ok(parts)) => parts,
                 Ok(Err(err)) => {
                     return Err(ConnectionError::FirstSimulatorReceiveFailed {
@@ -3701,6 +4049,14 @@ impl Connection {
                 Err(_) => break,
             };
             let payload = &buf[..received_len];
+            self.record_first_simulator_socket_diagnostic(
+                FirstSimulatorSocketDiagnosticKind::Receive,
+                "poll_social_events",
+                local_addr.clone(),
+                Some(sender.to_string()),
+                decode_first_simulator_packet_header(payload).map(|header| header.message_number),
+                Some(received_len),
+            );
             let _ = self.observe_first_simulator_inbound_payload(payload);
             let _ = self.send_pending_region_handshake_reply(circuit).await?;
             events.extend(decode_social_events(payload));
@@ -3838,6 +4194,7 @@ impl Connection {
         self.retained_probe_socket = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
+        self.first_simulator_socket_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
         self.region_transition_control_observations.clear();
         self.simulator_payload_decode_summary = SimulatorPayloadDecodeSummary::default();
@@ -3884,6 +4241,14 @@ impl Connection {
                 reason: err.to_string(),
             }
         })?;
+        self.record_first_simulator_socket_diagnostic(
+            FirstSimulatorSocketDiagnosticKind::FreshBind,
+            format!("send_first_simulator_handshake_datagram:{action:?}"),
+            socket_local_addr_text(&socket),
+            Some(format!("{}:{}", target.sim_ip, target.sim_port)),
+            decode_first_simulator_packet_header(payload).map(|header| header.message_number),
+            Some(payload.len()),
+        );
         self.send_first_simulator_handshake_datagram_with_socket(action, target, payload, &socket)
             .await
     }
@@ -3937,6 +4302,14 @@ impl Connection {
                     self.pending_first_simulator_ack_ids
                         .drain(0..ack_batch.len());
                 }
+                self.record_first_simulator_socket_diagnostic(
+                    FirstSimulatorSocketDiagnosticKind::Send,
+                    format!("send_first_simulator_handshake_datagram_with_socket:{action:?}"),
+                    socket_local_addr_text(socket),
+                    Some(target_text.clone()),
+                    packet_message_number,
+                    Some(outbound_payload.len()),
+                );
                 self.first_simulator_handshake_send_diagnostics.push(
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
@@ -3999,6 +4372,7 @@ impl Connection {
     async fn prepare_chat_socket(
         &mut self,
         bind: &str,
+        reason: &str,
     ) -> Result<(FirstSimulatorHandshakePrerequisites, UdpSocket), ConnectionError> {
         let prerequisites = self
             .first_simulator_handshake_prerequisites
@@ -4011,6 +4385,17 @@ impl Connection {
                 reason: err.to_string(),
             }
         })?;
+        self.record_first_simulator_socket_diagnostic(
+            FirstSimulatorSocketDiagnosticKind::FreshBind,
+            format!("prepare_chat_socket:{reason}"),
+            socket_local_addr_text(&socket),
+            Some(format!(
+                "{}:{}",
+                prerequisites.target.sim_ip, prerequisites.target.sim_port
+            )),
+            None,
+            None,
+        );
 
         let use_circuit = encode_first_simulator_use_circuit_code_payload(
             &prerequisites,
@@ -4048,9 +4433,10 @@ impl Connection {
     ) -> Result<Vec<NearbyChatMessage>, ConnectionError> {
         let mut nearby = Vec::new();
         let mut buf = vec![0u8; 2048];
+        let local_addr = socket_local_addr_text(socket);
         for _ in 0..receive_max_packets {
             let recv = timeout(receive_timeout, socket.recv_from(&mut buf)).await;
-            let (received_len, _) = match recv {
+            let (received_len, sender) = match recv {
                 Ok(Ok(parts)) => parts,
                 Ok(Err(err)) => {
                     return Err(ConnectionError::FirstSimulatorReceiveFailed {
@@ -4061,6 +4447,14 @@ impl Connection {
                 Err(_) => break,
             };
             let payload = &buf[..received_len];
+            self.record_first_simulator_socket_diagnostic(
+                FirstSimulatorSocketDiagnosticKind::Receive,
+                "receive_nearby_chat_on_socket",
+                local_addr.clone(),
+                Some(sender.to_string()),
+                decode_first_simulator_packet_header(payload).map(|header| header.message_number),
+                Some(received_len),
+            );
             let _ = self.observe_first_simulator_inbound_payload(payload);
             if let Some(chat) = decode_chat_from_simulator(payload) {
                 nearby.push(chat);
@@ -4283,6 +4677,56 @@ fn encode_retrieve_instant_messages_payload(
     ))
 }
 
+fn encode_mute_list_request_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 4);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&0u32.to_le_bytes());
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_MUTE_LIST_REQUEST_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_money_balance_request_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 16);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&[0u8; 16]);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_MONEY_BALANCE_REQUEST_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_agent_data_update_request_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(32);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_AGENT_DATA_UPDATE_REQUEST_LOW_ID,
+        &body,
+    ))
+}
+
 fn encode_avatar_properties_request_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
     packet_id: u32,
@@ -4492,6 +4936,72 @@ fn encode_agent_throttle_payload(
     ))
 }
 
+fn encode_agent_height_width_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    gen_counter: u32,
+    height: u16,
+    width: u16,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 4 + 4 + 2 + 2);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&prerequisites.circuit_code.to_le_bytes());
+    body.extend_from_slice(&gen_counter.to_le_bytes());
+    body.extend_from_slice(&height.to_le_bytes());
+    body.extend_from_slice(&width.to_le_bytes());
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_set_always_run_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    always_run: bool,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 1);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.push(u8::from(always_run));
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_SET_ALWAYS_RUN_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_agent_animation_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    anim_id: &str,
+    start_anim: bool,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let anim_id = parse_uuid_bytes(anim_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 1 + 16 + 1 + 1 + 1);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.push(1); // AnimationList count
+    body.extend_from_slice(&anim_id);
+    body.push(u8::from(start_anim));
+    body.push(1); // PhysicalAvatarEventList count
+    body.push(0); // TypeData length
+    Ok(encode_lludp_high_frequency_packet(
+        packet_id,
+        LLUDP_AGENT_ANIMATION_HIGH_ID,
+        &body,
+        true,
+    ))
+}
+
 fn encode_agent_update_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
     packet_id: u32,
@@ -4611,6 +5121,14 @@ fn decode_lludp_packet_id(payload: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(id_bytes))
 }
 
+fn socket_local_addr_text(socket: &UdpSocket) -> Option<String> {
+    socket.local_addr().ok().map(|addr| addr.to_string())
+}
+
+fn parse_socket_port_from_text(text: &str) -> Option<u16> {
+    text.parse::<SocketAddr>().ok().map(|addr| addr.port())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FirstSimulatorPacketHeader {
     flags: u8,
@@ -4715,6 +5233,15 @@ fn classify_first_simulator_inbound_from_packet(
     let signal = format!("packet:0x{:08x}", header.message_number);
 
     match header.message_number {
+        num if num == u32::from(LLUDP_LAYER_DATA_HIGH_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::LayerData,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         num if num == u32::from(LLUDP_OBJECT_UPDATE_HIGH_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::ObjectUpdate,
@@ -4910,6 +5437,7 @@ fn to_early_simulator_traffic_kind(
         FirstSimulatorInboundMessageKind::HealthMessage => {
             Some(EarlySimulatorTrafficKind::HealthMessage)
         }
+        FirstSimulatorInboundMessageKind::LayerData => Some(EarlySimulatorTrafficKind::LayerData),
         FirstSimulatorInboundMessageKind::ChatFromSimulator => {
             Some(EarlySimulatorTrafficKind::ChatFromSimulator)
         }
@@ -9178,6 +9706,19 @@ mod tests {
         assert_eq!(viewer_effect.signal, "packet:0x0000ff11");
         assert_eq!(viewer_effect.packet_message_number, Some(0x0000ff11));
 
+        let layer_data = classify_first_simulator_inbound_message(&make_high_frequency_packet(11));
+        assert_eq!(layer_data.kind, FirstSimulatorInboundMessageKind::LayerData);
+        assert_eq!(
+            layer_data.scope,
+            FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic
+        );
+        assert_eq!(layer_data.signal, "packet:0x0000000b");
+        assert_eq!(layer_data.packet_message_number, Some(0x0000000b));
+        assert_eq!(
+            to_early_simulator_traffic_kind(layer_data.kind),
+            Some(EarlySimulatorTrafficKind::LayerData)
+        );
+
         let coarse_location_update =
             classify_first_simulator_inbound_message(&make_medium_frequency_packet(6));
         assert_eq!(
@@ -10021,6 +10562,13 @@ mod tests {
                 .len(),
             send_count_before
         );
+        let socket_summary = connection.summarize_first_simulator_socket_diagnostics();
+        assert_eq!(socket_summary.probe_bind_events, 1);
+        assert_eq!(socket_summary.fresh_bind_events, 0);
+        assert_eq!(socket_summary.retained_probe_events, 1);
+        assert_eq!(socket_summary.reused_retained_probe_events, 1);
+        assert_eq!(socket_summary.unique_local_ports.len(), 1);
+        assert!(!socket_summary.split_local_port_detected);
     }
 
     #[tokio::test]
@@ -10184,6 +10732,12 @@ mod tests {
                 .len(),
             2
         );
+        let socket_summary = connection.summarize_first_simulator_socket_diagnostics();
+        assert_eq!(socket_summary.probe_bind_events, 0);
+        assert_eq!(socket_summary.fresh_bind_events, 1);
+        assert_eq!(socket_summary.reused_retained_probe_events, 0);
+        assert_eq!(socket_summary.unique_local_ports.len(), 1);
+        assert!(!socket_summary.split_local_port_detected);
     }
 
     #[test]
@@ -10295,7 +10849,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_startup_interest_messages_sends_agent_throttle_then_agent_update() {
+    async fn send_startup_interest_messages_sends_agent_throttle_height_width_update_animation_then_set_always_run()
+     {
         let listener = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("listener bind should succeed");
@@ -10337,12 +10892,27 @@ mod tests {
                 .await
                 .expect("AgentThrottle should arrive");
             let throttle = buf[..throttle_len].to_vec();
+            let (height_width_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentHeightWidth should arrive");
+            let height_width = buf[..height_width_len].to_vec();
             let (update_len, _) = listener
                 .recv_from(&mut buf)
                 .await
                 .expect("AgentUpdate should arrive");
             let update = buf[..update_len].to_vec();
-            (throttle, update)
+            let (animation_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentAnimation should arrive");
+            let animation = buf[..animation_len].to_vec();
+            let (set_always_run_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("SetAlwaysRun should arrive");
+            let set_always_run = buf[..set_always_run_len].to_vec();
+            (throttle, height_width, update, animation, set_always_run)
         });
 
         let mut connection = Connection::new(ConnectionConfig {
@@ -10369,12 +10939,55 @@ mod tests {
             .await
             .expect("startup interest messages should send");
 
-        let (throttle, update) = listener_task.await.expect("listener should complete");
+        let (throttle, height_width, update, animation, set_always_run) =
+            listener_task.await.expect("listener should complete");
         let throttle_header =
             decode_first_simulator_packet_header(&throttle).expect("throttle header should decode");
         assert_eq!(
             throttle_header.message_number,
             lludp_low_frequency_message_number(LLUDP_AGENT_THROTTLE_LOW_ID)
+        );
+        let height_width_header = decode_first_simulator_packet_header(&height_width)
+            .expect("height/width header should decode");
+        assert_eq!(
+            height_width_header.message_number,
+            lludp_low_frequency_message_number(LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID)
+        );
+        let height_width_body = height_width_header
+            .body(&height_width)
+            .expect("height/width body should exist");
+        assert_eq!(height_width_body.len(), 44);
+        assert_eq!(
+            u32::from_le_bytes(
+                height_width_body[32..36]
+                    .try_into()
+                    .expect("circuit code should be present")
+            ),
+            424242
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                height_width_body[36..40]
+                    .try_into()
+                    .expect("gen counter should be present")
+            ),
+            0
+        );
+        assert_eq!(
+            u16::from_le_bytes(
+                height_width_body[40..42]
+                    .try_into()
+                    .expect("height should be present")
+            ),
+            STARTUP_AGENT_HEIGHT
+        );
+        assert_eq!(
+            u16::from_le_bytes(
+                height_width_body[42..44]
+                    .try_into()
+                    .expect("width should be present")
+            ),
+            STARTUP_AGENT_WIDTH
         );
         let update_header =
             decode_first_simulator_packet_header(&update).expect("update header should decode");
@@ -10383,6 +10996,151 @@ mod tests {
             u32::from(LLUDP_AGENT_UPDATE_HIGH_ID)
         );
         assert_eq!(update[0] & LLUDP_RELIABLE_FLAG, LLUDP_RELIABLE_FLAG);
+        let animation_header = decode_first_simulator_packet_header(&animation)
+            .expect("animation header should decode");
+        assert_eq!(
+            animation_header.message_number,
+            u32::from(LLUDP_AGENT_ANIMATION_HIGH_ID)
+        );
+        assert_eq!(animation[0] & LLUDP_RELIABLE_FLAG, LLUDP_RELIABLE_FLAG);
+        let animation_body = animation_header
+            .body(&animation)
+            .expect("animation body should exist");
+        assert_eq!(animation_body[32], 1);
+        assert_eq!(
+            &animation_body[33..49],
+            &parse_uuid_bytes(STARTUP_AGENT_ANIMATION_ID).expect("animation uuid should parse")
+        );
+        assert_eq!(animation_body[49], 0);
+        assert_eq!(animation_body[50], 1);
+        assert_eq!(animation_body[51], 0);
+        let set_always_run_header = decode_first_simulator_packet_header(&set_always_run)
+            .expect("set always run header should decode");
+        assert_eq!(
+            set_always_run_header.message_number,
+            lludp_low_frequency_message_number(LLUDP_SET_ALWAYS_RUN_LOW_ID)
+        );
+        let set_always_run_body = set_always_run_header
+            .body(&set_always_run)
+            .expect("set always run body should exist");
+        assert_eq!(set_always_run_body.len(), 33);
+        assert_eq!(set_always_run_body[32], 0);
+    }
+
+    #[tokio::test]
+    async fn send_startup_request_parity_messages_sends_expected_low_frequency_requests() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (mute_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("MuteListRequest should arrive");
+            let mute = buf[..mute_len].to_vec();
+            let (money_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("MoneyBalanceRequest should arrive");
+            let money = buf[..money_len].to_vec();
+            let (agent_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentDataUpdateRequest should arrive");
+            let agent = buf[..agent_len].to_vec();
+            (mute, money, agent)
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection
+            .send_startup_request_parity_messages(&circuit)
+            .await
+            .expect("startup request parity messages should send");
+
+        let (mute, money, agent) = listener_task.await.expect("listener should complete");
+
+        let mute_header =
+            decode_first_simulator_packet_header(&mute).expect("mute header should decode");
+        assert_eq!(
+            mute_header.message_number,
+            lludp_low_frequency_message_number(LLUDP_MUTE_LIST_REQUEST_LOW_ID)
+        );
+        let mute_body = mute_header.body(&mute).expect("mute body should exist");
+        assert_eq!(mute_body.len(), 36);
+        assert_eq!(
+            u32::from_le_bytes(
+                mute_body[32..36]
+                    .try_into()
+                    .expect("mute crc field should be present")
+            ),
+            0
+        );
+
+        let money_header =
+            decode_first_simulator_packet_header(&money).expect("money header should decode");
+        assert_eq!(
+            money_header.message_number,
+            lludp_low_frequency_message_number(LLUDP_MONEY_BALANCE_REQUEST_LOW_ID)
+        );
+        let money_body = money_header.body(&money).expect("money body should exist");
+        assert_eq!(money_body.len(), 48);
+        assert!(money_body[32..48].iter().all(|byte| *byte == 0));
+
+        let agent_header =
+            decode_first_simulator_packet_header(&agent).expect("agent header should decode");
+        assert_eq!(
+            agent_header.message_number,
+            lludp_low_frequency_message_number(LLUDP_AGENT_DATA_UPDATE_REQUEST_LOW_ID)
+        );
+        let agent_body = agent_header.body(&agent).expect("agent body should exist");
+        assert_eq!(agent_body.len(), 32);
     }
 
     #[tokio::test]
@@ -11414,6 +12172,12 @@ mod tests {
         assert_eq!(received[0].text, "reuse path");
         let saw_extra_datagram = listener_task.await.expect("listener should complete");
         assert!(!saw_extra_datagram);
+        let socket_summary = connection.summarize_first_simulator_socket_diagnostics();
+        assert_eq!(socket_summary.fresh_bind_events, 1);
+        assert_eq!(socket_summary.reused_retained_probe_events, 0);
+        assert_eq!(socket_summary.receive_events, 1);
+        assert_eq!(socket_summary.unique_local_ports.len(), 1);
+        assert!(!socket_summary.split_local_port_detected);
     }
 
     #[test]
