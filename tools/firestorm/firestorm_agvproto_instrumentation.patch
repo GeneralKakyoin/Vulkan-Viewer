@@ -1,0 +1,139 @@
+diff --git a/indra/llmessage/message.cpp b/indra/llmessage/message.cpp
+index ac7ece8f1e..ed1ec81787 100644
+--- a/indra/llmessage/message.cpp
++++ b/indra/llmessage/message.cpp
+@@ -1753,6 +1753,8 @@ void    process_complete_ping_check(LLMessageSystem *msgsystem, void** /*user_da
+ {
+     U8 ping_id;
+     msgsystem->getU8Fast(_PREHASH_PingID, _PREHASH_PingID, ping_id);
++    LL_INFOS("AGVProto") << "complete_ping_check from=" << msgsystem->getSender()
++                          << " ping_id=" << (S32)ping_id << LL_ENDL;
+ 
+     LLCircuitData *cdp;
+     cdp = msgsystem->mCircuitInfo.findCircuit(msgsystem->getSender());
+@@ -1768,6 +1770,8 @@ void    process_start_ping_check(LLMessageSystem *msgsystem, void** /*user_data*
+ {
+     U8 ping_id;
+     msgsystem->getU8Fast(_PREHASH_PingID, _PREHASH_PingID, ping_id);
++    LL_INFOS("AGVProto") << "start_ping_check from=" << msgsystem->getSender()
++                          << " ping_id=" << (S32)ping_id << LL_ENDL;
+ 
+     LLCircuitData *cdp;
+     cdp = msgsystem->mCircuitInfo.findCircuit(msgsystem->getSender());
+@@ -4080,4 +4084,3 @@ void LLMessageSystem::sendUntrustedSimulatorMessageCoro(std::string url, std::st
+ 
+ LLHTTPRegistration<LLHTTPNodeAdapter<LLTrustedMessageService> >
+     gHTTPRegistrationTrustedMessageWildcard("/trusted-message/<message-name>");
+-
+diff --git a/indra/newview/llviewermessage.cpp b/indra/newview/llviewermessage.cpp
+index 080d2bd8ee..bc96571aeb 100644
+--- a/indra/newview/llviewermessage.cpp
++++ b/indra/newview/llviewermessage.cpp
+@@ -3824,6 +3824,8 @@ void process_avatar_init_complete(LLMessageSystem* msg, void**)
+ void process_agent_movement_complete(LLMessageSystem* msg, void**)
+ {
+     LL_INFOS("Teleport","Messaging") << "Received ProcessAgentMovementComplete" << LL_ENDL;
++    LL_INFOS("AGVProto") << "agent_movement_complete sender=" << msg->getSender()
++                          << LL_ENDL;
+ 
+     gShiftFrame = true;
+     gAgentMovementCompleted = true;
+@@ -4119,6 +4121,8 @@ void process_crossed_region(LLMessageSystem* msg, void**)
+     LLHost sim_host(sim_ip, sim_port);
+     U64 region_handle;
+     msg->getU64Fast(_PREHASH_RegionData, _PREHASH_RegionHandle, region_handle);
++    LL_INFOS("AGVProto") << "crossed_region sim=" << sim_host
++                          << " handle=" << region_handle << LL_ENDL;
+ 
+     std::string seedCap;
+     msg->getStringFast(_PREHASH_RegionData, _PREHASH_SeedCapability, seedCap);
+@@ -4344,6 +4348,10 @@ void send_agent_update(bool force_send, bool send_reliable)
+ 
+     // Build the message
+     LLMessageSystem* msg = gMessageSystem;
++    LL_INFOS("AGVProto") << "agent_update_send reliable=" << (send_reliable ? 1 : 0)
++                          << " force=" << (force_send ? 1 : 0)
++                          << " tp_state=" << (S32)tp_state
++                          << " flags=" << (S32)flags << LL_ENDL;
+     msg->newMessageFast(_PREHASH_AgentUpdate);
+     msg->nextBlockFast(_PREHASH_AgentData);
+     msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+@@ -4543,6 +4551,10 @@ extern U32Bits gObjectData;
+ 
+ void process_object_update(LLMessageSystem *mesgsys, void **user_data)
+ {
++    LL_INFOS("AGVProto") << "recv_object_update kind=full"
++                          << " sender=" << mesgsys->getSender()
++                          << " size=" << mesgsys->getReceiveSize()
++                          << " csize=" << mesgsys->getReceiveCompressedSize() << LL_ENDL;
+     // Update the data counters
+     if (mesgsys->getReceiveCompressedSize())
+     {
+@@ -4564,6 +4576,10 @@ void process_object_update(LLMessageSystem *mesgsys, void **user_data)
+ 
+ void process_compressed_object_update(LLMessageSystem *mesgsys, void **user_data)
+ {
++    LL_INFOS("AGVProto") << "recv_object_update kind=compressed"
++                          << " sender=" << mesgsys->getSender()
++                          << " size=" << mesgsys->getReceiveSize()
++                          << " csize=" << mesgsys->getReceiveCompressedSize() << LL_ENDL;
+     // Update the data counters
+     if (mesgsys->getReceiveCompressedSize())
+     {
+@@ -4585,6 +4601,10 @@ void process_compressed_object_update(LLMessageSystem *mesgsys, void **user_data
+ 
+ void process_cached_object_update(LLMessageSystem *mesgsys, void **user_data)
+ {
++    LL_INFOS("AGVProto") << "recv_object_update kind=cached"
++                          << " sender=" << mesgsys->getSender()
++                          << " size=" << mesgsys->getReceiveSize()
++                          << " csize=" << mesgsys->getReceiveCompressedSize() << LL_ENDL;
+     // Update the data counters
+     if (mesgsys->getReceiveCompressedSize())
+     {
+@@ -4602,6 +4622,10 @@ void process_cached_object_update(LLMessageSystem *mesgsys, void **user_data)
+ 
+ void process_terse_object_update_improved(LLMessageSystem *mesgsys, void **user_data)
+ {
++    LL_INFOS("AGVProto") << "recv_object_update kind=terse"
++                          << " sender=" << mesgsys->getSender()
++                          << " size=" << mesgsys->getReceiveSize()
++                          << " csize=" << mesgsys->getReceiveCompressedSize() << LL_ENDL;
+     if (mesgsys->getReceiveCompressedSize())
+     {
+         gObjectData += (U32Bytes)mesgsys->getReceiveCompressedSize();
+diff --git a/indra/newview/llviewerthrottle.cpp b/indra/newview/llviewerthrottle.cpp
+index 3ccfbea6e2..24083eea16 100644
+--- a/indra/newview/llviewerthrottle.cpp
++++ b/indra/newview/llviewerthrottle.cpp
+@@ -170,6 +170,16 @@ void LLViewerThrottleGroup::sendToSim() const
+         dp.packF32(mThrottles[i] * 1024.0f, "Throttle");
+     }
+     S32 len = dp.getCurrentSize();
++    LL_INFOS("AGVProto") << "agent_throttle_send circuit=" << msg->mOurCircuitCode
++                          << " len=" << len
++                          << " resend=" << mThrottles[0]
++                          << " land=" << mThrottles[1]
++                          << " wind=" << mThrottles[2]
++                          << " cloud=" << mThrottles[3]
++                          << " task=" << mThrottles[4]
++                          << " texture=" << mThrottles[5]
++                          << " asset=" << mThrottles[6]
++                          << LL_ENDL;
+     msg->addBinaryDataFast(_PREHASH_Throttles, tmp, len);
+ 
+     gAgent.sendReliableMessage();
+diff --git a/indra/newview/llworld.cpp b/indra/newview/llworld.cpp
+index fc6ca69c5f..fc79b47cf3 100644
+--- a/indra/newview/llworld.cpp
++++ b/indra/newview/llworld.cpp
+@@ -1616,6 +1616,9 @@ void process_enable_simulator(LLMessageSystem *msg, void **user_data)
+ 
+     // which simulator should we modify?
+     LLHost sim(ip_u32, port);
++    LL_INFOS("AGVProto") << "enable_simulator handle=" << handle
++                          << " sim=" << sim
++                          << LL_ENDL;
+ 
+ // <FS:CR> Aurora Sim
+     U32 region_size_x = 256;

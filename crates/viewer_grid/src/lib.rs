@@ -329,25 +329,69 @@ fn classify_failure(response: &GridLoginResponse) -> GridLoginError {
 pub struct AssetCapabilityPolicy;
 
 impl AssetCapabilityPolicy {
+    pub fn texture_url_candidates(
+        capabilities: &std::collections::BTreeMap<String, String>,
+        asset_id: &viewer_core::AssetID,
+    ) -> Vec<String> {
+        if asset_id.is_empty() {
+            return Vec::new();
+        }
+
+        let mut urls = Vec::new();
+        if let Some(base_url) = capabilities.get("GetTexture") {
+            extend_unique(
+                &mut urls,
+                Self::texture_url_candidates_from_base(base_url, asset_id.as_str()),
+            );
+        }
+        if let Some(base_url) = capabilities.get("ViewerAsset") {
+            extend_unique(
+                &mut urls,
+                Self::texture_url_candidates_from_base(base_url, asset_id.as_str()),
+            );
+        }
+        urls
+    }
+
+    pub fn texture_url_candidates_from_base(base_url: &str, asset_id: &str) -> Vec<String> {
+        let base = base_url.trim().trim_end_matches('/');
+        let asset_id = asset_id.trim();
+        if base.is_empty() || asset_id.is_empty() {
+            return Vec::new();
+        }
+
+        let mut urls = Vec::new();
+        extend_unique(
+            &mut urls,
+            [
+                format!("{base}/?texture_id={asset_id}"),
+                format!("{base}?texture_id={asset_id}"),
+                format!("{base}/{asset_id}"),
+                format!("{base}?id={asset_id}"),
+                format!("{base}?asset_id={asset_id}"),
+            ],
+        );
+        urls
+    }
+
     pub fn select_texture_url(
         capabilities: &std::collections::BTreeMap<String, String>,
         asset_id: &viewer_core::AssetID,
     ) -> Option<String> {
-        if asset_id.is_empty() {
-            return None;
-        }
+        Self::texture_url_candidates(capabilities, asset_id)
+            .into_iter()
+            .next()
+    }
+}
 
-        // Preference 1: GetTexture (Modern CDN-backed capability)
-        if let Some(base_url) = capabilities.get("GetTexture") {
-            return Some(format!("{}?texture_id={}", base_url, asset_id));
+fn extend_unique<I>(out: &mut Vec<String>, candidates: I)
+where
+    I: IntoIterator<Item = String>,
+{
+    for candidate in candidates {
+        if !out.contains(&candidate) {
+            out.push(candidate);
         }
-
-        // Preference 2: ViewerAsset (Older but direct capability)
-        if let Some(base_url) = capabilities.get("ViewerAsset") {
-            return Some(format!("{}/texture/{}", base_url, asset_id));
-        }
-
-        None
     }
 }
 
@@ -410,7 +454,23 @@ mod tests {
 
         let id = viewer_core::AssetID::new("test-id");
         let url = AssetCapabilityPolicy::select_texture_url(&caps, &id).unwrap();
-        assert_eq!(url, "http://cdn?texture_id=test-id");
+        assert_eq!(url, "http://cdn/?texture_id=test-id");
+    }
+
+    #[test]
+    fn asset_policy_exposes_firestorm_style_first_then_legacy_fallbacks() {
+        let candidates =
+            AssetCapabilityPolicy::texture_url_candidates_from_base("http://cdn", "test-id");
+        assert_eq!(
+            candidates,
+            vec![
+                "http://cdn/?texture_id=test-id",
+                "http://cdn?texture_id=test-id",
+                "http://cdn/test-id",
+                "http://cdn?id=test-id",
+                "http://cdn?asset_id=test-id",
+            ]
+        );
     }
 
     #[test]
@@ -420,7 +480,7 @@ mod tests {
 
         let id = viewer_core::AssetID::new("test-id");
         let url = AssetCapabilityPolicy::select_texture_url(&caps, &id).unwrap();
-        assert_eq!(url, "http://fallback/texture/test-id");
+        assert_eq!(url, "http://fallback/?texture_id=test-id");
     }
 
     #[test]
@@ -434,6 +494,10 @@ mod tests {
         assert!(
             AssetCapabilityPolicy::select_texture_url(&caps, &viewer_core::AssetID::default())
                 .is_none()
+        );
+        assert!(
+            AssetCapabilityPolicy::texture_url_candidates(&caps, &viewer_core::AssetID::default())
+                .is_empty()
         );
     }
 }

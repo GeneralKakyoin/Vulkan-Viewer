@@ -328,3 +328,125 @@ more than one session to establish correctly.
 **Rule for future plans:** Any validation step that captures screenshots must include manual review of at least one produced image and must report the reviewed file path plus a one-line visual verdict in handoff/report artifacts.
 
 **Files affected:** `docs/TESTING_REFERENCE.md`, milestone reports/handoffs that claim visual verification.
+
+## L23 — Firestorm parity for `EnableSimulator` retarget alone is insufficient; object-feed ingress can still remain zero
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running repeated Firestorm-vs-viewer protocol comparisons on March 29, 2026.
+
+**What happened:** Firestorm logs showed high `ObjectUpdate*` traffic while our viewer remained at `object_updates=0`. Adjusting `EnableSimulator` retarget behavior did not, by itself, unblock object-feed ingress. This means the blocker is deeper than simple event-queue retarget gating and requires packet-path parity validation (classification, socket/circuit behavior, or post-login receive pipeline) with concrete capture evidence.
+
+**Rule for future plans:** Do not treat `EnableSimulator` retarget changes as a sufficient fix for missing world updates. Any proposed fix must be validated by a capture showing non-zero `object_updates` in the viewer log, not just successful login/retarget diagnostics.
+
+**Files affected:** `viewer_app` runtime handoff/retarget policy, `viewer_net` first-sim receive and classification path, `tools/firestorm/compare_proto_logs.ps1` workflow.
+
+---
+
+## L24 — The first social circuit must preserve the probe socket if startup object traffic begins immediately after `AgentMovementComplete`
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Investigating why the viewer received ongoing simulator traffic but still reported `object_updates=0` during March 29, 2026 live comparisons.
+
+**What happened:** The initial handshake probe used one UDP socket, then `open_social_circuit()` bound a different socket and re-sent `UseCircuitCode` / `CompleteAgentMovement`. Firestorm captures showed the simulator emits dense `ObjectUpdate*` traffic immediately after `AgentMovementComplete`, so dropping the first socket could discard the startup object burst before the long-lived receive path began.
+
+**Rule for future plans:** Any plan that separates first-simulator handshake probing from long-lived UDP receive must preserve socket continuity across that boundary or explicitly justify why startup object traffic cannot be lost. Do not assume a second handshake on a new socket is harmless during initial world entry.
+
+**Files affected:** `viewer_net` first-simulator probe and social-circuit socket lifecycle.
+
+---
+
+## L25 — Socket continuity can restore a completed startup handshake without restoring object-feed ingress
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 29, 2026 connected verification after implementing retained-socket handoff from the first-simulator probe into `open_social_circuit()`.
+
+**What happened:** The live run reached `handshake_complete=true` with retained-socket traffic observations, but `object_feed` counters remained `update_messages=0 total_objects=0` and `region_handshake_updates=0`. That means socket continuity fixed a real protocol defect, but object-feed ingress still depends on an additional parity gap after startup handshake continuity is restored.
+
+**Rule for future plans:** Do not assume that preserving the first-simulator socket is the final fix for missing world objects. After socket continuity is in place, the next debugging step must capture the current post-`AgentMovementComplete` packet mix and compare it against Firestorm before changing more transport behavior.
+
+**Files affected:** `viewer_net` startup receive path, `viewer_app` live verification/relay diagnostics.
+
+---
+
+## L26 — Nearby chat polling in the live worker must reuse the active social circuit
+
+**Category:** Protocol / `viewer_net` / `viewer_app`
+
+**Learned when:** Live startup debugging after the retained-socket fix still showed zero object ingress.
+
+**What happened:** The worker loop was calling `poll_nearby_chat_udp(...)`, which opened a fresh handshaked UDP socket on every tick. That silently reintroduced first-simulator socket churn inside steady-state operation.
+
+**Rule for future plans:** Any continuous live-worker traffic that talks to the first simulator must reuse the active `SocialCircuit` unless there is explicit protocol evidence that a separate socket is required. Do not call fresh-socket handshake helpers inside steady-state polling loops.
+
+---
+
+## L27 — LLUDP reliability replies cannot be approximated casually
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** A bounded attempt to add naive `PacketAck`/`CompletePingCheck` handling regressed live startup from `handshake_complete=true` to `handshake_complete=false`.
+
+**What happened:** The live regression showed that LLUDP reliability behavior is more delicate than copying a few flags and message IDs. Without a protocol-accurate design, even well-intentioned ack/ping reply code can break the first-simulator handshake.
+
+**Rule for future plans:** Do not implement LLUDP reliability/ack behavior from message-template snippets alone. Use stronger upstream/protocol evidence and verify against live handshake behavior before keeping any such change.
+
+---
+
+## L28 — Texture capability URLs must be treated as ordered candidates, not one exact string
+
+**Category:** Asset / `viewer_grid` + `viewer_net` + `viewer_app`
+
+**Learned when:** Investigating why the bounded live texture bridge still had no reliable proof of a fetched scene texture on March 29, 2026.
+
+**What happened:** The scene-texture path built a single exact capability URL and fetched it once, while Firestorm’s texture path appends `/?texture_id=...` and our profile-image path already relied on bounded URL fallbacks. That let scene textures and profile images drift apart and left `GetTexture` sensitive to a slash/no-slash mismatch.
+
+**Rule for future plans:** Any plan touching `GetTexture` or `ViewerAsset` must keep ordered candidate URL generation in `viewer_grid` and route both scene textures and profile images through one shared `viewer_net` fetch helper. Do not let those paths maintain separate URL-shaping logic.
+
+**Files affected:** `viewer_grid::AssetCapabilityPolicy`, `viewer_net` texture HTTP helpers, `viewer_app` live texture request path.
+
+---
+
+## L29 — Recurring `AgentUpdate` cadence alone does not unblock object ingress once startup parity is already present
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 29, 2026 connected verification after adding bounded recurring `AgentUpdate` keepalives on the active retained social circuit.
+
+**What happened:** The viewer already had retained-socket continuity, startup drain, single-social-socket discipline, and startup `RegionHandshakeReply` / `AgentThrottle` / reliable `AgentUpdate`. Adding recurring non-reliable `AgentUpdate` keepalives did not change the live packet mix: the capture still showed the same seven startup kinds and `object_feed` remained at `update_messages=0 total_objects=0`.
+
+**Rule for future plans:** After startup parity already includes a reliable `AgentUpdate`, do not spend another slice on `AgentUpdate` cadence alone unless new packet-mix evidence justifies it. Shift the next fix toward protocol-accurate first-simulator control/reliability behavior or another specifically evidenced missing control path.
+
+**Files affected:** `viewer_net` first-simulator send helpers, `viewer_app` live-worker scheduling, connected RCA artifacts.
+
+---
+
+## L30 — ACK-trailer parity alone does not restore object ingress once the retained-socket baseline is already in place
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Running the March 29, 2026 connected verification after implementing bounded first-simulator ACK-trailer parity on top of retained-socket continuity, startup interest sends, and recurring `AgentUpdate` cadence.
+
+**What happened:** The transport layer began collecting reliable inbound packet IDs, appending Firestorm-style ACK trailers to outbound first-simulator datagrams, and decoding inbound bodies without trailer corruption. Validation passed, but the bounded live run still showed `update_messages=0`, `total_objects=0`, `region_handshake_updates=0`, and the same seven startup packet kinds while `handshake_complete=true`.
+
+**Rule for future plans:** After the retained-socket and startup-interest baseline is already present, do not assume missing ACK trailers are the final blocker for object ingress. If ACK-trailer parity is in place and live ingress is still zero, move the next slice to a different evidenced post-`AgentMovementComplete` control/parity gap rather than revisiting the same reliability surface.
+
+**Files affected:** `viewer_net` first-simulator transport path, connected RCA artifacts, follow-up object-ingress planning.
+
+---
+
+## L31 — Packet captures can falsify code-level assumptions about first-simulator socket continuity
+
+**Category:** Protocol / `viewer_net`
+
+**Learned when:** Preserving and decoding the March 30, 2026 Firestorm and app pcap artifacts for the blocked object-ingress path.
+
+**What happened:** Code inspection and unit coverage suggested retained-socket continuity was already repaired, but the preserved app capture still showed simulator traffic on an additional local UDP port during the same capture window while the handshake/control flow on another local port never received the matching object burst. The Firestorm capture, by contrast, showed a single coherent local-port flow immediately before `ObjectUpdateCached` ingress.
+
+**Rule for future plans:** When first-simulator continuity is in doubt, do not rely only on code structure, unit tests, or bounded app logs. Preserve packet captures, compare local-port usage directly, and let runtime wire evidence decide whether socket continuity is truly fixed before implementing more message parity.
+
+**Files affected:** first-simulator transport debugging, pcap preservation artifacts, follow-up object-ingress planning.
+
+---

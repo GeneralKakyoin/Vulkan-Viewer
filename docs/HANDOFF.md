@@ -1,37 +1,37 @@
-# HANDOFF: N15 Continuity Probe Command Wiring
+# HANDOFF: Object Ingress PCAP Forensics And Next Plan
 
 ## What Changed
-- Implemented `Retry Continuity Probe` as a live worker command path (UI intent -> app dispatch -> net probe execution -> result update).
-- Added deterministic retry guards in `viewer_app`:
-  - cooldown enforcement (`RECOVERY_PROBE_COOLDOWN_MS`)
-  - single-flight rejection when probe already in flight
-  - unavailable mapping when probe command cannot be queued
-- Preserved probe result propagation to continuity diagnostics:
-  - `continuity.last_probe_result`
-  - `continuity.last_probe_time_unix_ms`
-- Added diagnostics status line text for last recovery action in `viewer_ui`.
-- Added/updated N15 artifacts:
-  - `docs/reviews/REVIEW_PLAN_N15.md`
-  - `docs/reviews/REVIEW_IMPL_N15.md`
-  - `docs/reports/REPORT_N15.md`
-  - `docs/plans/DEFERRED_FEATURES.md` promotion for U14 deferred probe wiring
+- Preserved the two most important external packet captures in-repo:
+  - `artifacts/pcaps/firestorm_object_ingress_reference_2026-03-30_firee.pcapng`
+  - `artifacts/pcaps/app_object_ingress_reference_2026-03-30_App.pcapng`
+- Added a preservation manifest with stable sha256 hashes in `artifacts/pcaps/README.md`.
+- Added a research summary at `docs/RESEARCH/OBJECT_INGRESS_PCAP_FORENSICS_2026-03-30.md`.
+- Added the next bounded plan and review:
+  - `docs/plans/PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
+  - `docs/reviews/REVIEW_PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
 
 ## Validation Run
-- `cargo fmt --all`: PASSED
-- `cargo check --workspace`: PASSED
-- `cargo test -p viewer_core -p viewer_ui -p viewer_app -p viewer_net`: PASSED
-- `cargo test --workspace`: PASSED
-- `VIEWER_APP_LIVE_STARTUP=off STRESS_TEST=screenshot VIEWER_TEST_SCREENSHOT_DIR=artifacts/screenshots_n15_smoke VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES=1 VIEWER_TEST_SCREENSHOT_MAX_FRAMES=1 cargo run -p viewer_app`: PASSED
-- Screenshot manually reviewed: `artifacts/screenshots_n15_smoke/viewer_test_0001.png`
+- `Get-FileHash C:\Users\matti\Desktop\firee.pcapng -Algorithm SHA256`: PASSED
+- `Get-FileHash C:\Users\matti\Desktop\App.pcapng -Algorithm SHA256`: PASSED
+- local Python pcap parsing of preserved Firestorm and app simulator conversations: PASSED
+- No runtime code or cargo validation was run in this documentation/planning slice.
 
 ## Exact Current State
-- N15 bounded continuity probe retry path is wired and validated offline.
-- Retry probe now exposes explicit unavailable/in-flight/cooldown/completed statuses through existing recovery result surfaces.
-- Workspace still reports non-blocking warning in `viewer_render` (`DEBUG_CLIP_SPACE_TRIANGLE` dead code).
+- Firestorm reference capture:
+  - single coherent simulator flow on `16.144.39.130:13001`
+  - large `ObjectUpdateCached` burst appears after a richer pre-burst send sequence
+- App reference capture:
+  - same simulator endpoint reached
+  - no object burst on the handshake/control flow
+  - additional local UDP port observed receiving simulator traffic during the capture window
+- Current best interpretation:
+  - runtime local-port/socket continuity is not yet proven in practice
+  - extra Firestorm pre-burst requests are important evidence, but not yet safe to treat as the next implementation target
 
 ## Exact Next Step
-- Run connected live validation for retry-probe behavior and continuity diagnostics transitions with valid `VIEWER_LOGIN_*` environment credentials.
+- Implement `docs/plans/PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`.
+- Add bounded runtime local-port/socket diagnostics to the first-simulator path and verify whether the blocked viewer still uses more than one local UDP port during startup and early steady-state traffic.
 
 ## Blockers / Risks
-- Connected verification remains pending due credential/environment dependency.
-- No `docs/plans/PLAN_N16.md` exists in this workspace; only `PLAN_N15.md` was implementable in this pass.
+- `App.pcapng` capture start timing leaves some ambiguity about when the earlier local port was created.
+- Blindly mirroring Firestorm’s extra pre-burst messages remains intentionally deferred until the runtime socket lifecycle is verified.

@@ -3,6 +3,98 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (Object Ingress PCAP Forensics)
+- **Preserved runtime evidence added**: the Firestorm and app packet captures are now preserved under `artifacts/pcaps/` with a manifest and stable sha256 hashes.
+- **Firestorm pre-burst sequence externally confirmed**: the preserved Firestorm capture on `16.144.39.130:13001` shows `AgentUpdate`, `AgentAnimation`, `SetAlwaysRun`, `PacketAck`, `MuteListRequest`, `MoneyBalanceRequest`, and `AgentDataUpdateRequest` immediately before the first `ObjectUpdateCached` burst.
+- **Blocked app path refined by capture evidence**: the preserved app capture reaches the same simulator endpoint but shows no object burst on its handshake/control flow, and it also contains a second local UDP port receiving simulator traffic during the capture window.
+- **Current state**: the next bounded slice should verify runtime local-port/socket continuity in practice before adding more Firestorm pre-burst message parity.
+- **Planning status**:
+  - research note: `docs/RESEARCH/OBJECT_INGRESS_PCAP_FORENSICS_2026-03-30.md`
+  - next plan: `docs/plans/PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
+  - plan review: `docs/reviews/REVIEW_PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md`
+
+## Latest Notable Changes (Object Ingress ACK-Trailer Parity)
+- **Firestorm-style ACK-trailer transport parity added**: `viewer_net` now parses first-simulator flags/packet IDs/body bounds, queues reliable inbound packet IDs for ACK, and appends bounded ACK trailers onto outbound first-simulator datagrams.
+- **Inbound decode is trailer-safe**: first-simulator message decoders now exclude appended ACK trailers from body slices, preventing trailer bytes from corrupting `HealthMessage`, `RegionHandshake`, object-update, and social decode paths.
+- **Targeted transport coverage expanded**:
+  - ACK-trailer parsing/body-slice test
+  - reliable inbound ACK-queue test
+  - outbound ACK-trailer send-and-drain test
+  - trailer-safe health decode test
+- **Connected result remained unchanged**: a bounded `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app` run after the transport change still reported `update_messages=0 total_objects=0 handshake_complete=true traffic_obs=7 region_handshake_updates=0` with the same startup kinds `AgentDataUpdate`, `AgentMovementComplete`, `HealthMessage`, `OnlineNotification`, `PacketAck`, `TestMessage`, and `ViewerEffect`.
+- **Current state**: retained socket continuity, startup receive activation, single-social-socket discipline, startup interest sends, recurring `AgentUpdate` cadence, and ACK-trailer parity are all now in place, but object ingress is still blocked. The next likely blocker is a different post-`AgentMovementComplete` control/protocol parity gap.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - connected run: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app`
+
+## Latest Notable Changes (Object Ingress AgentUpdate Cadence)
+- **Reusable active-circuit `AgentUpdate` helper added**: `viewer_net` now exposes a dedicated `send_agent_update_on_circuit(...)` helper instead of keeping `AgentUpdate` trapped inside startup-only interest sends.
+- **Live worker keepalive cadence added**: `viewer_app` now sends bounded recurring non-reliable `AgentUpdate` keepalives on the active retained `SocialCircuit` and re-arms that cadence after social-circuit reopen.
+- **Targeted regression coverage added**:
+  - `viewer_net` test for non-reliable `AgentUpdate` keepalive send behavior
+  - `viewer_app` tests for deterministic keepalive interval/scheduling
+- **Connected result remained unchanged**: the bounded live capture in `artifacts/logs/live_agent_update_cadence_2026-03-29_231942.log` still reports `update_messages=0 total_objects=0 handshake_complete=true traffic_obs=7 region_handshake_updates=0` with the same startup kinds `AgentDataUpdate`, `AgentMovementComplete`, `HealthMessage`, `OnlineNotification`, `PacketAck`, `TestMessage`, and `ViewerEffect`.
+- **Current state**: retained socket continuity, startup receive activation, single-social-socket discipline, startup parity sends, and recurring `AgentUpdate` cadence are all in place, but none of them have yet restored `RegionHandshake` or `ObjectUpdate*` ingress. The next likely blocker is protocol-accurate first-simulator control/reliability behavior rather than more socket or `AgentUpdate` cadence tuning.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - connected live capture: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app` (bounded 60s capture to `artifacts/logs/live_agent_update_cadence_2026-03-29_231942.log`)
+
+## Latest Notable Changes (Live Texture Capability URL Parity)
+- **Firestorm-style texture URL ordering restored**: `viewer_grid::AssetCapabilityPolicy` now tries `/?texture_id=...` first for both `GetTexture` and `ViewerAsset`, then bounded legacy fallbacks.
+- **Shared texture fetch helper added**: live scene textures and profile images now reuse the same `viewer_net` HTTP candidate-fetch path with image-oriented `Accept` header handling.
+- **Live worker texture requests hardened**: `viewer_app` no longer relies on one exact capability URL shape for scene textures.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_grid -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_grid -p viewer_net -p viewer_app`
+- **Current state**: targeted validation passes; connected proof of a real live scene texture is still pending, and the provided `C:\\Users\\matti\\Desktop\\fire.pcapng` did not include transfer-level texture payloads.
+
+## Latest Notable Changes (Startup Protocol And Social Socket Discipline)
+- **Startup protocol parity added**: the live worker now sends bounded `RegionHandshakeReply`, `AgentThrottle`, and one-shot `AgentUpdate` messages on the active social circuit, and `RegionHandshake` decode now handles zero-coded payloads.
+- **Single-social-socket discipline restored**: nearby-chat polling/sending in the live worker now reuses the active `SocialCircuit` instead of re-handshaking fresh UDP sockets in the steady-state loop.
+- **Startup packet mix is now explicit**: the startup relay summary includes the exact first-simulator receive kinds observed on connected runs.
+- **Current best live evidence remains blocked**: the best non-regressed connected capture still reports `update_messages=0 total_objects=0 region_handshake_updates=0` with startup kinds `AgentDataUpdate`, `AgentMovementComplete`, `HealthMessage`, `OnlineNotification`, `PacketAck`, `TestMessage`, and `ViewerEffect` in `artifacts/logs/live_single_social_socket_2026-03-29_222138.log`.
+- **Reliability-reply experiment reverted**: a bounded attempt to add LLUDP ack/ping replies regressed startup handshake completion and was not kept.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - connected captures:
+    - `artifacts/logs/live_startup_protocol_parity_2026-03-29_221717.log`
+    - `artifacts/logs/live_single_social_socket_2026-03-29_222138.log`
+    - reverted reliability experiment logs:
+      - `artifacts/logs/live_lludp_reliability_2026-03-29_222955.log`
+      - `artifacts/logs/live_lludp_reliability_2026-03-29_223058.log`
+## Latest Notable Changes (Live Object Feed Unblock Verification)
+- **`viewer_app` compile compatibility restored**: updated the object-feed snapshot bridge to populate the new `DecodedWorldObjectFeedObject.texture_id` field with the current transport-side `None` placeholder.
+- **Live verification relay restored**: re-added bounded `object_feed` startup/tick relay lines in `viewer_app` so connected runs again expose object-feed counters during worker startup.
+- **Connected verification result captured**: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app` now reaches `handshake_complete=true` with `traffic_obs=7` on the retained-socket path, but `update_messages=0` and `total_objects=0` remain unchanged in `artifacts/logs/live_socket_continuity_verify_2026-03-29_214711.log`.
+- **Current blocker narrowed**: socket continuity is now validated as working, but it is not sufficient by itself to unblock world-object ingress; `RegionHandshake` also remains absent in the captured startup summary (`region_handshake_updates=0`).
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - connected live capture: `VIEWER_APP_LIVE_STARTUP=on cargo run -p viewer_app` (bounded 60s capture to `artifacts/logs/live_socket_continuity_verify_2026-03-29_214711.log`)
+
+## Latest Notable Changes (First-Simulator Socket Continuity Fix)
+- **Probe socket handoff added**: `viewer_net::Connection` now retains the successful first-simulator probe socket and hands it to the first `open_social_circuit()` call instead of binding a second UDP port.
+- **Duplicate startup handshake avoided**: the reused-socket path skips redundant `UseCircuitCode` / `CompleteAgentMovement` sends, preserving the simulator address association established during the probe window.
+- **Transport regression coverage expanded**: added `viewer_net` tests for retained-socket reuse and fresh-socket fallback behavior.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net`
+  - `cargo test -p viewer_net`
+  - `cargo check -p viewer_net -p viewer_app` currently fails in `viewer_app` due an unrelated missing `texture_id` field in `DecodedWorldObjectFeedObject` initialization.
+- **Current state**: the transport-side socket continuity fix is implemented and validated in `viewer_net`; broader app/live validation remains blocked until the unrelated `viewer_app` compile error is resolved.
+
 ## Latest Notable Changes (N15 Completed)
 - **Recovery probe command path completed**: `Retry Continuity Probe` now executes through the live worker command lane instead of remaining deferred/unavailable.
 - **Bounded guard semantics enforced**: retry behavior now applies both cooldown and explicit single-flight protection for in-flight probe requests.
@@ -145,3 +237,4 @@ Focus: Wrap U14 workflow resilience and move dynamically forwards (the transitio
 - `viewer_net`/`viewer_grid`: Protocol and asset transport layers.
 
 - **Verification Status**: `cargo fmt --all`, `cargo check --workspace`, targeted crate tests, `cargo test --workspace`, and offline screenshot smoke all pass on the current R08 baseline.
+

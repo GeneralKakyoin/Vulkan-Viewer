@@ -311,6 +311,8 @@ struct InProcessLiveFeedConfig {
     asset_live_timeout_ms: u64,
 }
 
+const AGENT_UPDATE_KEEPALIVE_PERIOD_MS: u64 = 1_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiveStartupMode {
     Auto,
@@ -1125,6 +1127,48 @@ async fn run_in_process_live_feed(
                 .await;
         }
 
+        let mut event_ack = 0u64;
+        let mut attempted_profile_image_assets = BTreeSet::new();
+        let mut known_avatar_name_ids = BTreeSet::new();
+        known_avatar_name_ids.extend(bootstrap_friend_ids.iter().cloned());
+        if !local_agent_id.is_empty() {
+            known_avatar_name_ids.insert(local_agent_id.clone());
+        }
+        let mut worker_tick: u64 = 0;
+        let agent_update_keepalive_interval_ticks = agent_update_keepalive_interval_ticks(&config);
+        let mut last_agent_update_tick = None;
+        let mut social_circuit: Option<SocialCircuit> = connection
+            .open_social_circuit(&config.receive_bind)
+            .await
+            .ok();
+        if let Some(circuit) = social_circuit.as_ref() {
+            if let Err(err) = prime_startup_social_circuit(
+                &mut connection,
+                circuit,
+                &tx,
+                &local_agent_id,
+                &config,
+            )
+            .await
+            {
+                emit_relay(
+                    &tx,
+                    RuntimeRelayLevel::Warn,
+                    "social",
+                    &format!("startup social activation failed: {err}"),
+                );
+            } else {
+                last_agent_update_tick = Some(worker_tick);
+            }
+        } else {
+            emit_relay(
+                &tx,
+                RuntimeRelayLevel::Warn,
+                "social",
+                "social circuit unavailable",
+            );
+        }
+
         let capabilities = connection.fetch_seed_capabilities().await.ok();
         let event_queue_url = capabilities
             .as_ref()
@@ -1214,30 +1258,10 @@ async fn run_in_process_live_feed(
                 );
             }
         }
-        let mut event_ack = 0u64;
-        let mut attempted_profile_image_assets = BTreeSet::new();
-        let mut known_avatar_name_ids = BTreeSet::new();
-        known_avatar_name_ids.extend(bootstrap_friend_ids.iter().cloned());
-        if !local_agent_id.is_empty() {
-            known_avatar_name_ids.insert(local_agent_id.clone());
-        }
-        let mut social_circuit: Option<SocialCircuit> = connection
-            .open_social_circuit(&config.receive_bind)
-            .await
-            .ok();
-        if let Some(circuit) = &social_circuit {
-            let _ = connection.send_retrieve_instant_messages(circuit).await;
-        } else {
-            emit_relay(
-                &tx,
-                RuntimeRelayLevel::Warn,
-                "social",
-                "social circuit unavailable",
-            );
-        }
 
         update_live_visual_from_connection(&mut snapshot, &connection);
         snapshot.source = String::from("viewer_app_in_process:ready");
+        emit_object_feed_startup_summary(&tx, &snapshot, &connection);
         let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
         let _ = tx.send(LiveFeedUpdate::WorldAvatars {
             avatars: extract_worker_world_avatar_samples(&connection, &local_agent_id),
@@ -1254,7 +1278,6 @@ async fn run_in_process_live_feed(
 
         let mut should_reconnect = false;
         let mut event_queue_consecutive_failures = 0u32;
-        let mut worker_tick: u64 = 0;
         let mut event_queue_poll_task = None;
         loop {
             while let Ok(command) = command_rx.try_recv() {
@@ -1276,6 +1299,7 @@ async fn run_in_process_live_feed(
                         let _ = tx.send(LiveFeedUpdate::ChatSendStatus(ChatSendStatus::Sending));
                         match send_nearby_chat_with_caps(
                             &mut connection,
+                            social_circuit.as_ref(),
                             &text,
                             &config.receive_bind,
                             std::time::Duration::from_millis(config.nearby_send_receive_timeout_ms),
@@ -1628,13 +1652,18 @@ async fn run_in_process_live_feed(
                         tokio::spawn(async move {
                             let id_str = id.to_string();
                             if let Some(caps) = caps {
-                                if let Some(url) =
-                                    viewer_grid::AssetCapabilityPolicy::select_texture_url(
+                                let urls =
+                                    viewer_grid::AssetCapabilityPolicy::texture_url_candidates(
                                         &caps.entries,
                                         &id,
+                                    );
+                                if !urls.is_empty() {
+                                    match viewer_net::fetch_texture_asset_bytes(
+                                        &urls,
+                                        fetch_timeout,
                                     )
-                                {
-                                    match viewer_net::fetch_asset_bytes(&url, fetch_timeout).await {
+                                    .await
+                                    {
                                         Ok(bytes) => {
                                             let _ = tx.send(LiveFeedUpdate::TextureAsset {
                                                 id: id_str,
@@ -1731,6 +1760,32 @@ async fn run_in_process_live_feed(
                 }
             }
 
+            if let Some(circuit) = &social_circuit
+                && should_send_agent_update_keepalive(
+                    worker_tick,
+                    last_agent_update_tick,
+                    agent_update_keepalive_interval_ticks,
+                )
+            {
+                match connection
+                    .send_agent_update_on_circuit(circuit, false)
+                    .await
+                {
+                    Ok(()) => {
+                        last_agent_update_tick = Some(worker_tick);
+                    }
+                    Err(err) => {
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Warn,
+                            "social",
+                            &format!("agent update keepalive failed: {err}"),
+                        );
+                        should_reconnect = true;
+                    }
+                }
+            }
+
             if let Some(circuit) = &social_circuit {
                 match connection
                     .poll_social_events(
@@ -1741,94 +1796,7 @@ async fn run_in_process_live_feed(
                     .await
                 {
                     Ok(events) => {
-                        for event in events {
-                            match event {
-                                SocialEvent::FriendOnline { agent_id } => {
-                                    let _ = tx.send(LiveFeedUpdate::FriendPresence {
-                                        id: agent_id.clone(),
-                                        online: true,
-                                    });
-                                    emit_relay(
-                                        &tx,
-                                        RuntimeRelayLevel::Info,
-                                        "friend",
-                                        &format!("{agent_id} online"),
-                                    );
-                                }
-                                SocialEvent::FriendOffline { agent_id } => {
-                                    let _ = tx.send(LiveFeedUpdate::FriendPresence {
-                                        id: agent_id.clone(),
-                                        online: false,
-                                    });
-                                    emit_relay(
-                                        &tx,
-                                        RuntimeRelayLevel::Info,
-                                        "friend",
-                                        &format!("{agent_id} offline"),
-                                    );
-                                }
-                                SocialEvent::FriendRights {
-                                    agent_id,
-                                    related_id,
-                                    rights,
-                                } => {
-                                    if related_id == local_agent_id {
-                                        let _ = tx.send(LiveFeedUpdate::FriendRights {
-                                            id: agent_id.clone(),
-                                            rights_has: rights,
-                                            rights_given: 0,
-                                        });
-                                    } else if agent_id == local_agent_id {
-                                        let _ = tx.send(LiveFeedUpdate::FriendRights {
-                                            id: related_id.clone(),
-                                            rights_has: 0,
-                                            rights_given: rights,
-                                        });
-                                    }
-                                }
-                                SocialEvent::DirectIm(im) => {
-                                    let participant_id = if im.from_id == local_agent_id {
-                                        im.to_id.clone()
-                                    } else {
-                                        im.from_id.clone()
-                                    };
-                                    if !im.from_name.trim().is_empty() && !participant_id.is_empty()
-                                    {
-                                        let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
-                                            id: participant_id.clone(),
-                                            display_name: im.from_name.clone(),
-                                            source: String::from("im.from_name"),
-                                        });
-                                    }
-                                    let session_id = if !im.session_id.is_empty() {
-                                        im.session_id.clone()
-                                    } else {
-                                        compute_p2p_session_id(&local_agent_id, &participant_id)
-                                            .unwrap_or_default()
-                                    };
-                                    let _ = tx.send(LiveFeedUpdate::DirectIm(DirectImMessage {
-                                        id: now_unix_ms(),
-                                        session_id,
-                                        peer_id: participant_id.clone(),
-                                        from_id: im.from_id.clone(),
-                                        from_name: if im.from_name.is_empty() {
-                                            im.from_id.clone()
-                                        } else {
-                                            im.from_name.clone()
-                                        },
-                                        text: im.message.clone(),
-                                        observed_at_unix_ms: now_unix_ms(),
-                                        outgoing: im.from_id == local_agent_id,
-                                    }));
-                                    emit_relay(
-                                        &tx,
-                                        RuntimeRelayLevel::Info,
-                                        "im_recv",
-                                        &format!("im from {}", im.from_id),
-                                    );
-                                }
-                            }
-                        }
+                        dispatch_social_events(&tx, &local_agent_id, events);
                     }
                     Err(err) => {
                         emit_relay(
@@ -1841,6 +1809,20 @@ async fn run_in_process_live_feed(
                             .open_social_circuit(&config.receive_bind)
                             .await
                             .ok();
+                        if let Some(circuit) = social_circuit.as_ref() {
+                            if let Err(prime_err) =
+                                connection.send_startup_interest_messages(circuit).await
+                            {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "social",
+                                    &format!("social circuit re-prime failed: {prime_err}"),
+                                );
+                            } else {
+                                last_agent_update_tick = Some(worker_tick);
+                            }
+                        }
                         if social_circuit.is_none() {
                             emit_relay(
                                 &tx,
@@ -1854,13 +1836,14 @@ async fn run_in_process_live_feed(
                 }
             }
 
-            if let Ok(received) = connection
-                .poll_nearby_chat_udp(
-                    &config.receive_bind,
-                    std::time::Duration::from_millis(config.nearby_poll_timeout_ms),
-                    config.nearby_poll_max_packets,
-                )
-                .await
+            if let Some(circuit) = &social_circuit
+                && let Ok(received) = connection
+                    .poll_nearby_chat_on_circuit(
+                        circuit,
+                        std::time::Duration::from_millis(config.nearby_poll_timeout_ms),
+                        config.nearby_poll_max_packets,
+                    )
+                    .await
             {
                 for chat in received {
                     let _ = tx.send(LiveFeedUpdate::ChatMessage(ChatMessage {
@@ -1969,6 +1952,9 @@ async fn run_in_process_live_feed(
             }
             update_live_visual_from_connection(&mut snapshot, &connection);
             snapshot.source = String::from("viewer_app_in_process:ready");
+            if worker_tick.is_multiple_of(40) {
+                emit_object_feed_tick_summary(&tx, &snapshot);
+            }
             let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
             let avatar_samples = extract_worker_world_avatar_samples(&connection, &local_agent_id);
             let _ = tx.send(LiveFeedUpdate::WorldAvatars {
@@ -2122,14 +2108,21 @@ fn reconnect_backoff_duration(attempt: u32) -> std::time::Duration {
 
 async fn send_nearby_chat_with_caps(
     connection: &mut Connection,
+    circuit: Option<&SocialCircuit>,
     text: &str,
     bind: &str,
     receive_timeout: std::time::Duration,
     receive_max_packets: usize,
 ) -> std::result::Result<Vec<NearbyChatMessage>, ConnectionError> {
-    connection
-        .send_nearby_chat(text, bind, receive_timeout, receive_max_packets)
-        .await
+    if let Some(circuit) = circuit {
+        connection
+            .send_nearby_chat_on_circuit(circuit, text, receive_timeout, receive_max_packets)
+            .await
+    } else {
+        connection
+            .send_nearby_chat(text, bind, receive_timeout, receive_max_packets)
+            .await
+    }
 }
 
 async fn fetch_profile_tab_data(
@@ -2406,11 +2399,220 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
         .map(|obj| viewer_core::DecodedWorldObjectFeedObject {
             local_id: obj.local_id,
             scale_centi: obj.scale_centi,
+            texture_id: None,
         })
         .collect();
     snapshot.decoded_object_feed_recent_kills = decoded.object_feed_recent_kills.clone();
     let continuity_summary = connection.continuity_summary();
     snapshot.continuity = map_net_continuity_to_core(&continuity_summary);
+}
+
+fn emit_object_feed_startup_summary(
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    snapshot: &LiveVisualSnapshot,
+    connection: &Connection,
+) {
+    let region_handshake_updates = connection
+        .simulator_payload_decode_summary()
+        .region_handshake_updates;
+    let receive_kinds = summarize_receive_kinds(connection);
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "object_feed",
+        &format!(
+            "startup decode summary: update_messages={} total_objects={} handshake_complete={} traffic_obs={} region_handshake_updates={} kinds={}",
+            snapshot.decoded_object_feed_update_messages,
+            snapshot.decoded_object_feed_total_objects,
+            snapshot.handshake_agent_movement_complete,
+            snapshot.post_boundary_observations,
+            region_handshake_updates,
+            receive_kinds,
+        ),
+    );
+}
+
+fn emit_object_feed_tick_summary(tx: &mpsc::Sender<LiveFeedUpdate>, snapshot: &LiveVisualSnapshot) {
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "object_feed",
+        &format!(
+            "tick summary: update_messages={} total_objects={} handshake_complete={}",
+            snapshot.decoded_object_feed_update_messages,
+            snapshot.decoded_object_feed_total_objects,
+            snapshot.handshake_agent_movement_complete,
+        ),
+    );
+}
+
+fn summarize_receive_kinds(connection: &Connection) -> String {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for diag in connection.first_simulator_handshake_receive_diagnostics() {
+        let key = format!("{:?}", diag.kind);
+        *counts.entry(key).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return String::from("none");
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| format!("{kind}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn startup_social_drain_packet_budget(config: &InProcessLiveFeedConfig) -> usize {
+    config
+        .receive_max_packets
+        .max(config.social_poll_max_packets)
+        .max(config.post_movement_tail_packets)
+        .saturating_mul(8)
+        .clamp(32, 256)
+}
+
+fn dispatch_social_events(
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    local_agent_id: &str,
+    events: Vec<SocialEvent>,
+) {
+    for event in events {
+        match event {
+            SocialEvent::FriendOnline { agent_id } => {
+                let _ = tx.send(LiveFeedUpdate::FriendPresence {
+                    id: agent_id.clone(),
+                    online: true,
+                });
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Info,
+                    "friend",
+                    &format!("{agent_id} online"),
+                );
+            }
+            SocialEvent::FriendOffline { agent_id } => {
+                let _ = tx.send(LiveFeedUpdate::FriendPresence {
+                    id: agent_id.clone(),
+                    online: false,
+                });
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Info,
+                    "friend",
+                    &format!("{agent_id} offline"),
+                );
+            }
+            SocialEvent::FriendRights {
+                agent_id,
+                related_id,
+                rights,
+            } => {
+                if related_id == local_agent_id {
+                    let _ = tx.send(LiveFeedUpdate::FriendRights {
+                        id: agent_id.clone(),
+                        rights_has: rights,
+                        rights_given: 0,
+                    });
+                } else if agent_id == local_agent_id {
+                    let _ = tx.send(LiveFeedUpdate::FriendRights {
+                        id: related_id.clone(),
+                        rights_has: 0,
+                        rights_given: rights,
+                    });
+                }
+            }
+            SocialEvent::DirectIm(im) => {
+                let participant_id = if im.from_id == local_agent_id {
+                    im.to_id.clone()
+                } else {
+                    im.from_id.clone()
+                };
+                if !im.from_name.trim().is_empty() && !participant_id.is_empty() {
+                    let _ = tx.send(LiveFeedUpdate::FriendResolvedName {
+                        id: participant_id.clone(),
+                        display_name: im.from_name.clone(),
+                        source: String::from("im.from_name"),
+                    });
+                }
+                let session_id = if !im.session_id.is_empty() {
+                    im.session_id.clone()
+                } else {
+                    compute_p2p_session_id(local_agent_id, &participant_id).unwrap_or_default()
+                };
+                let _ = tx.send(LiveFeedUpdate::DirectIm(DirectImMessage {
+                    id: now_unix_ms(),
+                    session_id,
+                    peer_id: participant_id.clone(),
+                    from_id: im.from_id.clone(),
+                    from_name: if im.from_name.is_empty() {
+                        im.from_id.clone()
+                    } else {
+                        im.from_name.clone()
+                    },
+                    text: im.message.clone(),
+                    observed_at_unix_ms: now_unix_ms(),
+                    outgoing: im.from_id == local_agent_id,
+                }));
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Info,
+                    "im_recv",
+                    &format!("im from {}", im.from_id),
+                );
+            }
+        }
+    }
+}
+
+async fn drain_startup_social_circuit(
+    connection: &mut Connection,
+    circuit: &SocialCircuit,
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    local_agent_id: &str,
+    config: &InProcessLiveFeedConfig,
+) -> Result<(), viewer_net::ConnectionError> {
+    let events = connection
+        .poll_social_events(
+            circuit,
+            std::time::Duration::from_millis(config.social_poll_timeout_ms),
+            startup_social_drain_packet_budget(config),
+        )
+        .await?;
+    dispatch_social_events(tx, local_agent_id, events);
+    Ok(())
+}
+
+async fn prime_startup_social_circuit(
+    connection: &mut Connection,
+    circuit: &SocialCircuit,
+    tx: &mpsc::Sender<LiveFeedUpdate>,
+    local_agent_id: &str,
+    config: &InProcessLiveFeedConfig,
+) -> Result<(), viewer_net::ConnectionError> {
+    let _ = connection
+        .send_pending_region_handshake_reply(circuit)
+        .await?;
+    connection.send_startup_interest_messages(circuit).await?;
+    connection.send_retrieve_instant_messages(circuit).await?;
+    drain_startup_social_circuit(connection, circuit, tx, local_agent_id, config).await
+}
+
+fn agent_update_keepalive_interval_ticks(config: &InProcessLiveFeedConfig) -> u64 {
+    let worker_tick_ms = config.worker_tick_ms.max(1);
+    AGENT_UPDATE_KEEPALIVE_PERIOD_MS.saturating_add(worker_tick_ms.saturating_sub(1))
+        / worker_tick_ms
+}
+
+fn should_send_agent_update_keepalive(
+    worker_tick: u64,
+    last_sent_tick: Option<u64>,
+    interval_ticks: u64,
+) -> bool {
+    let interval_ticks = interval_ticks.max(1);
+    match last_sent_tick {
+        Some(last_sent_tick) => worker_tick.saturating_sub(last_sent_tick) >= interval_ticks,
+        None => true,
+    }
 }
 
 fn map_net_continuity_to_core(
@@ -4902,6 +5104,29 @@ mod tests {
     }
 
     #[test]
+    fn agent_update_keepalive_interval_tracks_worker_tick_budget() {
+        let config = InProcessLiveFeedConfig {
+            worker_tick_ms: 60,
+            ..sample_in_process_config()
+        };
+        assert_eq!(agent_update_keepalive_interval_ticks(&config), 17);
+
+        let fast_config = InProcessLiveFeedConfig {
+            worker_tick_ms: 250,
+            ..sample_in_process_config()
+        };
+        assert_eq!(agent_update_keepalive_interval_ticks(&fast_config), 4);
+    }
+
+    #[test]
+    fn agent_update_keepalive_scheduler_is_deterministic() {
+        assert!(should_send_agent_update_keepalive(0, None, 5));
+        assert!(!should_send_agent_update_keepalive(4, Some(0), 5));
+        assert!(should_send_agent_update_keepalive(5, Some(0), 5));
+        assert!(should_send_agent_update_keepalive(10, Some(5), 0));
+    }
+
+    #[test]
     fn parse_start_location_maps_home_last_and_uri() {
         assert_eq!(
             parse_start_location("home"),
@@ -4915,6 +5140,39 @@ mod tests {
             parse_start_location("my://region/128/128/25"),
             StartLocationIntent::Uri(String::from("my://region/128/128/25"))
         );
+    }
+
+    fn sample_in_process_config() -> InProcessLiveFeedConfig {
+        InProcessLiveFeedConfig {
+            endpoint: String::from("https://example.invalid/login"),
+            username: String::from("user"),
+            password: String::from("pass"),
+            connect_timeout_secs: 15,
+            wire_format: LoginWireFormat::XmlRpc,
+            start_location: StartLocationIntent::Saved(StartLocation::Last),
+            agree_to_tos: false,
+            read_critical: true,
+            mfa_token: None,
+            receive_bind: String::from("0.0.0.0:0"),
+            receive_timeout_secs: 5,
+            receive_max_packets: 8,
+            post_movement_tail_packets: 4,
+            post_movement_timeout_secs: None,
+            stop_on_region_control: false,
+            run_probe: true,
+            worker_tick_ms: 60,
+            event_queue_poll_timeout_ms: 45_000,
+            event_queue_poll_every_ticks: 10,
+            event_queue_failures_before_reconnect: 0,
+            social_poll_timeout_ms: 35,
+            social_poll_max_packets: 4,
+            nearby_poll_timeout_ms: 40,
+            nearby_poll_max_packets: 2,
+            nearby_send_receive_timeout_ms: 40,
+            nearby_send_receive_packets: 0,
+            profile_cache_ttl_secs: 120,
+            asset_live_timeout_ms: 10_000,
+        }
     }
 
     #[test]

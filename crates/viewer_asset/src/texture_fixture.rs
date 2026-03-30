@@ -314,7 +314,7 @@ impl FixtureTextureCache {
                 }
             };
 
-            let decoded = match decode_png_rgba8(&bytes) {
+            let decoded = match crate::decode_texture_rgba8(&bytes) {
                 Ok(decoded) => decoded,
                 Err(_) => {
                     self.record_negative(id);
@@ -535,9 +535,12 @@ impl FixtureTextureCache {
             AssetFetchFailureReason::Transport => self.metrics.live_requests_failed_transport += 1,
             AssetFetchFailureReason::Decode => self.metrics.live_requests_failed_decode += 1,
             AssetFetchFailureReason::Timeout => self.metrics.live_requests_failed_timeout += 1,
-            AssetFetchFailureReason::Unsupported
-            | AssetFetchFailureReason::MissingCapability
-            | AssetFetchFailureReason::Other => self.metrics.live_requests_failed_other += 1,
+            AssetFetchFailureReason::MissingCapability => {
+                self.metrics.live_requests_failed_missing_capability += 1
+            }
+            AssetFetchFailureReason::Unsupported | AssetFetchFailureReason::Other => {
+                self.metrics.live_requests_failed_other += 1
+            }
         }
     }
 
@@ -573,16 +576,6 @@ fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn decode_png_rgba8(bytes: &[u8]) -> Result<DecodedRgbaImage> {
-    let image = image::load_from_memory(bytes)?;
-    let rgba8 = image.to_rgba8();
-    Ok(DecodedRgbaImage {
-        width: rgba8.width(),
-        height: rgba8.height(),
-        rgba: rgba8.into_raw(),
-    })
 }
 
 fn sanitize_fixture_filename(raw: &str) -> Option<String> {
@@ -819,6 +812,31 @@ mod tests {
         cache.poll_png_rgba8(1).unwrap();
 
         assert_eq!(cache.metrics.live_requests_failed_timeout, 1);
+        assert_eq!(cache.metrics.fixture_fallbacks_used, 1);
+    }
+
+    #[test]
+    fn live_failure_reason_missing_capability_is_accounted() {
+        let cache = FixtureTextureCache::with_base_dir(PathBuf::from("."), 1024);
+        let mut provider = MockLiveProvider {
+            requested: HashSet::new(),
+            ready: HashMap::new(),
+        };
+        let id = AssetID::new("live-missing-cap");
+        provider.ready.insert(
+            id.clone(),
+            AssetFetchOutcome {
+                status: AssetStatus::Missing,
+                source: crate::AssetSourceKind::Live,
+                failure: Some(AssetFetchFailureReason::MissingCapability),
+            },
+        );
+
+        let mut cache = cache.with_live_provider(Box::new(provider));
+        let _ = cache.request_png_rgba8(&id).unwrap();
+        cache.poll_png_rgba8(1).unwrap();
+
+        assert_eq!(cache.metrics.live_requests_failed_missing_capability, 1);
         assert_eq!(cache.metrics.fixture_fallbacks_used, 1);
     }
 }

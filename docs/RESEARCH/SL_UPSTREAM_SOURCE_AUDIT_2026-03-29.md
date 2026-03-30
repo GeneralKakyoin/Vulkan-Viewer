@@ -36,6 +36,12 @@ Goal context: `N15` continuity probe wiring and LLUDP protocol correctness.
 - For N15, we should continue to use local Firestorm code for behavior references, but source **message IDs** from the mirrored authoritative `master-message-template` when touching LLUDP classifications or probe-related packet IDs.
 - Spot-check confirms key IDs currently used in `viewer_net` still align (e.g., `PacketAck`, `UseCircuitCode`, `CompleteAgentMovement`, `HealthMessage`, `RegionHandshake`, `CrossedRegion`, `ConfirmEnableSimulator`, `AgentDataUpdate`, `ImprovedInstantMessage`, `RetrieveInstantMessages`).
 
+## Live texture slice guardrail (Single Live Texture / First Visible)
+- Scope verification: this slice changed only HTTP capability texture handling and decode/caching paths (`viewer_asset`, `viewer_app`, `viewer_grid`, `viewer_ui`, `viewer_core` metrics).
+- LLUDP guardrail result: no LLUDP message ID mapping/classification changes were made in `viewer_net`.
+- Template traceability reference remained:
+  - `reference/secondlife/master-message-template/message_template.msg`
+
 ## Source links
 - https://github.com/secondlife
 - https://github.com/secondlife/viewer

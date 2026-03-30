@@ -3920,6 +3920,8 @@ dependencies = [
  "base64 0.22.1",
  "gltf",
  "image",
+ "jpeg2k",
+ "justjp2",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -3951,6 +3953,7 @@ dependencies = [
 name = "viewer_net"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "quick-xml 0.30.0",
  "reqwest",
  "roxmltree",

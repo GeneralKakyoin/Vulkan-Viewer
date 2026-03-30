@@ -208,6 +208,14 @@ fn sample_jp2_component_u8(
     ((normalized * 255) / max) as u8
 }
 
+fn total_live_failures(metrics: &viewer_core::AssetContinuityMetrics) -> usize {
+    metrics.live_requests_failed_transport
+        + metrics.live_requests_failed_decode
+        + metrics.live_requests_failed_timeout
+        + metrics.live_requests_failed_missing_capability
+        + metrics.live_requests_failed_other
+}
+
 fn short_id(value: &str) -> String {
     value.chars().take(8).collect()
 }
@@ -823,11 +831,7 @@ impl UiSystem {
                                 fixture_texture_metrics.live_requests_enqueued,
                                 fixture_texture_metrics.live_requests_ready
                             ));
-                            let total_failed = fixture_texture_metrics
-                                .live_requests_failed_transport
-                                + fixture_texture_metrics.live_requests_failed_decode
-                                + fixture_texture_metrics.live_requests_failed_timeout
-                                + fixture_texture_metrics.live_requests_failed_other;
+                            let total_failed = total_live_failures(&fixture_texture_metrics);
                             ui.label(format!("Live Failed: {}", total_failed));
                             if total_failed > 0 {
                                 ui.indent("live_failures", |ui| {
@@ -842,6 +846,11 @@ impl UiSystem {
                                     ui.label(format!(
                                         "Timeout: {}",
                                         fixture_texture_metrics.live_requests_failed_timeout
+                                    ));
+                                    ui.label(format!(
+                                        "MissingCapability: {}",
+                                        fixture_texture_metrics
+                                            .live_requests_failed_missing_capability
                                     ));
                                 });
                             }
@@ -1801,5 +1810,18 @@ mod tests {
         assert_eq!(label, "failed");
         assert_eq!(color, egui::Color32::RED);
         assert_eq!(reason, Some(SessionUxReason::LoginAuth));
+    }
+
+    #[test]
+    fn total_live_failures_counts_missing_capability() {
+        let metrics = viewer_core::AssetContinuityMetrics {
+            live_requests_failed_transport: 1,
+            live_requests_failed_decode: 2,
+            live_requests_failed_timeout: 3,
+            live_requests_failed_missing_capability: 4,
+            live_requests_failed_other: 5,
+            ..Default::default()
+        };
+        assert_eq!(total_live_failures(&metrics), 15);
     }
 }

@@ -75,6 +75,7 @@ pub struct AssetContinuityMetrics {
     pub live_requests_failed_transport: usize,
     pub live_requests_failed_decode: usize,
     pub live_requests_failed_timeout: usize,
+    pub live_requests_failed_missing_capability: usize,
     pub live_requests_failed_other: usize,
     pub fixture_fallbacks_used: usize,
 }
@@ -760,6 +761,7 @@ impl Default for Scene {
 pub struct DecodedWorldObjectFeedObject {
     pub local_id: u32,
     pub scale_centi: Option<[u16; 3]>,
+    pub texture_id: Option<AssetID>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -5781,10 +5783,12 @@ mod tests {
             DecodedWorldObjectFeedObject {
                 local_id: 42,
                 scale_centi: Some([20, 30, 40]),
+                texture_id: None,
             },
             DecodedWorldObjectFeedObject {
                 local_id: 99,
                 scale_centi: None,
+                texture_id: None,
             },
         ];
         snapshot.decoded_object_feed_recent_kills = Vec::new();
@@ -5804,6 +5808,7 @@ mod tests {
         truncated.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
+            texture_id: None,
         }];
         truncated.decoded_object_feed_recent_kills = Vec::new();
         apply_scene_from_snapshot(&mut scene, Some(&truncated));
@@ -5822,6 +5827,7 @@ mod tests {
         remove_one.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
+            texture_id: None,
         }];
         remove_one.decoded_object_feed_recent_kills = vec![99];
         apply_scene_from_snapshot(&mut scene, Some(&remove_one));

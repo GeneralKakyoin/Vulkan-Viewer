@@ -28,16 +28,24 @@ const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
 const EVENT_QUEUE_ONE_SHOT_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 const EVENT_QUEUE_ONE_SHOT_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 const LLSD_XML_CONTENT_TYPE: &str = "application/llsd+xml";
+const TEXTURE_FETCH_ACCEPT_HEADER: &str = "image/x-j2c,image/jp2,image/*,*/*";
 const LLUDP_PACKET_ID_SIZE: usize = 6;
 const LLUDP_MINIMUM_VALID_PACKET_SIZE: usize = LLUDP_PACKET_ID_SIZE + 1;
 const LLUDP_MESSAGE_PREFIX: u8 = 0xFF;
 const LLUDP_RELIABLE_FLAG: u8 = 0x40;
+const LLUDP_ACK_FLAG: u8 = 0x10;
+const LLUDP_ZERO_CODE_FLAG: u8 = 0x80;
 const LLUDP_LOW_FREQUENCY_PREFIX: u32 = 0xFFFF0000;
+const LLUDP_MTU_BYTES: usize = 1200;
+const LLUDP_MAX_APPENDED_ACKS: usize = 250;
+const MAX_PENDING_FIRST_SIMULATOR_ACK_IDS: usize = 512;
 const LLUDP_USE_CIRCUIT_CODE_LOW_ID: u16 = 3;
 const LLUDP_CHAT_FROM_VIEWER_LOW_ID: u16 = 80;
+const LLUDP_AGENT_THROTTLE_LOW_ID: u16 = 81;
 const LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID: u16 = 249;
 const LLUDP_TEST_MESSAGE_LOW_ID: u16 = 1;
 const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
+const LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID: u16 = 149;
 const LLUDP_HEALTH_MESSAGE_LOW_ID: u16 = 138;
 const LLUDP_CHAT_FROM_SIMULATOR_LOW_ID: u16 = 139;
 const LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID: u16 = 150;
@@ -65,6 +73,7 @@ const LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID: u8 = 13;
 const LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID: u8 = 14;
 const LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID: u8 = 15;
 const LLUDP_KILL_OBJECT_HIGH_ID: u8 = 16;
+const LLUDP_AGENT_UPDATE_HIGH_ID: u8 = 4;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
@@ -76,6 +85,10 @@ const MAX_OBJECT_FEED_RECENT_KILLS: usize = 128;
 const MAX_ZEROCODED_BODY_BYTES: usize = 256 * 1024;
 const MAX_CONTINUITY_NEIGHBORS: usize = 8;
 const MAX_CONTINUITY_OBSERVATIONS: usize = 16;
+// Firestorm reference capture `artifacts/logs/firestorm_agvproto_capture_2026-03-29_211128.log`
+// shows this throttle mix immediately after AMC, before object ingress starts.
+const STARTUP_AGENT_THROTTLES: [f32; 7] = [450.0, 310.0, 62.0, 62.0, 1528.0, 1528.0, 560.0];
+const STARTUP_AGENT_UPDATE_FAR: f32 = 96.0;
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
     "AgentProfile",
@@ -1042,6 +1055,12 @@ pub struct DecodedAgentMovementComplete {
     pub region_handle: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodedRegionHandshake {
+    pub region_flags: u32,
+    pub sim_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedSimulatorViewerTimeMessage {
     pub body_len: u16,
@@ -1343,6 +1362,7 @@ pub struct Connection {
     session: Option<Session>,
     first_simulator_handshake_prerequisites: Option<FirstSimulatorHandshakePrerequisites>,
     first_simulator_handshake_state: Option<FirstSimulatorHandshakeState>,
+    retained_probe_socket: Option<UdpSocket>,
     first_simulator_handshake_send_diagnostics: Vec<FirstSimulatorHandshakeSendDiagnostic>,
     first_simulator_handshake_receive_diagnostics: Vec<FirstSimulatorHandshakeReceiveDiagnostic>,
     early_simulator_traffic_observations: Vec<EarlySimulatorTrafficObservation>,
@@ -1352,6 +1372,9 @@ pub struct Connection {
     object_feed_recent_kills: Vec<u32>,
     object_feed_tick: u64,
     next_first_simulator_packet_id: u32,
+    pending_first_simulator_ack_ids: Vec<u32>,
+    pending_region_handshake_reply_flags: Option<u32>,
+    region_handshake_reply_sent: bool,
     continuity_summary: RegionContinuitySummary,
     last_phase_change_at: Instant,
 }
@@ -1370,6 +1393,7 @@ impl Connection {
             session: None,
             first_simulator_handshake_prerequisites: None,
             first_simulator_handshake_state: None,
+            retained_probe_socket: None,
             first_simulator_handshake_send_diagnostics: Vec::new(),
             first_simulator_handshake_receive_diagnostics: Vec::new(),
             early_simulator_traffic_observations: Vec::new(),
@@ -1379,6 +1403,9 @@ impl Connection {
             object_feed_recent_kills: Vec::new(),
             object_feed_tick: 0,
             next_first_simulator_packet_id: 1,
+            pending_first_simulator_ack_ids: Vec::new(),
+            pending_region_handshake_reply_flags: None,
+            region_handshake_reply_sent: false,
             continuity_summary: RegionContinuitySummary::default(),
             last_phase_change_at: Instant::now(),
         }
@@ -1640,6 +1667,7 @@ impl Connection {
         });
         self.first_simulator_handshake_prerequisites = None;
         self.first_simulator_handshake_state = None;
+        self.retained_probe_socket = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
@@ -1649,6 +1677,9 @@ impl Connection {
         self.object_feed_recent_kills.clear();
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
+        self.pending_first_simulator_ack_ids.clear();
+        self.pending_region_handshake_reply_flags = None;
+        self.region_handshake_reply_sent = false;
         self.continuity_summary = RegionContinuitySummary::default();
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -1809,6 +1840,7 @@ impl Connection {
         self.session = None;
         self.first_simulator_handshake_prerequisites = None;
         self.first_simulator_handshake_state = None;
+        self.retained_probe_socket = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
@@ -1818,6 +1850,9 @@ impl Connection {
         self.object_feed_recent_kills.clear();
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
+        self.pending_first_simulator_ack_ids.clear();
+        self.pending_region_handshake_reply_flags = None;
+        self.region_handshake_reply_sent = false;
         self.state = ConnectionState::Disconnected;
         Ok(())
     }
@@ -2001,6 +2036,7 @@ impl Connection {
         }
 
         let classification = classify_first_simulator_inbound_message(payload);
+        self.collect_first_simulator_reliable_ack(payload);
         let stage_before = self
             .first_simulator_handshake_state
             .as_ref()
@@ -2069,12 +2105,13 @@ impl Connection {
         if classification.kind == FirstSimulatorInboundMessageKind::RegionHandshake
             && classification.decode_source
                 == FirstSimulatorInboundDecodeSource::PacketMessageNumber
-            && let Some(sim_name) = decode_region_handshake_sim_name(payload)
+            && let Some(decoded) = decode_region_handshake(payload)
         {
             self.simulator_payload_decode_summary
                 .region_handshake_updates += 1;
             self.simulator_payload_decode_summary
-                .region_handshake_last_sim_name = Some(sim_name);
+                .region_handshake_last_sim_name = decoded.sim_name;
+            self.pending_region_handshake_reply_flags = Some(decoded.region_flags);
         }
         if classification.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete
             && classification.decode_source
@@ -2228,6 +2265,58 @@ impl Connection {
         Ok(classification)
     }
 
+    fn collect_first_simulator_reliable_ack(&mut self, payload: &[u8]) {
+        let Some(header) = decode_first_simulator_packet_header(payload) else {
+            return;
+        };
+        if header.flags & LLUDP_RELIABLE_FLAG == 0 {
+            return;
+        }
+        if header.message_number == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID) {
+            return;
+        }
+        self.queue_first_simulator_ack_id(header.packet_id);
+    }
+
+    fn queue_first_simulator_ack_id(&mut self, packet_id: u32) {
+        if self
+            .pending_first_simulator_ack_ids
+            .iter()
+            .any(|queued| *queued == packet_id)
+        {
+            return;
+        }
+        if self.pending_first_simulator_ack_ids.len() >= MAX_PENDING_FIRST_SIMULATOR_ACK_IDS {
+            self.pending_first_simulator_ack_ids.remove(0);
+        }
+        self.pending_first_simulator_ack_ids.push(packet_id);
+    }
+
+    fn first_simulator_ack_batch(&self, payload: &[u8]) -> Vec<u32> {
+        if self.pending_first_simulator_ack_ids.is_empty() {
+            return Vec::new();
+        }
+        let Some(header) = decode_first_simulator_packet_header(payload) else {
+            return Vec::new();
+        };
+        if header.message_number == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID) {
+            return Vec::new();
+        }
+        if payload.len().saturating_add(1) > LLUDP_MTU_BYTES {
+            return Vec::new();
+        }
+        let available_bytes = LLUDP_MTU_BYTES
+            .saturating_sub(payload.len())
+            .saturating_sub(1);
+        let max_ids_by_size = available_bytes / 4;
+        let batch_len = self
+            .pending_first_simulator_ack_ids
+            .len()
+            .min(LLUDP_MAX_APPENDED_ACKS)
+            .min(max_ids_by_size);
+        self.pending_first_simulator_ack_ids[..batch_len].to_vec()
+    }
+
     pub async fn receive_first_simulator_handshake_datagram_once(
         &mut self,
         bind: &str,
@@ -2327,6 +2416,7 @@ impl Connection {
                 "max_packets must be greater than zero",
             )));
         }
+        self.retained_probe_socket = None;
 
         if self.first_simulator_handshake_state.is_none() {
             self.begin_first_simulator_handshake_scaffold()?;
@@ -2612,6 +2702,8 @@ impl Connection {
         } else {
             None
         };
+
+        self.retained_probe_socket = Some(socket);
 
         Ok(FirstSimulatorHandshakeProbeReport {
             observations,
@@ -2966,44 +3058,15 @@ impl Connection {
                 "empty asset id for profile image fetch",
             )));
         }
-        let client = reqwest::Client::builder()
-            .timeout(self.config.connect_timeout.max(Duration::from_secs(15)))
-            .build()?;
-        let base = image_cap_url.trim_end_matches('/');
-        let candidates = [
-            format!("{base}?texture_id={asset_id}"),
-            format!("{base}/?texture_id={asset_id}"),
-            format!("{base}/{asset_id}"),
-            format!("{base}?id={asset_id}"),
-            format!("{base}?asset_id={asset_id}"),
-        ];
-        let mut last_error: Option<ConnectionError> = None;
-        for url in &candidates {
-            let response = match client
-                .get(url)
-                .header(ACCEPT, "image/x-j2c,image/jp2,image/*,*/*")
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    last_error = Some(ConnectionError::Http(err));
-                    continue;
-                }
-            };
-            let status = response.status();
-            let bytes = response.bytes().await?;
-            if status.is_success() {
-                return Ok(bytes.to_vec());
-            }
-            last_error = Some(ConnectionError::HttpStatus {
-                status,
-                body: String::from_utf8_lossy(&bytes).to_string(),
-            });
-        }
-        Err(last_error.unwrap_or_else(|| {
-            ConnectionError::CapabilityDecode(String::from("profile image fetch failed"))
-        }))
+        let candidates = viewer_grid::AssetCapabilityPolicy::texture_url_candidates_from_base(
+            image_cap_url,
+            asset_id,
+        );
+        fetch_texture_asset_bytes(
+            &candidates,
+            self.config.connect_timeout.max(Duration::from_secs(15)),
+        )
+        .await
     }
 
     pub fn derive_profile_feed_url(
@@ -3136,6 +3199,44 @@ impl Connection {
             .await
     }
 
+    pub async fn send_nearby_chat_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+        text: &str,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<Vec<NearbyChatMessage>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+
+        let chat_payload = encode_chat_from_viewer_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            text,
+            1,
+            0,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &chat_payload,
+            &circuit.socket,
+        )
+        .await?;
+        self.receive_nearby_chat_on_socket(
+            &circuit.socket,
+            &circuit.bind,
+            receive_timeout,
+            receive_max_packets,
+        )
+        .await
+    }
+
     pub async fn poll_nearby_chat_udp(
         &mut self,
         bind: &str,
@@ -3153,6 +3254,27 @@ impl Connection {
             .await
     }
 
+    pub async fn poll_nearby_chat_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+        receive_timeout: Duration,
+        receive_max_packets: usize,
+    ) -> Result<Vec<NearbyChatMessage>, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if receive_max_packets == 0 {
+            return Ok(Vec::new());
+        }
+        self.receive_nearby_chat_on_socket(
+            &circuit.socket,
+            &circuit.bind,
+            receive_timeout,
+            receive_max_packets,
+        )
+        .await
+    }
+
     pub async fn open_social_circuit(
         &mut self,
         bind: &str,
@@ -3160,7 +3282,15 @@ impl Connection {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
         }
-        let (prerequisites, socket) = self.prepare_chat_socket(bind).await?;
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let socket = if let Some(socket) = self.retained_probe_socket.take() {
+            socket
+        } else {
+            self.prepare_chat_socket(bind).await?.1
+        };
         Ok(SocialCircuit {
             bind: bind.to_string(),
             target: prerequisites.target,
@@ -3182,6 +3312,89 @@ impl Connection {
         let payload = encode_retrieve_instant_messages_payload(
             &prerequisites,
             self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    pub async fn send_pending_region_handshake_reply(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<bool, ConnectionError> {
+        if self.region_handshake_reply_sent {
+            return Ok(false);
+        }
+        let Some(region_flags) = self.pending_region_handshake_reply_flags else {
+            return Ok(false);
+        };
+        self.send_region_handshake_reply(circuit, region_flags)
+            .await?;
+        self.region_handshake_reply_sent = true;
+        Ok(true)
+    }
+
+    pub async fn send_startup_interest_messages(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        self.send_agent_throttle_on_circuit(circuit).await?;
+        self.send_agent_update_on_circuit(circuit, true).await
+    }
+
+    pub async fn send_agent_update_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+        reliable: bool,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let agent_update_payload = encode_agent_update_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            self.agent_update_camera_center(),
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            STARTUP_AGENT_UPDATE_FAR,
+            0,
+            0,
+            reliable,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &agent_update_payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    async fn send_region_handshake_reply(
+        &mut self,
+        circuit: &SocialCircuit,
+        region_flags: u32,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let payload = encode_region_handshake_reply_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            region_flags,
         )?;
         self.send_first_simulator_handshake_datagram_with_socket(
             FirstSimulatorHandshakeAction::CompleteAgentMovement,
@@ -3222,6 +3435,36 @@ impl Connection {
             &circuit.socket,
         )
         .await
+    }
+
+    async fn send_agent_throttle_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<(), ConnectionError> {
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let throttle_payload = encode_agent_throttle_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+            0,
+            &STARTUP_AGENT_THROTTLES,
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &circuit.target,
+            &throttle_payload,
+            &circuit.socket,
+        )
+        .await
+    }
+
+    fn agent_update_camera_center(&self) -> [f32; 3] {
+        self.simulator_payload_decode_summary
+            .agent_movement_complete_last_position
+            .map(|pos| [pos[0] as f32, pos[1] as f32, pos[2] as f32])
+            .unwrap_or([128.0, 128.0, 25.0])
     }
 
     pub async fn fetch_agent_profile_legacy(
@@ -3442,6 +3685,7 @@ impl Connection {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
         }
+        let _ = self.send_pending_region_handshake_reply(circuit).await?;
         let mut events = Vec::new();
         let mut buf = vec![0u8; 4096];
         for _ in 0..receive_max_packets {
@@ -3458,6 +3702,7 @@ impl Connection {
             };
             let payload = &buf[..received_len];
             let _ = self.observe_first_simulator_inbound_payload(payload);
+            let _ = self.send_pending_region_handshake_reply(circuit).await?;
             events.extend(decode_social_events(payload));
         }
         Ok(events)
@@ -3590,6 +3835,7 @@ impl Connection {
             },
         });
         self.first_simulator_handshake_state = None;
+        self.retained_probe_socket = None;
         self.first_simulator_handshake_send_diagnostics.clear();
         self.first_simulator_handshake_receive_diagnostics.clear();
         self.early_simulator_traffic_observations.clear();
@@ -3599,6 +3845,9 @@ impl Connection {
         self.object_feed_recent_kills.clear();
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
+        self.pending_first_simulator_ack_ids.clear();
+        self.pending_region_handshake_reply_flags = None;
+        self.region_handshake_reply_sent = false;
         self.continuity_summary = RegionContinuitySummary {
             phase: HandoffPhase::None,
             outcome: viewer_core::HandoffOutcome::Normal,
@@ -3649,6 +3898,12 @@ impl Connection {
         let packet_id = decode_lludp_packet_id(payload).unwrap_or_default();
         let packet_message_number =
             decode_first_simulator_packet_header(payload).map(|header| header.message_number);
+        let ack_batch = self.first_simulator_ack_batch(payload);
+        let outbound_payload = if ack_batch.is_empty() {
+            payload.to_vec()
+        } else {
+            append_lludp_ack_trailer(payload, &ack_batch)
+        };
         let target_text = format!("{}:{}", target.sim_ip, target.sim_port);
         let socket_addr = match target_text.parse::<SocketAddr>() {
             Ok(addr) => addr,
@@ -3659,7 +3914,7 @@ impl Connection {
                         target: target_text.clone(),
                         packet_id,
                         packet_message_number,
-                        payload_len: payload.len(),
+                        payload_len: outbound_payload.len(),
                         elapsed_ms: 0,
                         success: false,
                         error: Some(err.to_string()),
@@ -3673,18 +3928,22 @@ impl Connection {
         };
 
         let started = Instant::now();
-        let send_result = socket.send_to(payload, socket_addr).await;
+        let send_result = socket.send_to(&outbound_payload, socket_addr).await;
         let elapsed_ms = started.elapsed().as_millis();
 
         match send_result {
-            Ok(sent_len) if sent_len == payload.len() => {
+            Ok(sent_len) if sent_len == outbound_payload.len() => {
+                if !ack_batch.is_empty() {
+                    self.pending_first_simulator_ack_ids
+                        .drain(0..ack_batch.len());
+                }
                 self.first_simulator_handshake_send_diagnostics.push(
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
                         target: target_text,
                         packet_id,
                         packet_message_number,
-                        payload_len: payload.len(),
+                        payload_len: outbound_payload.len(),
                         elapsed_ms,
                         success: true,
                         error: None,
@@ -3693,14 +3952,17 @@ impl Connection {
                 Ok(())
             }
             Ok(sent_len) => {
-                let reason = format!("partial datagram send ({sent_len}/{})", payload.len());
+                let reason = format!(
+                    "partial datagram send ({sent_len}/{})",
+                    outbound_payload.len()
+                );
                 self.first_simulator_handshake_send_diagnostics.push(
                     FirstSimulatorHandshakeSendDiagnostic {
                         action,
                         target: target_text.clone(),
                         packet_id,
                         packet_message_number,
-                        payload_len: payload.len(),
+                        payload_len: outbound_payload.len(),
                         elapsed_ms,
                         success: false,
                         error: Some(reason.clone()),
@@ -3719,7 +3981,7 @@ impl Connection {
                         target: target_text.clone(),
                         packet_id,
                         packet_message_number,
-                        payload_len: payload.len(),
+                        payload_len: outbound_payload.len(),
                         elapsed_ms,
                         success: false,
                         error: Some(err.to_string()),
@@ -3809,21 +4071,55 @@ impl Connection {
 }
 
 pub async fn fetch_asset_bytes(url: &str, timeout: Duration) -> Result<Vec<u8>, ConnectionError> {
+    let urls = vec![url.to_string()];
+    fetch_bytes_from_candidate_urls(&urls, timeout, None).await
+}
+
+pub async fn fetch_texture_asset_bytes(
+    urls: &[String],
+    timeout: Duration,
+) -> Result<Vec<u8>, ConnectionError> {
+    if urls.is_empty() {
+        return Err(ConnectionError::MissingCapability(String::from(
+            "GetTexture/ViewerAsset",
+        )));
+    }
+    fetch_bytes_from_candidate_urls(urls, timeout, Some(TEXTURE_FETCH_ACCEPT_HEADER)).await
+}
+
+async fn fetch_bytes_from_candidate_urls(
+    urls: &[String],
+    timeout: Duration,
+    accept_header: Option<&str>,
+) -> Result<Vec<u8>, ConnectionError> {
     let client = reqwest::Client::builder()
         .timeout(timeout.max(Duration::from_secs(1)))
         .build()?;
-    let response = client.get(url).send().await?;
-    if response.status().is_success() {
-        let bytes = response.bytes().await?;
-        Ok(bytes.to_vec())
-    } else {
+    let mut last_error: Option<ConnectionError> = None;
+    for url in urls {
+        let mut request = client.get(url);
+        if let Some(accept_header) = accept_header {
+            request = request.header(ACCEPT, accept_header);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                last_error = Some(ConnectionError::Http(err));
+                continue;
+            }
+        };
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| String::from("unreadable body"));
-        Err(ConnectionError::HttpStatus { status, body })
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            return Ok(bytes.to_vec());
+        }
+        last_error = Some(ConnectionError::HttpStatus {
+            status,
+            body: String::from_utf8_lossy(&bytes).to_string(),
+        });
     }
+    Err(last_error
+        .unwrap_or_else(|| ConnectionError::CapabilityDecode(String::from("asset fetch failed"))))
 }
 
 pub async fn poll_event_queue_url_once(
@@ -4150,6 +4446,95 @@ fn encode_first_simulator_complete_agent_movement_payload(
     ))
 }
 
+fn encode_region_handshake_reply_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    region_flags: u32,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 4);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&region_flags.to_le_bytes());
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_agent_throttle_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    gen_counter: u32,
+    throttles: &[f32; 7],
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut throttle_bytes = Vec::with_capacity(throttles.len() * 4);
+    for throttle in throttles {
+        throttle_bytes.extend_from_slice(&(throttle * 1024.0).to_le_bytes());
+    }
+    let throttle_len = u8::try_from(throttle_bytes.len())
+        .map_err(|_| ConnectionError::CapabilityDecode(String::from("agent throttle overflow")))?;
+    let mut body = Vec::with_capacity(16 + 16 + 4 + 4 + 1 + throttle_bytes.len());
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&prerequisites.circuit_code.to_le_bytes());
+    body.extend_from_slice(&gen_counter.to_le_bytes());
+    body.push(throttle_len);
+    body.extend_from_slice(&throttle_bytes);
+    Ok(encode_lludp_low_frequency_packet(
+        packet_id,
+        LLUDP_AGENT_THROTTLE_LOW_ID,
+        &body,
+    ))
+}
+
+fn encode_agent_update_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    camera_center: [f32; 3],
+    camera_at_axis: [f32; 3],
+    camera_left_axis: [f32; 3],
+    camera_up_axis: [f32; 3],
+    far: f32,
+    control_flags: u32,
+    flags: u8,
+    reliable: bool,
+) -> Result<Vec<u8>, ConnectionError> {
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 12 + 12 + 1 + 12 + 12 + 12 + 12 + 4 + 4 + 1);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&[0f32.to_le_bytes(), 0f32.to_le_bytes(), 0f32.to_le_bytes()].concat());
+    body.extend_from_slice(&[0f32.to_le_bytes(), 0f32.to_le_bytes(), 0f32.to_le_bytes()].concat());
+    body.push(0);
+    for component in camera_center {
+        body.extend_from_slice(&component.to_le_bytes());
+    }
+    for component in camera_at_axis {
+        body.extend_from_slice(&component.to_le_bytes());
+    }
+    for component in camera_left_axis {
+        body.extend_from_slice(&component.to_le_bytes());
+    }
+    for component in camera_up_axis {
+        body.extend_from_slice(&component.to_le_bytes());
+    }
+    body.extend_from_slice(&far.to_le_bytes());
+    body.extend_from_slice(&control_flags.to_le_bytes());
+    body.push(flags);
+    Ok(encode_lludp_high_frequency_packet(
+        packet_id,
+        LLUDP_AGENT_UPDATE_HIGH_ID,
+        &body,
+        reliable,
+    ))
+}
+
 fn parse_uuid_bytes(raw: &str) -> Result<[u8; 16], ConnectionError> {
     let compact = raw.replace('-', "");
     if compact.len() != 32 {
@@ -4203,6 +4588,21 @@ fn encode_lludp_low_frequency_packet(packet_id: u32, message_id: u16, body: &[u8
     payload
 }
 
+fn encode_lludp_high_frequency_packet(
+    packet_id: u32,
+    message_id: u8,
+    body: &[u8],
+    reliable: bool,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(LLUDP_PACKET_ID_SIZE + 1 + body.len());
+    payload.push(if reliable { LLUDP_RELIABLE_FLAG } else { 0 });
+    payload.extend_from_slice(&packet_id.to_be_bytes());
+    payload.push(0);
+    payload.push(message_id);
+    payload.extend_from_slice(body);
+    payload
+}
+
 fn decode_lludp_packet_id(payload: &[u8]) -> Option<u32> {
     if payload.len() < LLUDP_PACKET_ID_SIZE {
         return None;
@@ -4213,8 +4613,17 @@ fn decode_lludp_packet_id(payload: &[u8]) -> Option<u32> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FirstSimulatorPacketHeader {
+    flags: u8,
+    packet_id: u32,
     message_number: u32,
     body_offset: usize,
+    body_end: usize,
+}
+
+impl FirstSimulatorPacketHeader {
+    fn body<'a>(&self, payload: &'a [u8]) -> Option<&'a [u8]> {
+        payload.get(self.body_offset..self.body_end)
+    }
 }
 
 fn lludp_low_frequency_message_number(message_id: u16) -> u32 {
@@ -4230,6 +4639,8 @@ fn decode_first_simulator_packet_header(payload: &[u8]) -> Option<FirstSimulator
         return None;
     }
 
+    let flags = payload[0];
+    let packet_id = decode_lludp_packet_id(payload)?;
     let extra_header_len = usize::from(payload[LLUDP_PACKET_ID_SIZE - 1]);
     let header_start = LLUDP_PACKET_ID_SIZE.checked_add(extra_header_len)?;
     if payload.len() <= header_start {
@@ -4255,10 +4666,46 @@ fn decode_first_simulator_packet_header(payload: &[u8]) -> Option<FirstSimulator
         return None;
     };
 
+    let body_offset = header_start + consumed_header_bytes;
+    let ack_trailer_len = decode_lludp_ack_trailer_len(payload, flags, body_offset)?;
+    let body_end = payload.len().checked_sub(ack_trailer_len)?;
+    if body_end < body_offset {
+        return None;
+    }
+
     Some(FirstSimulatorPacketHeader {
+        flags,
+        packet_id,
         message_number,
-        body_offset: header_start + consumed_header_bytes,
+        body_offset,
+        body_end,
     })
+}
+
+fn decode_lludp_ack_trailer_len(payload: &[u8], flags: u8, body_offset: usize) -> Option<usize> {
+    if flags & LLUDP_ACK_FLAG == 0 {
+        return Some(0);
+    }
+    let ack_count = usize::from(*payload.last()?);
+    let ack_trailer_len = ack_count.checked_mul(4)?.checked_add(1)?;
+    if payload.len() < body_offset.saturating_add(ack_trailer_len) {
+        return None;
+    }
+    Some(ack_trailer_len)
+}
+
+fn append_lludp_ack_trailer(payload: &[u8], ack_ids: &[u32]) -> Vec<u8> {
+    if ack_ids.is_empty() {
+        return payload.to_vec();
+    }
+    let mut out = Vec::with_capacity(payload.len() + ack_ids.len() * 4 + 1);
+    out.extend_from_slice(payload);
+    out[0] |= LLUDP_ACK_FLAG;
+    for ack_id in ack_ids {
+        out.extend_from_slice(&ack_id.to_be_bytes());
+    }
+    out.push(u8::try_from(ack_ids.len()).expect("ack count should fit in u8"));
+    out
 }
 
 fn classify_first_simulator_inbound_from_packet(
@@ -4506,7 +4953,7 @@ fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocation
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let location_count = *body.first()?;
     let needed = 1usize.saturating_add(usize::from(location_count).saturating_mul(3));
     if body.len() < needed {
@@ -4582,7 +5029,7 @@ fn decode_health_message(payload: &[u8]) -> Option<DecodedHealthMessage> {
     if header.message_number != lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let health_bytes: [u8; 4] = body.get(0..4)?.try_into().ok()?;
     let health = f32::from_le_bytes(health_bytes);
     if !health.is_finite() {
@@ -4669,7 +5116,7 @@ fn decode_object_update_ids_and_scales(payload: &[u8]) -> Option<Vec<(u32, Optio
         return None;
     }
 
-    let body_raw = payload.get(header.body_offset..)?;
+    let body_raw = header.body(payload)?;
     let body = decode_zerocoded_body(body_raw)?;
     let mut offset = 0usize;
 
@@ -4762,7 +5209,7 @@ fn decode_object_update_cached_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
     if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let mut offset = 0usize;
     offset += 8; // RegionHandle
     offset += 2; // TimeDilation
@@ -4782,7 +5229,7 @@ fn decode_object_update_compressed_local_ids(payload: &[u8]) -> Option<Vec<u32>>
     if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let mut offset = 0usize;
     offset += 8; // RegionHandle
     offset += 2; // TimeDilation
@@ -4806,7 +5253,7 @@ fn decode_improved_terse_object_update_local_ids(payload: &[u8]) -> Option<Vec<u
     if header.message_number != u32::from(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let mut offset = 0usize;
     offset += 8; // RegionHandle
     offset += 2; // TimeDilation
@@ -4831,7 +5278,7 @@ fn decode_kill_object_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
     if header.message_number != u32::from(LLUDP_KILL_OBJECT_HIGH_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let mut offset = 0usize;
     let count = read_u8(body, &mut offset)? as usize;
     let mut out = Vec::with_capacity(count.min(32));
@@ -4841,20 +5288,36 @@ fn decode_kill_object_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
     Some(out)
 }
 
-fn decode_region_handshake_sim_name(payload: &[u8]) -> Option<String> {
+fn decode_region_handshake(payload: &[u8]) -> Option<DecodedRegionHandshake> {
     let header = decode_first_simulator_packet_header(payload)?;
     if header.message_number != lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = decode_maybe_zerocoded_body(payload, header)?;
     let mut offset = 0usize;
-    offset += 4; // RegionFlags
+    let region_flags = read_u32_le(&body, &mut offset)?;
     offset += 1; // SimAccess
-    let sim_name = read_var_string_u8(body, &mut offset)?;
-    if sim_name.trim().is_empty() {
-        return None;
+    let sim_name = read_var_string_u8(&body, &mut offset)?;
+    Some(DecodedRegionHandshake {
+        region_flags,
+        sim_name: if sim_name.trim().is_empty() {
+            None
+        } else {
+            Some(sim_name)
+        },
+    })
+}
+
+fn decode_maybe_zerocoded_body(
+    payload: &[u8],
+    header: FirstSimulatorPacketHeader,
+) -> Option<Vec<u8>> {
+    let body = header.body(payload)?;
+    if payload.first().copied().unwrap_or_default() & LLUDP_ZERO_CODE_FLAG != 0 {
+        decode_zerocoded_body(body)
+    } else {
+        Some(body.to_vec())
     }
-    Some(sim_name)
 }
 
 fn read_vector3f_i32(body: &[u8], offset: &mut usize) -> Option<[i32; 3]> {
@@ -4877,7 +5340,7 @@ fn decode_agent_movement_complete(payload: &[u8]) -> Option<DecodedAgentMovement
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let mut offset = 0usize;
     offset += 16; // AgentID
     offset += 16; // SessionID
@@ -4896,7 +5359,7 @@ fn decode_chat_from_simulator(payload: &[u8]) -> Option<NearbyChatMessage> {
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
 
     let mut offset = 0usize;
     let from_name_len = usize::from(*body.get(offset)?);
@@ -4937,7 +5400,7 @@ fn decode_social_events(payload: &[u8]) -> Vec<SocialEvent> {
     let Some(header) = decode_first_simulator_packet_header(payload) else {
         return Vec::new();
     };
-    let body = match payload.get(header.body_offset..) {
+    let body = match header.body(payload) {
         Some(v) => v,
         None => return Vec::new(),
     };
@@ -5085,7 +5548,7 @@ fn decode_legacy_avatar_properties_reply(
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 68 {
         return None;
     }
@@ -5163,7 +5626,7 @@ fn decode_legacy_avatar_groups_reply(
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 33 {
         return None;
     }
@@ -5208,7 +5671,7 @@ fn decode_legacy_avatar_notes_reply(payload: &[u8], expected_avatar_id: &str) ->
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 32 {
         return None;
     }
@@ -5231,7 +5694,7 @@ fn decode_legacy_avatar_picks_reply(
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 33 {
         return None;
     }
@@ -5266,7 +5729,7 @@ fn decode_legacy_pick_info_reply(
     if header.message_number != lludp_low_frequency_message_number(LLUDP_PICK_INFO_REPLY_LOW_ID) {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 16 + 16 + 1 + 16 {
         return None;
     }
@@ -5324,7 +5787,7 @@ fn decode_legacy_avatar_classifieds_reply(
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 32 {
         return None;
     }
@@ -5361,7 +5824,7 @@ fn decode_legacy_classified_info_reply(
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     if body.len() < 16 + 16 + 4 + 4 + 4 {
         return None;
     }
@@ -5467,7 +5930,7 @@ fn decode_simulator_viewer_time_message(
     {
         return None;
     }
-    let body = payload.get(header.body_offset..)?;
+    let body = header.body(payload)?;
     let body_len = u16::try_from(body.len()).ok()?;
     let signature = body.get(0..4).and_then(|bytes| {
         let raw: [u8; 4] = bytes.try_into().ok()?;
@@ -6832,7 +7295,9 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::time::timeout;
     use viewer_grid::{GridLoginResult, SecondLifeAdapter, StartLocation, StartLocationIntent};
-    use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
+    use wiremock::matchers::{
+        body_partial_json, body_string_contains, header, method, path, query_param,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_intent(agree_to_tos: bool) -> LoginIntent {
@@ -6854,6 +7319,17 @@ mod tests {
             0x00, // extra header offset
             0xFF, 0xFF, high, low, // low-frequency message number
         ]
+    }
+
+    fn make_low_frequency_packet_with_body(low_id: u16, body: &[u8]) -> Vec<u8> {
+        let mut payload = make_low_frequency_packet(low_id);
+        payload.extend_from_slice(body);
+        payload
+    }
+
+    fn mark_packet_reliable(mut payload: Vec<u8>) -> Vec<u8> {
+        payload[0] |= LLUDP_RELIABLE_FLAG;
+        payload
     }
 
     fn make_medium_frequency_packet(medium_id: u8) -> Vec<u8> {
@@ -6905,6 +7381,79 @@ mod tests {
         payload.extend_from_slice(&message_len.to_le_bytes());
         payload.extend_from_slice(&message_bytes);
         payload
+    }
+
+    #[tokio::test]
+    async fn fetch_texture_asset_bytes_uses_firestorm_style_candidate_first_with_accept_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cap/"))
+            .and(query_param("texture_id", "test-id"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let urls = viewer_grid::AssetCapabilityPolicy::texture_url_candidates_from_base(
+            &format!("{}/cap", server.uri()),
+            "test-id",
+        );
+        let bytes = fetch_texture_asset_bytes(&urls, Duration::from_secs(1))
+            .await
+            .expect("texture fetch should succeed");
+
+        assert_eq!(bytes, b"ok");
+    }
+
+    #[tokio::test]
+    async fn fetch_texture_asset_bytes_falls_back_to_second_candidate_after_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cap/"))
+            .and(query_param("texture_id", "test-id"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("missing first"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cap"))
+            .and(query_param("texture_id", "test-id"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fallback".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let urls = viewer_grid::AssetCapabilityPolicy::texture_url_candidates_from_base(
+            &format!("{}/cap", server.uri()),
+            "test-id",
+        );
+        let bytes = fetch_texture_asset_bytes(&urls, Duration::from_secs(1))
+            .await
+            .expect("texture fetch should fall back");
+
+        assert_eq!(bytes, b"fallback");
+    }
+
+    #[tokio::test]
+    async fn fetch_profile_image_bytes_reuses_shared_texture_candidate_fetch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/profile-image/"))
+            .and(query_param("texture_id", "test-id"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"profile".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let bytes = connection
+            .fetch_profile_image_bytes(&format!("{}/profile-image", server.uri()), "test-id")
+            .await
+            .expect("profile image fetch should succeed");
+
+        assert_eq!(bytes, b"profile");
     }
 
     fn decode_outbound_handshake_payload(payload: &[u8]) -> (u8, u32, u32, &[u8]) {
@@ -8748,6 +9297,45 @@ mod tests {
     }
 
     #[test]
+    fn decode_first_simulator_packet_header_strips_ack_trailer_from_body() {
+        let payload = append_lludp_ack_trailer(
+            &mark_packet_reliable(make_low_frequency_packet_with_body(138, &[1, 2, 3, 4])),
+            &[0x01020304, 0x05060708],
+        );
+
+        let header =
+            decode_first_simulator_packet_header(&payload).expect("packet header should decode");
+
+        assert_eq!(header.flags & LLUDP_ACK_FLAG, LLUDP_ACK_FLAG);
+        assert_eq!(header.packet_id, 1);
+        assert_eq!(
+            header.message_number,
+            lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID)
+        );
+        assert_eq!(header.body(&payload), Some(&[1, 2, 3, 4][..]));
+    }
+
+    #[test]
+    fn observe_first_simulator_inbound_payload_queues_reliable_ack_ids() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let reliable_packet = mark_packet_reliable(make_low_frequency_packet(250));
+        connection
+            .observe_first_simulator_inbound_payload(&reliable_packet)
+            .expect("reliable packet should be observed");
+
+        assert_eq!(connection.pending_first_simulator_ack_ids, vec![1]);
+
+        let packet_ack = mark_packet_reliable(make_low_frequency_packet(LLUDP_PACKET_ACK_LOW_ID));
+        connection
+            .observe_first_simulator_inbound_payload(&packet_ack)
+            .expect("packet ack should be observed");
+
+        assert_eq!(connection.pending_first_simulator_ack_ids, vec![1]);
+    }
+
+    #[test]
     fn decode_coarse_location_update_extracts_count_and_first_location() {
         let payload =
             make_medium_frequency_packet_with_body(6, &[3, 10, 20, 8, 30, 40, 9, 60, 70, 11]);
@@ -9344,6 +9932,635 @@ mod tests {
             receive_diagnostics[0].decode_source,
             FirstSimulatorInboundDecodeSource::PacketMessageNumber
         );
+    }
+
+    #[tokio::test]
+    async fn open_social_circuit_reuses_retained_probe_socket_without_resending_handshake() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, first_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let (_, second_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            assert_eq!(first_sender, second_sender);
+            let _ = listener
+                .send_to(&make_low_frequency_packet(250), second_sender)
+                .await;
+            let extra = timeout(Duration::from_millis(500), listener.recv_from(&mut buf)).await;
+            (first_sender, extra.is_ok())
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        connection
+            .probe_first_simulator_handshake_once("127.0.0.1:0", Duration::from_secs(1))
+            .await
+            .expect("probe should receive inbound packet");
+        let send_count_before = connection
+            .first_simulator_handshake_send_diagnostics()
+            .len();
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should reuse retained socket");
+        let (probe_sender, observed_extra_datagram) =
+            listener_task.await.expect("listener task should complete");
+
+        assert_eq!(
+            circuit
+                .socket
+                .local_addr()
+                .expect("social socket local address should exist"),
+            probe_sender
+        );
+        assert!(!observed_extra_datagram);
+        assert_eq!(
+            connection
+                .first_simulator_handshake_send_diagnostics()
+                .len(),
+            send_count_before
+        );
+    }
+
+    #[tokio::test]
+    async fn open_social_circuit_reuses_probe_socket_even_when_probe_times_out_before_amc() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, first_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let (_, second_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            assert_eq!(first_sender, second_sender);
+            let extra = timeout(Duration::from_millis(500), listener.recv_from(&mut buf)).await;
+            (first_sender, extra.is_ok())
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let report = connection
+            .probe_first_simulator_handshake_window("127.0.0.1:0", Duration::from_millis(50), 2)
+            .await
+            .expect("probe should complete with timeout report");
+        assert!(report.timed_out);
+        assert_eq!(report.agent_movement_complete_observation_index, None);
+        let send_count_before = connection
+            .first_simulator_handshake_send_diagnostics()
+            .len();
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should reuse timed-out probe socket");
+        let (probe_sender, observed_extra_datagram) =
+            listener_task.await.expect("listener task should complete");
+
+        assert_eq!(
+            circuit
+                .socket
+                .local_addr()
+                .expect("social socket local address should exist"),
+            probe_sender
+        );
+        assert!(!observed_extra_datagram);
+        assert_eq!(
+            connection
+                .first_simulator_handshake_send_diagnostics()
+                .len(),
+            send_count_before
+        );
+    }
+
+    #[tokio::test]
+    async fn open_social_circuit_without_probe_binds_fresh_socket_and_sends_handshake() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (_, first_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("first handshake datagram should arrive");
+            let (_, second_sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("second handshake datagram should arrive");
+            assert_eq!(first_sender, second_sender);
+            first_sender
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should bind a fresh socket");
+        let handshake_sender = listener_task.await.expect("listener task should complete");
+
+        assert_eq!(
+            circuit
+                .socket
+                .local_addr()
+                .expect("social socket local address should exist"),
+            handshake_sender
+        );
+        assert_eq!(
+            connection
+                .first_simulator_handshake_send_diagnostics()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn decode_region_handshake_handles_zero_coded_body() {
+        let body = vec![0, 4, 1, 7, b'T', b'e', b's', b't', b'S', b'i', b'm'];
+        let mut payload =
+            encode_lludp_low_frequency_packet(1, LLUDP_REGION_HANDSHAKE_LOW_ID, &body);
+        payload[0] |= LLUDP_ZERO_CODE_FLAG;
+
+        let decoded = decode_region_handshake(&payload).expect("region handshake should decode");
+
+        assert_eq!(decoded.region_flags, 0);
+        assert_eq!(decoded.sim_name.as_deref(), Some("TestSim"));
+    }
+
+    #[tokio::test]
+    async fn send_pending_region_handshake_reply_sends_reply_once() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (reply_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("RegionHandshakeReply should arrive");
+            let reply = buf[..reply_len].to_vec();
+            let extra = timeout(Duration::from_millis(300), listener.recv_from(&mut buf)).await;
+            (reply, extra.is_ok())
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection.pending_region_handshake_reply_flags = Some(0x12345678);
+
+        assert!(
+            connection
+                .send_pending_region_handshake_reply(&circuit)
+                .await
+                .expect("reply send should succeed")
+        );
+        assert!(
+            !connection
+                .send_pending_region_handshake_reply(&circuit)
+                .await
+                .expect("second reply should be skipped")
+        );
+
+        let (reply, saw_extra_datagram) = listener_task.await.expect("listener should complete");
+        let header =
+            decode_first_simulator_packet_header(&reply).expect("reply header should decode");
+        assert_eq!(
+            header.message_number,
+            lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID)
+        );
+        let body = &reply[header.body_offset..];
+        let flags = u32::from_le_bytes(
+            body[32..36]
+                .try_into()
+                .expect("RegionHandshakeReply flags should be present"),
+        );
+        assert_eq!(flags, 0x12345678);
+        assert!(!saw_extra_datagram);
+    }
+
+    #[tokio::test]
+    async fn send_startup_interest_messages_sends_agent_throttle_then_agent_update() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (throttle_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentThrottle should arrive");
+            let throttle = buf[..throttle_len].to_vec();
+            let (update_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentUpdate should arrive");
+            let update = buf[..update_len].to_vec();
+            (throttle, update)
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+        connection
+            .simulator_payload_decode_summary
+            .agent_movement_complete_last_position = Some([10, 20, 30]);
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection
+            .send_startup_interest_messages(&circuit)
+            .await
+            .expect("startup interest messages should send");
+
+        let (throttle, update) = listener_task.await.expect("listener should complete");
+        let throttle_header =
+            decode_first_simulator_packet_header(&throttle).expect("throttle header should decode");
+        assert_eq!(
+            throttle_header.message_number,
+            lludp_low_frequency_message_number(LLUDP_AGENT_THROTTLE_LOW_ID)
+        );
+        let update_header =
+            decode_first_simulator_packet_header(&update).expect("update header should decode");
+        assert_eq!(
+            update_header.message_number,
+            u32::from(LLUDP_AGENT_UPDATE_HIGH_ID)
+        );
+        assert_eq!(update[0] & LLUDP_RELIABLE_FLAG, LLUDP_RELIABLE_FLAG);
+    }
+
+    #[tokio::test]
+    async fn send_agent_update_on_circuit_can_send_non_reliable_keepalive() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (update_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentUpdate should arrive");
+            buf[..update_len].to_vec()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection
+            .send_agent_update_on_circuit(&circuit, false)
+            .await
+            .expect("agent update keepalive should send");
+
+        let update = listener_task.await.expect("listener should complete");
+        let update_header =
+            decode_first_simulator_packet_header(&update).expect("update header should decode");
+        assert_eq!(
+            update_header.message_number,
+            u32::from(LLUDP_AGENT_UPDATE_HIGH_ID)
+        );
+        assert_eq!(update[0] & LLUDP_RELIABLE_FLAG, 0);
+    }
+
+    #[tokio::test]
+    async fn send_agent_update_on_circuit_appends_pending_ack_trailer_and_drains_queue() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (update_len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("AgentUpdate should arrive");
+            buf[..update_len].to_vec()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection.pending_first_simulator_ack_ids = vec![0x01020304, 0x05060708];
+        connection
+            .send_agent_update_on_circuit(&circuit, false)
+            .await
+            .expect("agent update keepalive should send");
+
+        let update = listener_task.await.expect("listener should complete");
+        assert_eq!(update[0] & LLUDP_ACK_FLAG, LLUDP_ACK_FLAG);
+        assert_eq!(
+            u32::from_be_bytes(
+                update[update.len() - 9..update.len() - 5]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x01020304
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                update[update.len() - 5..update.len() - 1]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x05060708
+        );
+        assert_eq!(update[update.len() - 1], 2);
+        assert!(connection.pending_first_simulator_ack_ids.is_empty());
+    }
+
+    #[test]
+    fn decode_health_message_ignores_ack_trailer_bytes() {
+        let mut payload = mark_packet_reliable(make_low_frequency_packet_with_body(
+            LLUDP_HEALTH_MESSAGE_LOW_ID,
+            &1.0f32.to_le_bytes(),
+        ));
+        payload = append_lludp_ack_trailer(&payload, &[0x01020304]);
+
+        let decoded = decode_health_message(&payload).expect("health message should decode");
+
+        assert_eq!(decoded.health, 1.0);
     }
 
     #[tokio::test]
@@ -10120,6 +11337,83 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].sender, "Echo Resident");
         assert_eq!(received[0].text, "roger that");
+    }
+
+    #[tokio::test]
+    async fn poll_nearby_chat_on_circuit_reuses_existing_socket_without_resending_handshake() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let (_, sender) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("use circuit should arrive");
+            let (_, sender_2) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("complete movement should arrive");
+            assert_eq!(sender, sender_2);
+            let _ = listener
+                .send_to(
+                    &make_chat_from_simulator_packet("Echo Resident", "reuse path"),
+                    sender,
+                )
+                .await;
+            let extra = timeout(Duration::from_millis(300), listener.recv_from(&mut buf)).await;
+            extra.is_ok()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        let received = connection
+            .poll_nearby_chat_on_circuit(&circuit, Duration::from_secs(1), 1)
+            .await
+            .expect("nearby poll should succeed");
+
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].sender, "Echo Resident");
+        assert_eq!(received[0].text, "reuse path");
+        let saw_extra_datagram = listener_task.await.expect("listener should complete");
+        assert!(!saw_extra_datagram);
     }
 
     #[test]

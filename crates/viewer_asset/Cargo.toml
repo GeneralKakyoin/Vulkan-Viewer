@@ -14,5 +14,7 @@ tracing.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 image.workspace = true
+justjp2.workspace = true
+jpeg2k.workspace = true
 
 viewer_core = { path = "../viewer_core" }
