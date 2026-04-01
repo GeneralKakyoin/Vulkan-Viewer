@@ -24,8 +24,10 @@ Codex is the default implementation-oriented writer for this repo.
 3. Read relevant code and any referenced plan/review artifacts
 4. Use repo skills from `.agents/skills/`
 5. Prefer saved artifacts before rescanning the entire repo when enough context already exists
+6. When a second-opinion review pass would help, consult `docs/agents/GEMINI.md` and use the repo Gemini skill rather than inventing an ad hoc prompt
 
 ## Recommended usage
 
 Use Codex as the default writer.
 Use it for bounded implementation, validation, reports, and continuity updates.
+Use Gemini via CLI only as a bounded second eye for review and repo-analysis support, not as the primary planner or decision-maker.

@@ -3,6 +3,279 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (Object Ingress RegionObjects Typed Feed Live Validation)
+- **The bounded `RegionObjects` typed-feed promotion is now live-validated**: the current build emits the new `typed_sample=...` relay on-wire during a bounded connected run.
+- **The relay stays compact and readable in the live JSONL transcript**: trusted fields such as `profile`, `name`, `linkset_use`, `walkability`, `position`, `description_shape`, and `owner` now appear in the existing `region_objects` summary line.
+- **This confirms the typed-feed lane works end-to-end across the active reconnect flow**: the live pass used the current auto-teleport reconnect controls and still surfaced the promoted object sample data.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded direct-binary live run with:
+    - `artifacts/logs/live_region_objects_typed_feed_live_validation_rerun_2026-03-31.out.log`
+    - `artifacts/logs/live_region_objects_typed_feed_live_validation_rerun_2026-03-31.err.log`
+    - `artifacts/logs/network_debug_region_objects_typed_feed_live_validation_rerun_2026-03-31.jsonl`
+- **Current nuance**:
+  - the live rerun validated the new `typed_sample=...` summary on-wire
+  - the reconnect did not broaden into a clearly different visible object family in this pass, so the next broader-sampling run should use a different reconnect target if sample diversity matters
+
+## Latest Notable Changes (SLURL Auto-Teleport Capture Control)
+- **Terminal-driven reconnect teleport capture is now available**: `viewer_app` can auto-queue the existing reconnect-based SLURL teleport path from env-configured startup controls.
+- **The auto-teleport path is bounded and one-shot**: `VIEWER_APP_AUTO_TELEPORT_SLURL` arms the target and `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS` controls when it fires after connected steady state; the worker will not loop teleports across reconnects in the same run.
+- **This reuses the existing reconnect teleport semantics**: no new transport behavior was added; the worker still normalizes supported SLURLs into Firestorm-style `uri:Region&x&y&z` and reconnects with that start location.
+- **Testing/docs now include the capture knob**: `docs/TESTING_REFERENCE.md` documents the new env vars and includes a bounded example command for the next teleport evidence pass.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_app`
+  - `cargo test -p viewer_app`
+  - bounded direct-binary smoke with env-configured auto-teleport target:
+    - `artifacts/logs/live_slurl_auto_teleport_capture_control_binary_2026-03-31.out.log`
+    - `artifacts/logs/live_slurl_auto_teleport_capture_control_binary_2026-03-31.err.log`
+
+## Latest Notable Changes (SLURL Reconnect Teleport And Current Region Name)
+- **A bounded in-app SLURL teleport control now exists**: the `Network Debug` window can now queue a reconnect-based teleport request using supported SLURL forms.
+- **Supported SLURL inputs are normalized to Firestorm-style login start strings**: `secondlife://...`, `secondlife:///app/teleport/...`, and maps-style SLURLs now normalize to `uri:Region&x&y&z`.
+- **Current region name is now surfaced as a first-class live/debug value**: the app exposes it through `LiveVisualSnapshot`, the diagnostics lines, and the `Network Debug` session summary.
+- **This intentionally does not claim in-session teleport parity**: the worker performs a reconnect with the new start location instead of widening into full session-handoff orchestration.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_core -p viewer_ui -p viewer_app`
+  - `cargo test -p viewer_core -p viewer_ui -p viewer_app`
+  - bounded offline smoke:
+    - `artifacts/logs/live_slurl_reconnect_teleport_offline_2026-03-31.out.log`
+    - `artifacts/logs/live_slurl_reconnect_teleport_offline_2026-03-31.err.log`
+
+## Latest Notable Changes (Object Ingress RegionObjects Tuple Multi-Region Capture)
+- **A longer same-region evidence pass is now complete**: the existing tuple-analysis surface was left unchanged and used for a 110-second bounded live run.
+- **Time alone did not broaden the tuple family**: the latest longer capture still showed `samples=2` and `names=DSS Candlier Frame`.
+- **The tuple pattern stayed unchanged across the longer window**:
+  - `s0=const:0`
+  - `s1=const:10.000000`
+  - `s2=const:30`
+  - `s3=const:0`
+  - `s4=var:2|3`
+  - `s5=const:0`
+- **This moves the next branch from longer same-region capture to actual region change evidence**: the next active plan is now `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_TUPLE_TELEPORT_CAPTURE_2026-03-31.md`.
+- **Validation**:
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_tuple_multi_region_capture_2026-03-31.out.log`
+    - `artifacts/logs/live_region_objects_tuple_multi_region_capture_2026-03-31.err.log`
+    - `artifacts/logs/network_debug_region_objects_tuple_multi_region_capture_2026-03-31.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Tuple Sample Widening)
+- **Code-side tuple widening is now in place**: the `RegionObjects` inspection path can now summarize more child maps and reports bounded distinct tuple-object names.
+- **The current region/window remained narrow even after widening**: the latest bounded live run still showed `samples=2` and `names=DSS Candlier Frame`.
+- **The current tuple pattern is unchanged**:
+  - `s0=const:0`
+  - `s1=const:10.000000`
+  - `s2=const:30`
+  - `s3=const:0`
+  - `s4=var:2|3`
+  - `s5=const:0`
+- **This shifts the next step from code widening to evidence widening**: the next active plan is now `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_TUPLE_MULTI_REGION_CAPTURE_2026-03-31.md`.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_tuple_sample_widening_2026-03-31.out.log`
+    - `artifacts/logs/network_debug_region_objects_tuple_sample_widening_2026-03-31.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Tuple Slot Analysis)
+- **The tuple-like `RegionObjects` descriptions now have bounded slot analysis**: the relay/log surfaces `tuple_analysis=...` in addition to the raw tuple strings.
+- **The current live pattern is now explicit**:
+  - `samples=2`
+  - `slots=6`
+  - `s0=const:0`
+  - `s1=const:10.000000`
+  - `s2=const:30`
+  - `s3=const:0`
+  - `s4=var:2|3`
+  - `s5=const:0`
+- **The current tuple sample is narrow but useful**: both surfaced tuple samples belong to `DSS Candlier Frame`, which is enough to prove a repeatable slot pattern but not enough to assign semantics yet.
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_TUPLE_SAMPLE_WIDENING_2026-03-31.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_tuple_slot_analysis_2026-03-31.out.log`
+    - `artifacts/logs/network_debug_region_objects_tuple_slot_analysis_2026-03-31.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Position Shape Clarification)
+- **The `RegionObjects` pathfinding lane now surfaces live positions directly**: the bounded probe now records `position`, `position_key=present`, and `position_shape=llsd_array_len3` for the first UUID-keyed child maps.
+- **The earlier “no position” interpretation has been corrected**: the currently surfaced tuple-description and placeholder-description records both classify as `...with_position`, not `...no_position`.
+- **The current live records now show concrete object-space coordinates**, for example:
+  - `39.21141815185546875|68.02368927001953125|2999.260009765625`
+  - `61.998996734619140625|87.66783905029296875|2962.088134765625`
+- **The remaining open question is narrower**: the unresolved part is now the tuple-like `description` content itself, not whether those records carry position.
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_TUPLE_CONTENT_INTERPRETATION_2026-03-31.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_position_shape_clarification_2026-03-31.out.log`
+    - `artifacts/logs/network_debug_region_objects_position_shape_clarification_2026-03-31.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Pathfinding Variant Discrimination)
+- **The typed `RegionObjects` lane now distinguishes live record variants**: the bounded probe surfaces `variant`, `description_shape`, and `description_tuple` hints when the first UUID-keyed child maps do not follow one uniform shape.
+- **One concrete variant difference is now explained**:
+  - placeholder-text records surface `description_shape=placeholder_text`
+  - tuple-like records surface `description_shape=comma_numeric_tuple6`
+  - tuple-like records now expose the raw tuple payload in bounded form, such as `0|10.000000|30|0|2|0`
+- **A dedicated status tracker now exists**: `docs/OBJECT_INGRESS_STATUS.md` separates what is proven working, what is proven not working, and the current object-ingress questions.
+- **LLUDP object ingress is still blocked**:
+  - `RegionHandshake = none`
+  - `RegionHandshakeReply = none`
+  - `ObjectUpdate* = none`
+  - `update_messages=0`
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_PATHFINDING_VARIANT_DISCRIMINATION_2026-03-31.md` remains the active investigation frame until the tuple-like variant is understood more deeply or superseded by a tighter follow-up.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_pathfinding_field_promotion_2026-03-31.out.log`
+    - `artifacts/logs/network_debug_region_objects_pathfinding_field_promotion_2026-03-31.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Pathfinding Field Promotion)
+- **The `RegionObjects` opening now has typed named fields**: the bounded probe now emits compact per-object pathfinding summaries instead of only semantic strings.
+- **First typed live fields are now visible**:
+  - `profile=pathfinding_linkset`
+  - `linkset_use=dynamic_phantom`
+  - `walkability=100/100/100/100`
+  - concrete `name=...`
+  - concrete `owner=...`
+  - `description=(No Description)` on some records
+- **A new live nuance surfaced**: not every first-object record looks identical; some entries still surface comma-like data in `description`, and a separate `position` field did not appear in the bounded window.
+- **LLUDP object ingress is still blocked**:
+  - `RegionHandshake = none`
+  - `RegionHandshakeReply = none`
+  - `ObjectUpdate* = none`
+  - `update_messages=0`
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_PATHFINDING_VARIANT_DISCRIMINATION_2026-03-31.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_pathfinding_field_promotion_2026-03-31.out.log`
+    - `artifacts/logs/network_debug_region_objects_pathfinding_field_promotion_2026-03-31.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Semantic Mapping)
+- **The `RegionObjects` opening is now evidence-backed semantically**: the bounded probe now classifies the first UUID-keyed child maps as Firestorm-style `pathfinding_linkset` payloads rather than only exposing raw nested fields.
+- **The first surfaced pathfinding semantics are now visible**:
+  - `A-D` map to walkability coefficients
+  - `can_be_volume` and `phantom` are now normalized from `0/1` to booleans in the relay
+  - the current live objects classify as `linkset_use=dynamic_phantom`
+  - concrete object names like `DSS Candlier Frame` and `Trance  Chair: Rope Bondage` are now surfaced in the same summary
+- **The object-data opening is now more usable**: the viewer is ingesting object-related simulator payloads and can explain what the first bounded field family means.
+- **LLUDP object ingress is still blocked**:
+  - `RegionHandshake = none`
+  - `RegionHandshakeReply = none`
+  - `ObjectUpdate* = none`
+  - `update_messages=0`
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_PATHFINDING_FIELD_PROMOTION_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_region_objects_semantic_mapping_2026-03-30.out.log`
+    - `artifacts/logs/network_debug_region_objects_semantic_mapping_2026-03-30.jsonl`
+
+## Latest Notable Changes (Object Ingress RegionObjects Capability Probe)
+- **The first object-related simulator data opening is now proven**: the primary simulator `RegionObjects` capability returns a UUID-keyed top-level map on the simulator-host `:12043` lane.
+- **The response is structurally real, not empty**: the bounded probe now shows the first surfaced UUID keys classifying as nested `map` values, proving the simulator is returning structured per-object payloads.
+- **This satisfies the immediate object-ingress goal**: the viewer is now ingesting object-related simulator data, even though it is not yet LLUDP `ObjectUpdate*`.
+- **LLUDP object ingress is still blocked**:
+  - `RegionHandshake = none`
+  - `RegionHandshakeReply = none`
+  - `ObjectUpdate* = none`
+  - `update_messages=0`
+  - `total_objects=0`
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_FIELD_EXTRACTION_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected runs with captured logs:
+    - `artifacts/logs/live_region_objects_probe_2026-03-30.out.log`
+    - `artifacts/logs/network_debug_region_objects_probe_2026-03-30.jsonl`
+    - `artifacts/logs/live_region_objects_probe_2026-03-30_v2.out.log`
+    - `artifacts/logs/network_debug_region_objects_probe_2026-03-30_v2.jsonl`
+
+## Latest Notable Changes (Object Ingress Post-EnableSimulator Seed-Cap Follow-Up)
+- **Primary simulator region-cap parity moved forward**: the default seed-cap request now returns `InterestList`, `RegionObjects`, and `UntrustedSimulatorMessage` on the primary simulator-host `:12043` lane in addition to the previously surfaced caps.
+- **Explicit seed-cap follow-up support now exists**: `viewer_net` can now fetch seed capabilities from an explicit URL, and `viewer_app` can perform bounded follow-up if EventQueue ever surfaces `EstablishAgentCommunication` seed-cap targets.
+- **The current live gap is now sharper**:
+  - `EstablishAgentCommunication` still did not appear
+  - EventQueue still only surfaced `AgentGroupDataUpdate`, `AgentStateUpdate`, `EnableSimulator`, and `ParcelProperties`
+  - `RegionHandshake`, `RegionHandshakeReply`, and `ObjectUpdate*` still remained absent
+- **New best next branch**: `docs/plans/PLAN_OBJECT_INGRESS_REGION_OBJECTS_CAP_PROBE_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_post_enable_seedcap_2026-03-30.out.log`
+    - `artifacts/logs/live_post_enable_seedcap_2026-03-30.err.log`
+    - `artifacts/logs/network_debug_post_enable_seedcap_2026-03-30.jsonl`
+
+## Latest Notable Changes (Object Ingress Network Debug And Decision Acceleration)
+- **A dedicated in-app `Network Debug` window now exists**: `viewer_ui` renders bounded sections for session state, capabilities/EventQueue, LLUDP forensics, follow-up activity, and recent network events.
+- **Network-debug state is now typed and shared cleanly**: `viewer_core` exposes `NetworkDebugState`, and `viewer_app` owns aggregation so the UI stays decoupled from transport internals.
+- **Network-debug events now persist to JSONL**: network-focused relay categories append to `logs/network_debug.jsonl` by default, or to `VIEWER_NETWORK_DEBUG_LOG_PATH` when overridden.
+- **The bounded live run verified the backing feed**: `artifacts/logs/network_debug_2026-03-30.jsonl` captured `39` entries showing retained first-simulator socket continuity, capability inventory, EventQueue responses through `ack_out=4`, and repeated `EnableSimulator` details/follow-up.
+- **The object-ingress blocker is unchanged**:
+  - `RegionHandshake = none`
+  - `RegionHandshakeReply = none`
+  - `ObjectUpdate* = none`
+  - `update_messages=0`
+  - `total_objects=0`
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_POST_ENABLE_SIMULATOR_SEEDCAP_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_core -p viewer_app -p viewer_ui -p viewer_net`
+  - `cargo test -p viewer_core`
+  - `cargo test -p viewer_ui`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected run with captured logs:
+    - `artifacts/logs/live_network_debug_window_2026-03-30.out.log`
+    - `artifacts/logs/live_network_debug_window_2026-03-30.err.log`
+    - `artifacts/logs/network_debug_2026-03-30.jsonl`
+
+## Latest Notable Changes (Object Ingress EventQueue And EnableSimulator Port Follow-Up)
+- **A real simulator/world-data opening now exists**: the viewer now ingests structured simulator-host EventQueue data, not just message-name counts.
+- **Nested EventQueue body preservation is now live**: bounded runs now surface nested `ParcelProperties` fields and port-only `EnableSimulator` details rather than dropping those bodies during parse.
+- **`EnableSimulator` is now concrete on our path**: the bounded March 30, 2026 run surfaces repeated `SimulatorInfo[0].Port` values `13013`, `13000`, and `13001`.
+- **Bounded port follow-up is now implemented**: the worker sends one-shot `UseCircuitCode` follow-up to newly seen EventQueue `EnableSimulator` ports on the current simulator host.
+- **LLUDP object ingress is still blocked after that follow-up**:
+  - `RegionHandshake = none`
+  - `RegionHandshakeReply = none`
+  - `ObjectUpdate* = none`
+  - `update_messages=0`
+  - `total_objects=0`
+- **Next active plan**: `docs/plans/PLAN_OBJECT_INGRESS_POST_ENABLE_SIMULATOR_SEEDCAP_2026-03-30.md`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_app`
+  - bounded connected runs:
+    - `artifacts/logs/live_event_queue_control_consumption_2026-03-30_bounded.out.log`
+    - `artifacts/logs/live_enable_simulator_port_followup_2026-03-30.out.log`
+
 ## Latest Notable Changes (Object Ingress Parallel Protocol Startup Investigation)
 - **Cross-protocol startup diagnostics are now live**: the bounded worker now reports seed-cap fetches, capability-family inventory, simulator-host `EventQueueGet` scheduling, and the existing LLUDP startup timeline in one place.
 - **The current capability lane is now explicit**: the March 30, 2026 bounded run shows `EventQueueGet`, `AgentProfile`, `GetDisplayNames`, `SimulatorFeatures`, and `MapLayer` all resolving to simulator-host HTTPS on `:12043`, while `GetTexture` and `ViewerAsset` resolve to asset CDN URLs.

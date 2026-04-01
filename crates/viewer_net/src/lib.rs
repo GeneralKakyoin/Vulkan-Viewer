@@ -103,6 +103,9 @@ const STARTUP_AGENT_UPDATE_FAR: f32 = 96.0;
 const STARTUP_AGENT_ANIMATION_ID: &str = "efcf670c-2d18-8128-973a-034ebc806b67";
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
     "EventQueueGet",
+    "UntrustedSimulatorMessage",
+    "InterestList",
+    "RegionObjects",
     "AgentProfile",
     "GetTexture",
     "GetDisplayNames",
@@ -1253,6 +1256,26 @@ pub struct EventQueuePollResult {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQueueSimulatorTarget {
+    pub message: String,
+    pub handle: Option<String>,
+    pub ip: Option<String>,
+    pub port: Option<String>,
+    pub sim_ip_and_port: Option<String>,
+    pub seed_capability: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQueueParcelSummary {
+    pub message: String,
+    pub local_id: Option<String>,
+    pub name: Option<String>,
+    pub parcel_id: Option<String>,
+    pub owner_id: Option<String>,
+    pub area: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NearbyChatMessage {
     pub sender: String,
     pub text: String,
@@ -1401,6 +1424,66 @@ pub struct SimulatorFeaturesInspection {
 }
 
 pub type MapLayerInspection = SimulatorFeaturesInspection;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionObjectsInspection {
+    pub top_level_keys: Vec<String>,
+    pub scalar_values: BTreeMap<String, String>,
+    pub complex_value_types: BTreeMap<String, String>,
+    pub array_lengths: BTreeMap<String, usize>,
+    pub first_array_item_keys: BTreeMap<String, Vec<String>>,
+    pub child_map_keys: BTreeMap<String, Vec<String>>,
+    pub child_map_scalar_values: BTreeMap<String, Vec<String>>,
+    pub child_map_profiles: BTreeMap<String, String>,
+    pub child_map_semantic_values: BTreeMap<String, Vec<String>>,
+    pub child_map_pathfinding_summaries: BTreeMap<String, RegionObjectsPathfindingSummary>,
+    pub typed_object_samples: Vec<RegionObjectsTypedObjectSample>,
+    pub tuple_description_analysis: Option<RegionObjectsTupleDescriptionAnalysis>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionObjectsPathfindingSummary {
+    pub profile: String,
+    pub variant_hint: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub description_shape: Option<String>,
+    pub description_numeric_tuple: Option<Vec<String>>,
+    pub owner: Option<String>,
+    pub owner_is_group: Option<bool>,
+    pub position_key_present: bool,
+    pub position: Option<String>,
+    pub position_shape: Option<String>,
+    pub landimpact: Option<i32>,
+    pub modifiable: Option<bool>,
+    pub navmesh_category: Option<i32>,
+    pub can_be_volume: Option<bool>,
+    pub is_scripted: Option<bool>,
+    pub phantom: Option<bool>,
+    pub walkability_coefficients: Option<[i32; 4]>,
+    pub linkset_use: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionObjectsTypedObjectSample {
+    pub object_id: String,
+    pub profile: String,
+    pub name: Option<String>,
+    pub owner: Option<String>,
+    pub position: Option<String>,
+    pub description_shape: Option<String>,
+    pub linkset_use: Option<String>,
+    pub walkability_coefficients: Option<[i32; 4]>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegionObjectsTupleDescriptionAnalysis {
+    pub sample_count: usize,
+    pub slot_count: usize,
+    pub slot_distinct_values: Vec<Vec<String>>,
+    pub distinct_names: Vec<String>,
+    pub sample_pairs: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
@@ -3157,6 +3240,17 @@ impl Connection {
             .and_then(|session| session.seed_capability.as_deref())
             .ok_or(ConnectionError::MissingSeedCapability)?;
 
+        self.fetch_seed_capabilities_from_url(seed_url).await
+    }
+
+    pub async fn fetch_seed_capabilities_from_url(
+        &self,
+        seed_url: &str,
+    ) -> Result<SeedCapabilityMap, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
         let client = reqwest::Client::builder()
             .timeout(self.config.connect_timeout)
             .build()?;
@@ -3598,6 +3692,43 @@ impl Connection {
             .collect()
     }
 
+    pub fn summarize_event_queue_event_fields(
+        &self,
+        event: &EventQueueMessage,
+        limit: usize,
+    ) -> String {
+        if event.fields.is_empty() || limit == 0 {
+            return String::from("none");
+        }
+        event
+            .fields
+            .iter()
+            .take(limit)
+            .map(|(key, value)| format!("{key}={}", summarize_event_queue_value(value, 96)))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    pub fn extract_event_queue_simulator_targets(
+        &self,
+        poll: &EventQueuePollResult,
+    ) -> Vec<EventQueueSimulatorTarget> {
+        poll.events
+            .iter()
+            .filter_map(extract_event_queue_simulator_target)
+            .collect()
+    }
+
+    pub fn extract_event_queue_parcel_summaries(
+        &self,
+        poll: &EventQueuePollResult,
+    ) -> Vec<EventQueueParcelSummary> {
+        poll.events
+            .iter()
+            .filter_map(extract_event_queue_parcel_summary)
+            .collect()
+    }
+
     pub async fn send_nearby_chat(
         &mut self,
         text: &str,
@@ -3743,6 +3874,34 @@ impl Connection {
             target: prerequisites.target,
             socket,
         })
+    }
+
+    pub async fn send_use_circuit_code_on_circuit_to_port(
+        &mut self,
+        circuit: &SocialCircuit,
+        port: u16,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let mut target = circuit.target.clone();
+        target.sim_port = port;
+        let payload = encode_first_simulator_use_circuit_code_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::UseCircuitCode,
+            &target,
+            &payload,
+            &circuit.socket,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn send_retrieve_instant_messages(
@@ -4426,6 +4585,41 @@ impl Connection {
         }
 
         parse_simulator_features_response(&bytes, content_type.as_deref())
+    }
+
+    pub async fn fetch_region_objects_once(
+        &self,
+        region_objects_url: &str,
+    ) -> Result<RegionObjectsInspection, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+
+        let response = client
+            .get(region_objects_url)
+            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+            .send()
+            .await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+
+        parse_region_objects_response(&bytes, content_type.as_deref())
     }
 
     async fn http_transport_login(
@@ -7295,12 +7489,8 @@ fn parse_event_queue_poll_from_json(
                 .unwrap_or_default()
                 .to_string();
             let mut fields = BTreeMap::new();
-            if let Some(body_map) = event_map.get("body").and_then(Value::as_object) {
-                for (key, value) in body_map {
-                    if let Some(text) = json_scalar_to_string(value) {
-                        fields.insert(key.clone(), text);
-                    }
-                }
+            if let Some(body) = event_map.get("body") {
+                flatten_json_event_queue_fields(None, body, &mut fields);
             }
             events.push(EventQueueMessage { message, fields });
         }
@@ -7584,7 +7774,7 @@ fn parse_llsd_event_messages(array_node: Node<'_, '_>) -> Vec<EventQueueMessage>
                 if key_name == "message" && value_node.has_tag_name("string") {
                     message = value_node.text().unwrap_or_default().to_string();
                 } else if key_name == "body" && value_node.has_tag_name("map") {
-                    fields = parse_llsd_scalar_map(value_node);
+                    flatten_llsd_event_queue_fields(None, value_node, &mut fields);
                 }
             }
             idx += 2;
@@ -7613,6 +7803,159 @@ fn parse_llsd_scalar_map(map_node: Node<'_, '_>) -> BTreeMap<String, String> {
         idx += 2;
     }
     fields
+}
+
+fn flatten_json_event_queue_fields(
+    prefix: Option<&str>,
+    value: &Value,
+    fields: &mut BTreeMap<String, String>,
+) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let next = join_event_queue_field_path(prefix, key);
+                flatten_json_event_queue_fields(Some(&next), child, fields);
+            }
+        }
+        Value::Array(items) => {
+            for (idx, child) in items.iter().enumerate() {
+                let key = match prefix {
+                    Some(prefix) => format!("{prefix}[{idx}]"),
+                    None => format!("[{idx}]"),
+                };
+                flatten_json_event_queue_fields(Some(&key), child, fields);
+            }
+        }
+        _ => {
+            if let Some(path) = prefix
+                && let Some(text) = json_scalar_to_string(value)
+            {
+                fields.insert(path.to_string(), text);
+            }
+        }
+    }
+}
+
+fn flatten_llsd_event_queue_fields(
+    prefix: Option<&str>,
+    node: Node<'_, '_>,
+    fields: &mut BTreeMap<String, String>,
+) {
+    if node.has_tag_name("map") {
+        let children: Vec<Node<'_, '_>> =
+            node.children().filter(|child| child.is_element()).collect();
+        let mut idx = 0usize;
+        while idx + 1 < children.len() {
+            let key_node = children[idx];
+            let value_node = children[idx + 1];
+            if key_node.has_tag_name("key") {
+                let key = key_node.text().unwrap_or_default();
+                let next = join_event_queue_field_path(prefix, key);
+                flatten_llsd_event_queue_fields(Some(&next), value_node, fields);
+            }
+            idx += 2;
+        }
+        return;
+    }
+
+    if node.has_tag_name("array") {
+        for (idx, child) in node
+            .children()
+            .filter(|child| child.is_element())
+            .enumerate()
+        {
+            let key = match prefix {
+                Some(prefix) => format!("{prefix}[{idx}]"),
+                None => format!("[{idx}]"),
+            };
+            flatten_llsd_event_queue_fields(Some(&key), child, fields);
+        }
+        return;
+    }
+
+    if let Some(path) = prefix
+        && let Some(value) = llsd_node_scalar_to_string(node)
+    {
+        fields.insert(path.to_string(), value);
+    }
+}
+
+fn join_event_queue_field_path(prefix: Option<&str>, key: &str) -> String {
+    match prefix {
+        Some(prefix) if !prefix.is_empty() => format!("{prefix}.{key}"),
+        _ => key.to_string(),
+    }
+}
+
+fn summarize_event_queue_value(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    value.chars().take(limit).collect::<String>() + "..."
+}
+
+fn event_queue_field_value<'a>(
+    event: &'a EventQueueMessage,
+    candidates: &[&str],
+) -> Option<&'a str> {
+    candidates
+        .iter()
+        .find_map(|key| event.fields.get(*key).map(String::as_str))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn extract_event_queue_simulator_target(
+    event: &EventQueueMessage,
+) -> Option<EventQueueSimulatorTarget> {
+    let message = event.message.as_str();
+    if message != "EnableSimulator" && message != "EstablishAgentCommunication" {
+        return None;
+    }
+
+    Some(EventQueueSimulatorTarget {
+        message: event.message.clone(),
+        handle: event_queue_field_value(
+            event,
+            &[
+                "SimulatorInfo.Handle",
+                "SimulatorInfo[0].Handle",
+                "handle",
+                "region_handle",
+            ],
+        )
+        .map(str::to_string),
+        ip: event_queue_field_value(event, &["SimulatorInfo.IP", "SimulatorInfo[0].IP", "ip"])
+            .map(str::to_string),
+        port: event_queue_field_value(
+            event,
+            &["SimulatorInfo.Port", "SimulatorInfo[0].Port", "port"],
+        )
+        .map(str::to_string),
+        sim_ip_and_port: event_queue_field_value(
+            event,
+            &["sim-ip-and-port", "sim_ip_and_port", "sim"],
+        )
+        .map(str::to_string),
+        seed_capability: event_queue_field_value(event, &["seed-capability", "seed_capability"])
+            .map(str::to_string),
+    })
+}
+
+fn extract_event_queue_parcel_summary(
+    event: &EventQueueMessage,
+) -> Option<EventQueueParcelSummary> {
+    if event.message != "ParcelProperties" {
+        return None;
+    }
+
+    Some(EventQueueParcelSummary {
+        message: event.message.clone(),
+        local_id: event_queue_field_value(event, &["local_id", "LocalID"]).map(str::to_string),
+        name: event_queue_field_value(event, &["name", "Name", "parcel_name"]).map(str::to_string),
+        parcel_id: event_queue_field_value(event, &["parcel_id", "ParcelID"]).map(str::to_string),
+        owner_id: event_queue_field_value(event, &["owner_id", "OwnerID"]).map(str::to_string),
+        area: event_queue_field_value(event, &["area", "Area"]).map(str::to_string),
+    })
 }
 
 fn llsd_node_scalar_to_string(node: Node<'_, '_>) -> Option<String> {
@@ -8183,6 +8526,859 @@ fn parse_simulator_features_from_llsd_xml(
 
     inspection.top_level_keys.sort();
     Ok(inspection)
+}
+
+fn parse_region_objects_response(
+    body: &[u8],
+    content_type: Option<&str>,
+) -> Result<RegionObjectsInspection, ConnectionError> {
+    let looks_json = content_type
+        .map(|value| value.contains("json"))
+        .unwrap_or(false);
+    if looks_json {
+        let value: Value = serde_json::from_slice(body)
+            .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+        return parse_region_objects_from_json(&value);
+    }
+
+    parse_region_objects_from_llsd_xml(body)
+}
+
+fn parse_region_objects_from_json(
+    value: &Value,
+) -> Result<RegionObjectsInspection, ConnectionError> {
+    let mut inspection = RegionObjectsInspection::default();
+    match value {
+        Value::Object(map) => {
+            for (key, raw) in map {
+                inspection.top_level_keys.push(key.clone());
+                populate_region_objects_json_entry(&mut inspection, key, raw);
+            }
+        }
+        Value::Array(items) => {
+            inspection.top_level_keys.push(String::from("<root-array>"));
+            inspection
+                .complex_value_types
+                .insert(String::from("<root-array>"), String::from("array"));
+            inspection
+                .array_lengths
+                .insert(String::from("<root-array>"), items.len());
+            if let Some(Value::Object(first_map)) = items.first() {
+                let mut keys = first_map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                inspection
+                    .first_array_item_keys
+                    .insert(String::from("<root-array>"), keys);
+            }
+        }
+        other => {
+            inspection.top_level_keys.push(String::from("<root>"));
+            inspection
+                .scalar_values
+                .insert(String::from("<root>"), other.to_string());
+        }
+    }
+    populate_region_objects_typed_samples(&mut inspection);
+    analyze_region_objects_tuple_descriptions(&mut inspection);
+    inspection.top_level_keys.sort();
+    Ok(inspection)
+}
+
+fn populate_region_objects_json_entry(
+    inspection: &mut RegionObjectsInspection,
+    key: &str,
+    raw: &Value,
+) {
+    match raw {
+        Value::String(text) => {
+            inspection
+                .scalar_values
+                .insert(key.to_string(), text.clone());
+        }
+        Value::Number(num) => {
+            inspection
+                .scalar_values
+                .insert(key.to_string(), num.to_string());
+        }
+        Value::Bool(flag) => {
+            inspection
+                .scalar_values
+                .insert(key.to_string(), flag.to_string());
+        }
+        Value::Object(child_map) => {
+            inspection
+                .complex_value_types
+                .insert(key.to_string(), String::from("map"));
+            record_region_objects_child_json_map(inspection, key, child_map);
+        }
+        Value::Array(items) => {
+            inspection
+                .complex_value_types
+                .insert(key.to_string(), String::from("array"));
+            inspection
+                .array_lengths
+                .insert(key.to_string(), items.len());
+            if let Some(Value::Object(first_map)) = items.first() {
+                let mut keys = first_map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                inspection
+                    .first_array_item_keys
+                    .insert(key.to_string(), keys);
+            }
+        }
+        Value::Null => {
+            inspection
+                .complex_value_types
+                .insert(key.to_string(), String::from("null"));
+        }
+    }
+}
+
+fn parse_region_objects_from_llsd_xml(
+    body: &[u8],
+) -> Result<RegionObjectsInspection, ConnectionError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let doc =
+        Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
+    let llsd = doc
+        .descendants()
+        .find(|node| node.has_tag_name("llsd"))
+        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd root")))?;
+    let root = llsd
+        .children()
+        .find(|node| node.is_element())
+        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd value")))?;
+
+    let mut inspection = RegionObjectsInspection::default();
+    if root.has_tag_name("map") {
+        let children: Vec<Node<'_, '_>> =
+            root.children().filter(|node| node.is_element()).collect();
+        let mut idx = 0usize;
+        while idx + 1 < children.len() {
+            let key_node = children[idx];
+            let value_node = children[idx + 1];
+            if key_node.has_tag_name("key") {
+                let key_name = key_node.text().unwrap_or_default().to_string();
+                inspection.top_level_keys.push(key_name.clone());
+                populate_region_objects_llsd_entry(&mut inspection, &key_name, value_node);
+            }
+            idx += 2;
+        }
+    } else if root.has_tag_name("array") {
+        inspection.top_level_keys.push(String::from("<root-array>"));
+        inspection
+            .complex_value_types
+            .insert(String::from("<root-array>"), String::from("array"));
+        let items: Vec<Node<'_, '_>> = root.children().filter(|node| node.is_element()).collect();
+        inspection
+            .array_lengths
+            .insert(String::from("<root-array>"), items.len());
+        if let Some(first) = items.first()
+            && first.has_tag_name("map")
+        {
+            let mut keys = extract_llsd_map_keys(*first);
+            keys.sort();
+            inspection
+                .first_array_item_keys
+                .insert(String::from("<root-array>"), keys);
+        }
+    } else {
+        inspection.top_level_keys.push(String::from("<root>"));
+        inspection.scalar_values.insert(
+            String::from("<root>"),
+            root.text().unwrap_or_default().to_string(),
+        );
+    }
+
+    populate_region_objects_typed_samples(&mut inspection);
+    analyze_region_objects_tuple_descriptions(&mut inspection);
+    inspection.top_level_keys.sort();
+    Ok(inspection)
+}
+
+fn populate_region_objects_typed_samples(inspection: &mut RegionObjectsInspection) {
+    inspection.typed_object_samples = inspection
+        .child_map_pathfinding_summaries
+        .iter()
+        .take(6)
+        .map(|(object_id, summary)| RegionObjectsTypedObjectSample {
+            object_id: object_id.clone(),
+            profile: summary.profile.clone(),
+            name: summary.name.clone(),
+            owner: summary.owner.clone(),
+            position: summary.position.clone(),
+            description_shape: summary.description_shape.clone(),
+            linkset_use: summary.linkset_use.clone(),
+            walkability_coefficients: summary.walkability_coefficients,
+        })
+        .collect();
+}
+
+fn populate_region_objects_llsd_entry(
+    inspection: &mut RegionObjectsInspection,
+    key_name: &str,
+    value_node: Node<'_, '_>,
+) {
+    if value_node.has_tag_name("string")
+        || value_node.has_tag_name("integer")
+        || value_node.has_tag_name("real")
+        || value_node.has_tag_name("boolean")
+        || value_node.has_tag_name("uri")
+        || value_node.has_tag_name("uuid")
+        || value_node.has_tag_name("date")
+    {
+        inspection.scalar_values.insert(
+            key_name.to_string(),
+            value_node.text().unwrap_or_default().to_string(),
+        );
+    } else if value_node.has_tag_name("array") {
+        inspection
+            .complex_value_types
+            .insert(key_name.to_string(), String::from("array"));
+        let items: Vec<Node<'_, '_>> = value_node
+            .children()
+            .filter(|node| node.is_element())
+            .collect();
+        inspection
+            .array_lengths
+            .insert(key_name.to_string(), items.len());
+        if let Some(first) = items.first()
+            && first.has_tag_name("map")
+        {
+            let mut keys = extract_llsd_map_keys(*first);
+            keys.sort();
+            inspection
+                .first_array_item_keys
+                .insert(key_name.to_string(), keys);
+        }
+    } else if value_node.has_tag_name("map") {
+        inspection
+            .complex_value_types
+            .insert(key_name.to_string(), String::from("map"));
+        record_region_objects_child_llsd_map(inspection, key_name, value_node);
+    } else {
+        inspection.complex_value_types.insert(
+            key_name.to_string(),
+            value_node.tag_name().name().to_string(),
+        );
+    }
+}
+
+fn extract_llsd_map_keys(map: Node<'_, '_>) -> Vec<String> {
+    map.children()
+        .filter(|node| node.is_element() && node.has_tag_name("key"))
+        .filter_map(|node| node.text())
+        .map(str::to_string)
+        .collect()
+}
+
+fn record_region_objects_child_json_map(
+    inspection: &mut RegionObjectsInspection,
+    key: &str,
+    child_map: &serde_json::Map<String, Value>,
+) {
+    const MAX_CHILD_MAP_SUMMARIES: usize = 8;
+    if inspection.child_map_keys.len() >= MAX_CHILD_MAP_SUMMARIES {
+        return;
+    }
+
+    let mut keys = child_map.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    inspection
+        .child_map_keys
+        .insert(key.to_string(), keys.into_iter().take(8).collect());
+
+    let mut scalar_entries = Vec::new();
+    let mut scalar_fields = BTreeMap::new();
+    for (child_key, child_value) in child_map {
+        match child_value {
+            Value::String(text) => {
+                if scalar_entries.len() < 6 {
+                    scalar_entries.push(format!("{child_key}={text}"));
+                }
+                scalar_fields.insert(child_key.clone(), text.clone());
+            }
+            Value::Number(num) => {
+                let value = num.to_string();
+                if scalar_entries.len() < 6 {
+                    scalar_entries.push(format!("{child_key}={value}"));
+                }
+                scalar_fields.insert(child_key.clone(), value);
+            }
+            Value::Bool(flag) => {
+                let value = flag.to_string();
+                if scalar_entries.len() < 6 {
+                    scalar_entries.push(format!("{child_key}={value}"));
+                }
+                scalar_fields.insert(child_key.clone(), value);
+            }
+            _ => {}
+        }
+    }
+    if !scalar_entries.is_empty() {
+        inspection
+            .child_map_scalar_values
+            .insert(key.to_string(), scalar_entries);
+    }
+    record_region_objects_child_semantics(inspection, key, child_map.keys(), &scalar_fields, {
+        inspect_region_objects_json_position(child_map.get("position"))
+    });
+}
+
+fn record_region_objects_child_llsd_map(
+    inspection: &mut RegionObjectsInspection,
+    key: &str,
+    value_node: Node<'_, '_>,
+) {
+    const MAX_CHILD_MAP_SUMMARIES: usize = 8;
+    if inspection.child_map_keys.len() >= MAX_CHILD_MAP_SUMMARIES {
+        return;
+    }
+
+    let mut keys = extract_llsd_map_keys(value_node);
+    keys.sort();
+    inspection
+        .child_map_keys
+        .insert(key.to_string(), keys.into_iter().take(8).collect());
+
+    let children: Vec<Node<'_, '_>> = value_node
+        .children()
+        .filter(|node| node.is_element())
+        .collect();
+    let mut idx = 0usize;
+    let mut scalar_entries = Vec::new();
+    let mut scalar_fields = BTreeMap::new();
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let child_value_node = children[idx + 1];
+        if key_node.has_tag_name("key") {
+            let child_key = key_node.text().unwrap_or_default();
+            if child_value_node.has_tag_name("string")
+                || child_value_node.has_tag_name("integer")
+                || child_value_node.has_tag_name("real")
+                || child_value_node.has_tag_name("boolean")
+                || child_value_node.has_tag_name("uri")
+                || child_value_node.has_tag_name("uuid")
+                || child_value_node.has_tag_name("date")
+            {
+                let value = child_value_node.text().unwrap_or_default().to_string();
+                if scalar_entries.len() < 6 {
+                    scalar_entries.push(format!("{child_key}={value}"));
+                }
+                scalar_fields.insert(child_key.to_string(), value);
+            }
+        }
+        idx += 2;
+    }
+    if !scalar_entries.is_empty() {
+        inspection
+            .child_map_scalar_values
+            .insert(key.to_string(), scalar_entries);
+    }
+    record_region_objects_child_semantics(
+        inspection,
+        key,
+        extract_llsd_map_keys(value_node).iter(),
+        &scalar_fields,
+        inspect_region_objects_llsd_position(value_node),
+    );
+}
+
+fn record_region_objects_child_semantics<'a, I>(
+    inspection: &mut RegionObjectsInspection,
+    key: &str,
+    keys: I,
+    scalar_fields: &BTreeMap<String, String>,
+    position_inspection: RegionObjectsPositionInspection,
+) where
+    I: IntoIterator<Item = &'a String>,
+{
+    let key_set = keys
+        .into_iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if let Some(pathfinding_summary) =
+        build_region_objects_pathfinding_summary(&key_set, scalar_fields, position_inspection)
+    {
+        let profile = pathfinding_summary.profile.clone();
+        let semantic_values = summarize_region_objects_pathfinding_summary(&pathfinding_summary);
+        inspection
+            .child_map_profiles
+            .insert(key.to_string(), profile);
+        if !semantic_values.is_empty() {
+            inspection
+                .child_map_semantic_values
+                .insert(key.to_string(), semantic_values);
+        }
+        inspection
+            .child_map_pathfinding_summaries
+            .insert(key.to_string(), pathfinding_summary);
+    }
+}
+
+fn build_region_objects_pathfinding_summary(
+    key_set: &BTreeSet<&str>,
+    scalar_fields: &BTreeMap<String, String>,
+    position_inspection: RegionObjectsPositionInspection,
+) -> Option<RegionObjectsPathfindingSummary> {
+    let looks_like_pathfinding_object =
+        key_set.contains("description") && key_set.contains("name") && key_set.contains("position");
+    let looks_like_pathfinding_linkset = key_set.contains("description")
+        && key_set.contains("can_be_volume")
+        && key_set.contains("A")
+        && key_set.contains("B")
+        && key_set.contains("C")
+        && key_set.contains("D");
+    if !looks_like_pathfinding_linkset && !looks_like_pathfinding_object {
+        return None;
+    }
+
+    let mut summary = RegionObjectsPathfindingSummary {
+        profile: if looks_like_pathfinding_linkset {
+            String::from("pathfinding_linkset")
+        } else {
+            String::from("pathfinding_object")
+        },
+        name: scalar_fields.get("name").cloned(),
+        description: scalar_fields.get("description").cloned(),
+        owner: scalar_fields.get("owner").cloned(),
+        owner_is_group: scalar_fields
+            .get("owner_is_group")
+            .and_then(|value| parse_region_objects_boolish(value)),
+        position_key_present: position_inspection.present,
+        position: position_inspection.summary,
+        position_shape: position_inspection.shape,
+        ..Default::default()
+    };
+    apply_region_objects_description_variant_hints(&mut summary);
+    if looks_like_pathfinding_linkset {
+        summary.linkset_use = derive_pathfinding_linkset_use(scalar_fields).map(str::to_string);
+        summary.walkability_coefficients =
+            derive_pathfinding_walkability_coefficients(scalar_fields);
+        summary.can_be_volume = scalar_fields
+            .get("can_be_volume")
+            .and_then(|value| parse_region_objects_boolish(value));
+        summary.phantom = scalar_fields
+            .get("phantom")
+            .and_then(|value| parse_region_objects_boolish(value));
+        summary.navmesh_category = scalar_fields
+            .get("navmesh_category")
+            .and_then(|value| parse_region_objects_i32(value));
+        summary.landimpact = scalar_fields
+            .get("landimpact")
+            .and_then(|value| parse_region_objects_i32(value));
+        summary.modifiable = scalar_fields
+            .get("modifiable")
+            .and_then(|value| parse_region_objects_boolish(value));
+        summary.is_scripted = scalar_fields
+            .get("is_scripted")
+            .and_then(|value| parse_region_objects_boolish(value));
+    }
+
+    Some(summary)
+}
+
+fn summarize_region_objects_pathfinding_summary(
+    summary: &RegionObjectsPathfindingSummary,
+) -> Vec<String> {
+    let mut semantic_values = Vec::new();
+    if let Some(variant_hint) = &summary.variant_hint {
+        semantic_values.push(format!("variant={variant_hint}"));
+    }
+    if let Some(linkset_use) = &summary.linkset_use {
+        semantic_values.push(format!("linkset_use={linkset_use}"));
+    }
+    if let Some([a, b, c, d]) = summary.walkability_coefficients {
+        semantic_values.push(format!("walkability=A:{a}|B:{b}|C:{c}|D:{d}"));
+    }
+    if let Some(can_be_volume) = summary.can_be_volume {
+        semantic_values.push(format!("can_be_volume={can_be_volume}"));
+    }
+    if let Some(phantom) = summary.phantom {
+        semantic_values.push(format!("phantom={phantom}"));
+    }
+    if let Some(name) = &summary.name {
+        semantic_values.push(format!("name={}", summarize_region_objects_text(name)));
+    }
+    if let Some(description) = &summary.description {
+        semantic_values.push(format!(
+            "description={}",
+            summarize_region_objects_text(description)
+        ));
+    }
+    if let Some(description_shape) = &summary.description_shape {
+        semantic_values.push(format!("description_shape={description_shape}"));
+    }
+    if let Some(description_numeric_tuple) = &summary.description_numeric_tuple {
+        semantic_values.push(format!(
+            "description_tuple={}",
+            description_numeric_tuple.join("|")
+        ));
+    }
+    if let Some(position) = &summary.position {
+        semantic_values.push(format!("position={position}"));
+    }
+    if let Some(position_shape) = &summary.position_shape {
+        semantic_values.push(format!("position_shape={position_shape}"));
+    }
+    if let Some(navmesh_category) = summary.navmesh_category {
+        semantic_values.push(format!("navmesh_category={navmesh_category}"));
+    }
+    if let Some(landimpact) = summary.landimpact {
+        semantic_values.push(format!("landimpact={landimpact}"));
+    }
+    if let Some(modifiable) = summary.modifiable {
+        semantic_values.push(format!("modifiable={modifiable}"));
+    }
+    if let Some(is_scripted) = summary.is_scripted {
+        semantic_values.push(format!("is_scripted={is_scripted}"));
+    }
+    if let Some(owner) = &summary.owner {
+        semantic_values.push(format!("owner={owner}"));
+    }
+    if let Some(owner_is_group) = summary.owner_is_group {
+        semantic_values.push(format!("owner_is_group={owner_is_group}"));
+    }
+    semantic_values.truncate(8);
+    semantic_values
+}
+
+fn apply_region_objects_description_variant_hints(summary: &mut RegionObjectsPathfindingSummary) {
+    let Some(description) = summary.description.as_deref() else {
+        if summary.position.is_none() {
+            summary.variant_hint = Some(match summary.position_key_present {
+                true => String::from("pathfinding_position_present_unparsed"),
+                false => String::from("pathfinding_no_position_key"),
+            });
+        }
+        return;
+    };
+
+    if let Some(tuple_values) = parse_region_objects_numericish_description_tuple(description) {
+        summary.description_shape = Some(String::from("comma_numeric_tuple6"));
+        summary.description_numeric_tuple = Some(tuple_values);
+        summary.variant_hint = Some(pathfinding_description_variant_label(
+            "pathfinding_tuple_description",
+            summary,
+        ));
+        return;
+    }
+
+    if description == "(No Description)" {
+        summary.description_shape = Some(String::from("placeholder_text"));
+        summary.variant_hint = Some(pathfinding_description_variant_label(
+            "pathfinding_placeholder_description",
+            summary,
+        ));
+        return;
+    }
+
+    summary.description_shape = Some(String::from("free_text"));
+    if summary.position.is_none() {
+        summary.variant_hint = Some(pathfinding_description_variant_label(
+            "pathfinding_text_description",
+            summary,
+        ));
+    }
+}
+
+fn pathfinding_description_variant_label(
+    prefix: &str,
+    summary: &RegionObjectsPathfindingSummary,
+) -> String {
+    if summary.position.is_some() {
+        format!("{prefix}_with_position")
+    } else if summary.position_key_present {
+        format!("{prefix}_position_unparsed")
+    } else {
+        format!("{prefix}_no_position_key")
+    }
+}
+
+fn analyze_region_objects_tuple_descriptions(inspection: &mut RegionObjectsInspection) {
+    const MAX_SLOT_DISTINCT_VALUES: usize = 4;
+    const MAX_DISTINCT_NAMES: usize = 6;
+    const MAX_SAMPLE_PAIRS: usize = 6;
+
+    let tuple_summaries = inspection
+        .child_map_pathfinding_summaries
+        .iter()
+        .filter_map(|(key, summary)| {
+            summary.description_numeric_tuple.as_ref().map(|tuple| {
+                let mut pair = String::new();
+                if let Some(name) = &summary.name {
+                    pair.push_str(name);
+                } else {
+                    pair.push_str(key);
+                }
+                if let Some(position) = &summary.position {
+                    pair.push('@');
+                    pair.push_str(position);
+                }
+                pair.push('=');
+                pair.push_str(&tuple.join("|"));
+                (tuple.clone(), pair)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if tuple_summaries.is_empty() {
+        inspection.tuple_description_analysis = None;
+        return;
+    }
+
+    let slot_count = tuple_summaries
+        .iter()
+        .map(|(tuple, _)| tuple.len())
+        .max()
+        .unwrap_or(0);
+    let mut distinct_names = Vec::new();
+    for (_, pair) in &tuple_summaries {
+        let name = pair
+            .split('@')
+            .next()
+            .unwrap_or_default()
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if !name.is_empty() && !distinct_names.iter().any(|existing| existing == &name) {
+            distinct_names.push(name);
+            if distinct_names.len() >= MAX_DISTINCT_NAMES {
+                break;
+            }
+        }
+    }
+    let mut slot_distinct_values = Vec::with_capacity(slot_count);
+    for idx in 0..slot_count {
+        let mut distinct = Vec::new();
+        for (tuple, _) in &tuple_summaries {
+            let Some(value) = tuple.get(idx) else {
+                continue;
+            };
+            if !distinct.iter().any(|existing| existing == value) {
+                distinct.push(value.clone());
+                if distinct.len() >= MAX_SLOT_DISTINCT_VALUES {
+                    break;
+                }
+            }
+        }
+        slot_distinct_values.push(distinct);
+    }
+
+    inspection.tuple_description_analysis = Some(RegionObjectsTupleDescriptionAnalysis {
+        sample_count: tuple_summaries.len(),
+        slot_count,
+        slot_distinct_values,
+        distinct_names,
+        sample_pairs: tuple_summaries
+            .into_iter()
+            .map(|(_, pair)| pair)
+            .take(MAX_SAMPLE_PAIRS)
+            .collect(),
+    });
+}
+
+fn parse_region_objects_numericish_description_tuple(text: &str) -> Option<Vec<String>> {
+    let parts = text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if parts.len() != 6 {
+        return None;
+    }
+    if parts.iter().all(|part| {
+        part.chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    }) {
+        Some(parts)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RegionObjectsPositionInspection {
+    present: bool,
+    summary: Option<String>,
+    shape: Option<String>,
+}
+
+fn inspect_region_objects_json_position(raw: Option<&Value>) -> RegionObjectsPositionInspection {
+    let Some(value) = raw else {
+        return RegionObjectsPositionInspection::default();
+    };
+    let mut inspection = RegionObjectsPositionInspection {
+        present: true,
+        ..Default::default()
+    };
+    match value {
+        Value::Array(items) => {
+            inspection.shape = Some(format!("json_array_len{}", items.len()));
+            if items.len() >= 3 {
+                inspection.summary = items
+                    .iter()
+                    .take(3)
+                    .map(region_objects_json_value_to_text)
+                    .collect::<Option<Vec<_>>>()
+                    .map(|values| values.join("|"));
+            }
+        }
+        Value::Object(map) => {
+            let x = map.get("x").and_then(region_objects_json_value_to_text);
+            let y = map.get("y").and_then(region_objects_json_value_to_text);
+            let z = map.get("z").and_then(region_objects_json_value_to_text);
+            if x.is_some() || y.is_some() || z.is_some() {
+                inspection.shape = Some(String::from("json_object_xyz"));
+                inspection.summary = Some(format!(
+                    "{}|{}|{}",
+                    x.unwrap_or_else(|| String::from("?")),
+                    y.unwrap_or_else(|| String::from("?")),
+                    z.unwrap_or_else(|| String::from("?"))
+                ));
+            } else {
+                inspection.shape = Some(format!("json_object_keys{}", map.len()));
+            }
+        }
+        Value::String(_) => {
+            inspection.shape = Some(String::from("json_string"));
+            inspection.summary = region_objects_json_value_to_text(value);
+        }
+        Value::Number(_) => {
+            inspection.shape = Some(String::from("json_number"));
+            inspection.summary = region_objects_json_value_to_text(value);
+        }
+        Value::Bool(_) => {
+            inspection.shape = Some(String::from("json_bool"));
+            inspection.summary = region_objects_json_value_to_text(value);
+        }
+        Value::Null => {
+            inspection.shape = Some(String::from("json_null"));
+        }
+    }
+    inspection
+}
+
+fn region_objects_json_value_to_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(num) => Some(num.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn inspect_region_objects_llsd_position(
+    value_node: Node<'_, '_>,
+) -> RegionObjectsPositionInspection {
+    let mut inspection = RegionObjectsPositionInspection::default();
+    let children: Vec<Node<'_, '_>> = value_node
+        .children()
+        .filter(|node| node.is_element())
+        .collect();
+    let mut idx = 0usize;
+    while idx + 1 < children.len() {
+        let key_node = children[idx];
+        let child_value_node = children[idx + 1];
+        if key_node.has_tag_name("key") && key_node.text().unwrap_or_default() == "position" {
+            inspection.present = true;
+            if child_value_node.has_tag_name("array") {
+                let values = child_value_node
+                    .children()
+                    .filter(|node| node.is_element())
+                    .take(3)
+                    .map(region_objects_llsd_value_to_text)
+                    .collect::<Option<Vec<_>>>();
+                let child_len = child_value_node
+                    .children()
+                    .filter(|node| node.is_element())
+                    .count();
+                inspection.shape = Some(format!("llsd_array_len{child_len}"));
+                if let Some(values) = values
+                    && values.len() == 3
+                {
+                    inspection.summary = Some(values.join("|"));
+                }
+            } else if child_value_node.has_tag_name("map") {
+                inspection.shape = Some(format!(
+                    "llsd_map_keys{}",
+                    extract_llsd_map_keys(child_value_node).len()
+                ));
+            } else {
+                inspection.shape = Some(format!("llsd_{}", child_value_node.tag_name().name()));
+            }
+            return inspection;
+        }
+        idx += 2;
+    }
+    inspection
+}
+
+fn region_objects_llsd_value_to_text(node: Node<'_, '_>) -> Option<String> {
+    if node.has_tag_name("string")
+        || node.has_tag_name("integer")
+        || node.has_tag_name("real")
+        || node.has_tag_name("boolean")
+        || node.has_tag_name("uri")
+        || node.has_tag_name("uuid")
+        || node.has_tag_name("date")
+    {
+        Some(node.text().unwrap_or_default().to_string())
+    } else {
+        None
+    }
+}
+
+fn derive_pathfinding_walkability_coefficients(
+    scalar_fields: &BTreeMap<String, String>,
+) -> Option<[i32; 4]> {
+    let a = parse_region_objects_i32(scalar_fields.get("A")?)?;
+    let b = parse_region_objects_i32(scalar_fields.get("B")?)?;
+    let c = parse_region_objects_i32(scalar_fields.get("C")?)?;
+    let d = parse_region_objects_i32(scalar_fields.get("D")?)?;
+    Some([a, b, c, d])
+}
+
+fn derive_pathfinding_linkset_use(
+    scalar_fields: &BTreeMap<String, String>,
+) -> Option<&'static str> {
+    let navmesh_category = scalar_fields.get("navmesh_category")?.trim();
+    let phantom = parse_region_objects_boolish(scalar_fields.get("phantom")?)?;
+    match (phantom, navmesh_category) {
+        (false, "0") => Some("walkable"),
+        (false, "1") => Some("static_obstacle"),
+        (false, "2") => Some("dynamic_obstacle"),
+        (true, "0") => Some("material_volume"),
+        (true, "1") => Some("exclusion_volume"),
+        (true, "2") => Some("dynamic_phantom"),
+        _ => None,
+    }
+}
+
+fn summarize_region_objects_text(text: &str) -> String {
+    const MAX_LEN: usize = 32;
+    if text.chars().count() <= MAX_LEN {
+        return text.to_string();
+    }
+    let truncated = text.chars().take(MAX_LEN).collect::<String>();
+    format!("{truncated}...")
+}
+
+fn parse_region_objects_boolish(text: &str) -> Option<bool> {
+    match text.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        value if value.eq_ignore_ascii_case("true") => Some(true),
+        value if value.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_region_objects_i32(text: &str) -> Option<i32> {
+    text.trim().parse::<i32>().ok()
 }
 
 fn normalize_login_response(raw: Value) -> Value {
@@ -9274,6 +10470,11 @@ mod tests {
             .and(header("content-type", "application/llsd+xml"))
             .and(body_string_contains("<llsd><array>"))
             .and(body_string_contains("<string>EventQueueGet</string>"))
+            .and(body_string_contains(
+                "<string>UntrustedSimulatorMessage</string>",
+            ))
+            .and(body_string_contains("<string>InterestList</string>"))
+            .and(body_string_contains("<string>RegionObjects</string>"))
             .and(body_string_contains("<string>AgentProfile</string>"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -9668,6 +10869,530 @@ mod tests {
             }
             other => panic!("expected MapLayerLikelyLegacyUdp, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_region_objects_once_reports_array_shape_and_first_item_keys() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/region-objects"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "objects": [
+                            {
+                                "id": "object-1",
+                                "name": "Cube",
+                                "owner_id": "owner-1"
+                            },
+                            {
+                                "id": "object-2"
+                            }
+                        ],
+                        "version": 3,
+                        "region": "Sandbox"
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_region_objects_once(&format!("{}/region-objects", server.uri()))
+            .await
+            .expect("region objects fetch should succeed");
+
+        assert!(inspection.top_level_keys.iter().any(|key| key == "objects"));
+        assert_eq!(inspection.array_lengths.get("objects"), Some(&2));
+        assert_eq!(
+            inspection.first_array_item_keys.get("objects"),
+            Some(&vec![
+                String::from("id"),
+                String::from("name"),
+                String::from("owner_id")
+            ])
+        );
+        assert_eq!(
+            inspection.scalar_values.get("version").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            inspection.scalar_values.get("region").map(String::as_str),
+            Some("Sandbox")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_region_objects_once_reports_child_map_keys_and_scalars() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/region-objects-map"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "11111111-1111-1111-1111-111111111111": {
+                            "name": "Cube",
+                            "owner_id": "owner-1",
+                            "local_id": 77,
+                            "phantom": false
+                        },
+                        "22222222-2222-2222-2222-222222222222": {
+                            "name": "Sphere"
+                        }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_region_objects_once(&format!("{}/region-objects-map", server.uri()))
+            .await
+            .expect("region objects fetch should succeed");
+
+        let first_key = "11111111-1111-1111-1111-111111111111";
+        assert_eq!(
+            inspection.child_map_keys.get(first_key),
+            Some(&vec![
+                String::from("local_id"),
+                String::from("name"),
+                String::from("owner_id"),
+                String::from("phantom")
+            ])
+        );
+        assert_eq!(
+            inspection.child_map_scalar_values.get(first_key),
+            Some(&vec![
+                String::from("local_id=77"),
+                String::from("name=Cube"),
+                String::from("owner_id=owner-1"),
+                String::from("phantom=false")
+            ])
+        );
+        assert_eq!(inspection.child_map_profiles.get(first_key), None);
+        assert_eq!(inspection.child_map_semantic_values.get(first_key), None);
+        assert_eq!(
+            inspection.child_map_pathfinding_summaries.get(first_key),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_region_objects_once_reports_typed_pathfinding_summary() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/region-objects-pathfinding"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "11111111-1111-1111-1111-111111111111": {
+                            "name": "Cube",
+                            "description": "Walkable cube",
+                            "owner": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                            "owner_is_group": 1,
+                            "position": [128, 64, 32],
+                            "landimpact": 2,
+                            "modifiable": 1,
+                            "navmesh_category": 2,
+                            "can_be_volume": 0,
+                            "is_scripted": 0,
+                            "phantom": 1,
+                            "A": 100,
+                            "B": 90,
+                            "C": 80,
+                            "D": 70
+                        }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_region_objects_once(&format!("{}/region-objects-pathfinding", server.uri()))
+            .await
+            .expect("region objects fetch should succeed");
+
+        let first_key = "11111111-1111-1111-1111-111111111111";
+        let summary = inspection
+            .child_map_pathfinding_summaries
+            .get(first_key)
+            .expect("pathfinding summary should be present");
+        assert_eq!(summary.profile, "pathfinding_linkset");
+        assert_eq!(summary.name.as_deref(), Some("Cube"));
+        assert_eq!(summary.description.as_deref(), Some("Walkable cube"));
+        assert_eq!(
+            summary.owner.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+        assert_eq!(summary.owner_is_group, Some(true));
+        assert!(summary.position_key_present);
+        assert_eq!(summary.position.as_deref(), Some("128|64|32"));
+        assert_eq!(summary.position_shape.as_deref(), Some("json_array_len3"));
+        assert_eq!(summary.landimpact, Some(2));
+        assert_eq!(summary.modifiable, Some(true));
+        assert_eq!(summary.navmesh_category, Some(2));
+        assert_eq!(summary.can_be_volume, Some(false));
+        assert_eq!(summary.is_scripted, Some(false));
+        assert_eq!(summary.phantom, Some(true));
+        assert_eq!(summary.walkability_coefficients, Some([100, 90, 80, 70]));
+        assert_eq!(summary.linkset_use.as_deref(), Some("dynamic_phantom"));
+        assert_eq!(summary.variant_hint, None);
+        assert_eq!(summary.description_shape.as_deref(), Some("free_text"));
+        assert_eq!(summary.description_numeric_tuple, None);
+        assert_eq!(inspection.typed_object_samples.len(), 1);
+        let typed = inspection
+            .typed_object_samples
+            .first()
+            .expect("typed object sample should be present");
+        assert_eq!(typed.object_id, first_key);
+        assert_eq!(typed.profile, "pathfinding_linkset");
+        assert_eq!(typed.name.as_deref(), Some("Cube"));
+        assert_eq!(
+            typed.owner.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+        assert_eq!(typed.position.as_deref(), Some("128|64|32"));
+        assert_eq!(typed.description_shape.as_deref(), Some("free_text"));
+        assert_eq!(typed.linkset_use.as_deref(), Some("dynamic_phantom"));
+        assert_eq!(typed.walkability_coefficients, Some([100, 90, 80, 70]));
+        assert_eq!(inspection.tuple_description_analysis, None);
+    }
+
+    #[test]
+    fn classify_region_objects_child_semantics_recognizes_pathfinding_linkset() {
+        let key_set = BTreeSet::from([
+            "A",
+            "B",
+            "C",
+            "D",
+            "can_be_volume",
+            "description",
+            "landimpact",
+            "modifiable",
+            "name",
+            "navmesh_category",
+            "owner",
+            "phantom",
+            "position",
+        ]);
+        let scalar_fields = BTreeMap::from([
+            (String::from("A"), String::from("100")),
+            (String::from("B"), String::from("100")),
+            (String::from("C"), String::from("100")),
+            (String::from("D"), String::from("100")),
+            (String::from("can_be_volume"), String::from("true")),
+            (
+                String::from("description"),
+                String::from("Pathfinding test cube"),
+            ),
+            (String::from("landimpact"), String::from("1")),
+            (String::from("modifiable"), String::from("true")),
+            (String::from("name"), String::from("Cube")),
+            (String::from("navmesh_category"), String::from("2")),
+            (
+                String::from("owner"),
+                String::from("11111111-1111-1111-1111-111111111111"),
+            ),
+            (String::from("phantom"), String::from("1")),
+        ]);
+
+        let summary = build_region_objects_pathfinding_summary(
+            &key_set,
+            &scalar_fields,
+            RegionObjectsPositionInspection {
+                present: true,
+                summary: Some(String::from("1|2|3")),
+                shape: Some(String::from("json_array_len3")),
+            },
+        )
+        .expect("pathfinding linkset should classify");
+        let semantic_values = summarize_region_objects_pathfinding_summary(&summary);
+
+        assert_eq!(summary.profile, "pathfinding_linkset");
+        assert!(
+            semantic_values
+                .iter()
+                .any(|value| value == "linkset_use=dynamic_phantom")
+        );
+        assert!(
+            semantic_values
+                .iter()
+                .any(|value| value == "walkability=A:100|B:100|C:100|D:100")
+        );
+        assert!(
+            semantic_values
+                .iter()
+                .any(|value| value == "description=Pathfinding test cube")
+        );
+        assert!(summary.position_key_present);
+        assert_eq!(summary.position.as_deref(), Some("1|2|3"));
+        assert_eq!(summary.position_shape.as_deref(), Some("json_array_len3"));
+        assert_eq!(summary.variant_hint, None);
+    }
+
+    #[test]
+    fn typed_pathfinding_summary_detects_numeric_tuple_description_variant() {
+        let key_set = BTreeSet::from([
+            "A",
+            "B",
+            "C",
+            "D",
+            "can_be_volume",
+            "description",
+            "name",
+            "owner",
+            "phantom",
+        ]);
+        let scalar_fields = BTreeMap::from([
+            (String::from("A"), String::from("100")),
+            (String::from("B"), String::from("100")),
+            (String::from("C"), String::from("100")),
+            (String::from("D"), String::from("100")),
+            (String::from("can_be_volume"), String::from("0")),
+            (
+                String::from("description"),
+                String::from("0,10.000000,30,0,2,0"),
+            ),
+            (String::from("name"), String::from("DSS Candlier Frame")),
+            (
+                String::from("owner"),
+                String::from("10b483ef-e1b9-4e8d-8247-2324b3e4b48c"),
+            ),
+            (String::from("phantom"), String::from("1")),
+        ]);
+
+        let summary = build_region_objects_pathfinding_summary(
+            &key_set,
+            &scalar_fields,
+            RegionObjectsPositionInspection::default(),
+        )
+        .expect("tuple variant should classify");
+
+        assert_eq!(
+            summary.variant_hint.as_deref(),
+            Some("pathfinding_tuple_description_no_position_key")
+        );
+        assert_eq!(
+            summary.description_shape.as_deref(),
+            Some("comma_numeric_tuple6")
+        );
+        assert!(!summary.position_key_present);
+        assert_eq!(summary.position_shape, None);
+        assert_eq!(
+            summary.description_numeric_tuple,
+            Some(vec![
+                String::from("0"),
+                String::from("10.000000"),
+                String::from("30"),
+                String::from("0"),
+                String::from("2"),
+                String::from("0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn typed_pathfinding_summary_detects_placeholder_description_variant() {
+        let key_set = BTreeSet::from([
+            "A",
+            "B",
+            "C",
+            "D",
+            "can_be_volume",
+            "description",
+            "name",
+            "owner",
+            "phantom",
+        ]);
+        let scalar_fields = BTreeMap::from([
+            (String::from("A"), String::from("100")),
+            (String::from("B"), String::from("100")),
+            (String::from("C"), String::from("100")),
+            (String::from("D"), String::from("100")),
+            (String::from("can_be_volume"), String::from("1")),
+            (
+                String::from("description"),
+                String::from("(No Description)"),
+            ),
+            (
+                String::from("name"),
+                String::from("Trance  Chair: Rope Bondage"),
+            ),
+            (
+                String::from("owner"),
+                String::from("10b483ef-e1b9-4e8d-8247-2324b3e4b48c"),
+            ),
+            (String::from("phantom"), String::from("1")),
+        ]);
+
+        let summary = build_region_objects_pathfinding_summary(
+            &key_set,
+            &scalar_fields,
+            RegionObjectsPositionInspection::default(),
+        )
+        .expect("placeholder variant should classify");
+
+        assert_eq!(
+            summary.variant_hint.as_deref(),
+            Some("pathfinding_placeholder_description_no_position_key")
+        );
+        assert_eq!(
+            summary.description_shape.as_deref(),
+            Some("placeholder_text")
+        );
+        assert!(!summary.position_key_present);
+        assert_eq!(summary.description_numeric_tuple, None);
+    }
+
+    #[test]
+    fn typed_pathfinding_summary_detects_present_but_unparsed_position() {
+        let key_set = BTreeSet::from([
+            "A",
+            "B",
+            "C",
+            "D",
+            "can_be_volume",
+            "description",
+            "name",
+            "owner",
+            "phantom",
+            "position",
+        ]);
+        let scalar_fields = BTreeMap::from([
+            (String::from("A"), String::from("100")),
+            (String::from("B"), String::from("100")),
+            (String::from("C"), String::from("100")),
+            (String::from("D"), String::from("100")),
+            (String::from("can_be_volume"), String::from("0")),
+            (
+                String::from("description"),
+                String::from("0,10.000000,30,0,2,0"),
+            ),
+            (String::from("name"), String::from("DSS Candlier Frame")),
+            (
+                String::from("owner"),
+                String::from("10b483ef-e1b9-4e8d-8247-2324b3e4b48c"),
+            ),
+            (String::from("phantom"), String::from("1")),
+        ]);
+
+        let summary = build_region_objects_pathfinding_summary(
+            &key_set,
+            &scalar_fields,
+            RegionObjectsPositionInspection {
+                present: true,
+                summary: None,
+                shape: Some(String::from("json_object_keys2")),
+            },
+        )
+        .expect("present-but-unparsed position variant should classify");
+
+        assert!(summary.position_key_present);
+        assert_eq!(summary.position, None);
+        assert_eq!(summary.position_shape.as_deref(), Some("json_object_keys2"));
+        assert_eq!(
+            summary.variant_hint.as_deref(),
+            Some("pathfinding_tuple_description_position_unparsed")
+        );
+    }
+
+    #[test]
+    fn region_objects_tuple_analysis_detects_constant_and_varying_slots() {
+        let mut inspection = RegionObjectsInspection::default();
+        inspection.child_map_pathfinding_summaries.insert(
+            String::from("a"),
+            RegionObjectsPathfindingSummary {
+                name: Some(String::from("DSS Candlier Frame")),
+                position: Some(String::from("39|68|2999")),
+                description_numeric_tuple: Some(vec![
+                    String::from("0"),
+                    String::from("10.000000"),
+                    String::from("30"),
+                    String::from("0"),
+                    String::from("2"),
+                    String::from("0"),
+                ]),
+                ..Default::default()
+            },
+        );
+        inspection.child_map_pathfinding_summaries.insert(
+            String::from("b"),
+            RegionObjectsPathfindingSummary {
+                name: Some(String::from("DSS Candlier Frame")),
+                position: Some(String::from("69|38|2999")),
+                description_numeric_tuple: Some(vec![
+                    String::from("0"),
+                    String::from("10.000000"),
+                    String::from("30"),
+                    String::from("0"),
+                    String::from("3"),
+                    String::from("0"),
+                ]),
+                ..Default::default()
+            },
+        );
+
+        analyze_region_objects_tuple_descriptions(&mut inspection);
+
+        let analysis = inspection
+            .tuple_description_analysis
+            .as_ref()
+            .expect("tuple analysis should be present");
+        assert_eq!(analysis.sample_count, 2);
+        assert_eq!(analysis.slot_count, 6);
+        assert_eq!(
+            analysis.slot_distinct_values,
+            vec![
+                vec![String::from("0")],
+                vec![String::from("10.000000")],
+                vec![String::from("30")],
+                vec![String::from("0")],
+                vec![String::from("2"), String::from("3")],
+                vec![String::from("0")],
+            ]
+        );
+        assert_eq!(
+            analysis.distinct_names,
+            vec![String::from("DSS Candlier Frame")]
+        );
+        assert_eq!(
+            analysis.sample_pairs,
+            vec![
+                String::from("DSS Candlier Frame@39|68|2999=0|10.000000|30|0|2|0"),
+                String::from("DSS Candlier Frame@69|38|2999=0|10.000000|30|0|3|0"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -11265,6 +12990,102 @@ mod tests {
         assert!(!socket_summary.split_local_port_detected);
     }
 
+    #[tokio::test]
+    async fn send_use_circuit_code_on_circuit_to_port_sends_to_explicit_target() {
+        let primary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("primary listener bind should succeed");
+        let primary_addr = primary_listener
+            .local_addr()
+            .expect("primary listener address should exist");
+        let secondary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("secondary listener bind should succeed");
+        let secondary_addr = secondary_listener
+            .local_addr()
+            .expect("secondary listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": primary_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let primary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("use circuit should arrive");
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("complete movement should arrive");
+        });
+
+        let secondary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (len, sender) = secondary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("explicit use circuit should arrive");
+            (len, sender, buf)
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        primary_task.await.expect("primary task should complete");
+
+        connection
+            .send_use_circuit_code_on_circuit_to_port(&circuit, secondary_addr.port())
+            .await
+            .expect("explicit use circuit should send");
+
+        let (len, sender, buf) = secondary_task
+            .await
+            .expect("secondary task should complete");
+        assert_eq!(
+            sender,
+            circuit
+                .socket
+                .local_addr()
+                .expect("social socket local address should exist")
+        );
+        let header =
+            decode_first_simulator_packet_header(&buf[..len]).expect("packet header should decode");
+        assert_eq!(
+            header.message_number,
+            u32::from(LLUDP_USE_CIRCUIT_CODE_LOW_ID) | 0xFFFF0000
+        );
+    }
+
     #[test]
     fn decode_region_handshake_handles_zero_coded_body() {
         let body = vec![0, 4, 1, 7, b'T', b'e', b's', b't', b'S', b'i', b'm'];
@@ -12789,6 +14610,147 @@ mod tests {
         assert_eq!(nearby.len(), 1);
         assert_eq!(nearby[0].sender, "Alpha Resident");
         assert_eq!(nearby[0].text, "hello");
+    }
+
+    #[test]
+    fn parse_event_queue_poll_from_json_flattens_nested_fields() {
+        let value = json!({
+            "id": 4,
+            "events": [{
+                "message": "EnableSimulator",
+                "body": {
+                    "SimulatorInfo": {
+                        "Handle": 123,
+                        "IP": "16.144.39.130",
+                        "Port": 13001
+                    }
+                }
+            }]
+        });
+
+        let poll = parse_event_queue_poll_from_json(&value).expect("poll parsing should succeed");
+        assert_eq!(poll.id, Some(4));
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("SimulatorInfo.Handle")
+                .map(String::as_str),
+            Some("123")
+        );
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("SimulatorInfo.IP")
+                .map(String::as_str),
+            Some("16.144.39.130")
+        );
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("SimulatorInfo.Port")
+                .map(String::as_str),
+            Some("13001")
+        );
+    }
+
+    #[test]
+    fn parse_event_queue_poll_from_llsd_xml_flattens_nested_fields() {
+        let body = br#"<llsd><map>
+            <key>id</key><integer>7</integer>
+            <key>events</key><array>
+                <map>
+                    <key>message</key><string>EstablishAgentCommunication</string>
+                    <key>body</key><map>
+                        <key>seed-capability</key><string>https://seed.example/cap</string>
+                        <key>sim-ip-and-port</key><string>16.144.39.130:13001</string>
+                    </map>
+                </map>
+            </array>
+        </map></llsd>"#;
+
+        let poll = parse_event_queue_poll_from_llsd_xml(body).expect("poll parsing should succeed");
+        assert_eq!(poll.id, Some(7));
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("seed-capability")
+                .map(String::as_str),
+            Some("https://seed.example/cap")
+        );
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("sim-ip-and-port")
+                .map(String::as_str),
+            Some("16.144.39.130:13001")
+        );
+    }
+
+    #[test]
+    fn extract_event_queue_simulator_targets_and_parcel_summaries() {
+        let connection = Connection::new(ConnectionConfig::default());
+        let poll = EventQueuePollResult {
+            id: Some(2),
+            events: vec![
+                EventQueueMessage {
+                    message: String::from("EnableSimulator"),
+                    fields: BTreeMap::from([
+                        (String::from("SimulatorInfo.Handle"), String::from("123")),
+                        (
+                            String::from("SimulatorInfo.IP"),
+                            String::from("16.144.39.130"),
+                        ),
+                        (String::from("SimulatorInfo.Port"), String::from("13001")),
+                    ]),
+                },
+                EventQueueMessage {
+                    message: String::from("EstablishAgentCommunication"),
+                    fields: BTreeMap::from([
+                        (
+                            String::from("seed-capability"),
+                            String::from("https://seed.example/cap"),
+                        ),
+                        (
+                            String::from("sim-ip-and-port"),
+                            String::from("16.144.39.130:13001"),
+                        ),
+                    ]),
+                },
+                EventQueueMessage {
+                    message: String::from("ParcelProperties"),
+                    fields: BTreeMap::from([
+                        (String::from("local_id"), String::from("55")),
+                        (String::from("name"), String::from("Sandbox Parcel")),
+                        (String::from("area"), String::from("4096")),
+                    ]),
+                },
+            ],
+        };
+
+        let targets = connection.extract_event_queue_simulator_targets(&poll);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].handle.as_deref(), Some("123"));
+        assert_eq!(targets[0].ip.as_deref(), Some("16.144.39.130"));
+        assert_eq!(targets[0].port.as_deref(), Some("13001"));
+        assert_eq!(
+            targets[1].seed_capability.as_deref(),
+            Some("https://seed.example/cap")
+        );
+        assert_eq!(
+            targets[1].sim_ip_and_port.as_deref(),
+            Some("16.144.39.130:13001")
+        );
+
+        let parcels = connection.extract_event_queue_parcel_summaries(&poll);
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].local_id.as_deref(), Some("55"));
+        assert_eq!(parcels[0].name.as_deref(), Some("Sandbox Parcel"));
+        assert_eq!(parcels[0].area.as_deref(), Some("4096"));
+
+        assert_eq!(
+            connection.summarize_event_queue_event_fields(&poll.events[2], 2),
+            "area=4096;local_id=55"
+        );
     }
 
     #[tokio::test]

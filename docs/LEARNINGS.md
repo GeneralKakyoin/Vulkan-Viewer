@@ -576,3 +576,171 @@ more than one session to establish correctly.
 **Files affected:** object-ingress planning, `viewer_net` capability/event-queue follow-up, `viewer_app` live startup diagnostics.
 
 ---
+
+## L41 — Persistent EventQueue plus one-shot `EnableSimulator` port follow-up can open real simulator/world-data ingress without restoring LLUDP object updates
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 bounded live validations after preserving nested EventQueue bodies and sending one-shot `UseCircuitCode` follow-up to EventQueue-delivered simulator ports.
+
+**What happened:** The viewer began ingesting structured simulator/world data from the simulator-host EventQueue lane, including nested `ParcelProperties` content and port-only `EnableSimulator` details (`13013`, `13000`, `13001`). The worker then sent one-shot `UseCircuitCode` follow-up to those ports on the current simulator host. Even so, the run still showed `RegionHandshake = none`, `RegionHandshakeReply = none`, and `ObjectUpdate* = none`.
+
+**Rule for future plans:** Once persistent EventQueue is live and one-shot `EnableSimulator` port follow-up is in place, do not spend another slice repeating the same port follow alone. Move the next branch to per-region seed-cap / `EstablishAgentCommunication` evidence or another specific simulator-host prerequisite instead.
+
+**Files affected:** `viewer_net` EventQueue parsing and explicit-target `UseCircuitCode` helpers, `viewer_app` EventQueue follow-up policy, post-EventQueue object-ingress planning.
+
+---
+
+## L42 — Expanding the primary seed-cap request can surface `InterestList`, `RegionObjects`, and `UntrustedSimulatorMessage` without surfacing `EstablishAgentCommunication` or restoring LLUDP object ingress
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 bounded live validation after expanding the primary simulator seed-cap request and adding bounded explicit seed-cap follow-up support.
+
+**What happened:** The primary simulator on `:12043` began returning additional Firestorm-evidenced capabilities including `InterestList`, `RegionObjects`, and `UntrustedSimulatorMessage`. Even so, the same bounded run still did not surface `EstablishAgentCommunication`, and LLUDP object ingress remained at `RegionHandshake = none`, `RegionHandshakeReply = none`, and `ObjectUpdate* = none`.
+
+**Rule for future plans:** Once the primary simulator returns these broader region capabilities, do not keep spending slices merely widening the seed-cap request. Move the next branch to probing the now-proven object-related cap (`RegionObjects`) or another specific read-side simulator-host action.
+
+**Files affected:** primary seed-cap request policy, app-side seed-cap follow-up policy, post-seed-cap object-ingress planning.
+
+---
+
+## L43 — The primary simulator `RegionObjects` capability can provide the first object-related simulator data even while LLUDP `ObjectUpdate*` remains absent
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 bounded live `RegionObjects` capability probe after surfacing that cap on the primary simulator-host `:12043` lane.
+
+**What happened:** The read-only `RegionObjects` probe returned a UUID-keyed top-level map, and the first surfaced UUID keys classified as nested `map` values. At the same time, LLUDP object ingress still remained at `RegionHandshake = none`, `RegionHandshakeReply = none`, and `ObjectUpdate* = none`.
+
+**Rule for future plans:** Once `RegionObjects` is proven to return structured object-related payloads, treat that as a valid opening for “any object data” work and move the next branch to bounded field extraction from those maps. Do not require LLUDP `ObjectUpdate*` parity before acknowledging that the simulator is already sending usable object-related data on another supported path.
+
+**Files affected:** `viewer_net` capability inspection helpers, `viewer_app` one-shot capability probe policy, object-ingress follow-up planning.
+
+---
+
+## L44 — Bounded `RegionObjects` child-map extraction can expose stable inner object fields before any LLUDP object-update parity exists
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Running the March 30, 2026 bounded live validation after extending the `RegionObjects` probe to inspect the first UUID-keyed child maps.
+
+**What happened:** The viewer surfaced repeatable inner keys `A`, `B`, `C`, `D`, `can_be_volume`, and `description`, along with repeated scalar values `A=100`, `B=100`, `C=100`, and `D=100`, from the first `RegionObjects` child maps. LLUDP `RegionHandshake` and `ObjectUpdate*` still remained absent.
+
+**Rule for future plans:** Once bounded `RegionObjects` child extraction is live, prefer the next slice to semantic/source-backed interpretation of those fields rather than further transport expansion. The opening is already real; the new problem is understanding it.
+
+**Files affected:** `viewer_net` `RegionObjects` inspection helpers, `viewer_app` `RegionObjects` relay summarization, post-opening object-ingress planning.
+
+---
+
+## L45 — The first proven `RegionObjects` child-map family matches Firestorm pathfinding linkset/object schema, and bool-like `0/1` values must be normalized before deriving semantics
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 30, 2026 bounded semantic-mapping slice using Firestorm pathfinding references and a live `RegionObjects` capture.
+
+**What happened:** The previously opaque `A/B/C/D`, `can_be_volume`, and `description` keys lined up directly with Firestorm’s `LLPathfindingLinkset` / `LLPathfindingObject` fields. The live payload also encoded booleans as `0/1`, so a naive `true/false` parser mis-derived `linkset_use` until those values were normalized.
+
+**Rule for future plans:** Once `RegionObjects` child maps show this field family, treat them as pathfinding linkset/object payloads unless stronger evidence contradicts it. Normalize bool-like `0/1` fields before deriving semantics such as `linkset_use`, and cite `llpathfindinglinkset.cpp` / `llpathfindingobject.cpp` rather than guessing from field letters.
+
+**Files affected:** `viewer_net` `RegionObjects` semantic helpers, `viewer_app` relay interpretation, post-semantic object-ingress planning.
+
+---
+
+## L46 — Typed `RegionObjects` pathfinding summaries can surface real names and owners, but the live lane may still contain multiple field-shape variants
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 31, 2026 bounded pathfinding field-promotion slice on top of the existing `RegionObjects` semantic mapping.
+
+**What happened:** The new typed lane successfully surfaced named fields such as `profile`, `linkset_use`, `walkability`, `name`, and `owner`, but the first live records were not fully uniform. Some entries had a normal `(No Description)` value while others surfaced comma-like numeric payloads in `description`, and no separate `position` field appeared in the bounded first-object sample.
+
+**Rule for future plans:** Once typed `RegionObjects` summaries are live, do not assume every UUID-keyed child map is the same canonical pathfinding-object shape. Add bounded variant discrimination or shape hints before treating `description` or missing `position` as settled semantics.
+
+**Files affected:** `viewer_net` typed `RegionObjects` extraction helpers, `viewer_app` typed relay summarization, post-promotion object-ingress planning.
+
+---
+
+## L47 — Live `RegionObjects` linkset records can carry valid LLSD-array positions even when early bounded summaries make them look absent
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 31, 2026 position-shape clarification slice on top of the existing `RegionObjects` pathfinding lane.
+
+**What happened:** The earlier bounded summaries made the tuple-description records look like `...no_position` variants, but tighter inspection showed those same live records actually carry `position` as LLSD arrays of length 3. The problem was not field absence; it was that the extraction/relay path was not surfacing the position evidence clearly enough.
+
+**Rule for future plans:** When a live `RegionObjects` summary appears to be missing a canonical field, first distinguish “field absent” from “field present but not surfaced/decoded.” Add explicit presence/shape evidence before concluding the schema changed or the field is missing on-wire.
+
+**Files affected:** `viewer_net` `RegionObjects` position inspection helpers, `viewer_app` bounded relay summarization, post-variant object-ingress planning.
+
+---
+
+## L48 — Bounded tuple slot analysis can prove repeatable structure without yet proving semantics
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 31, 2026 tuple slot-analysis slice on top of the existing typed `RegionObjects` lane.
+
+**What happened:** Once the relay surfaced bounded tuple slot analysis, the live `RegionObjects` tuple records showed a clear repeated six-slot structure with only one varying slot in the current sample. Even so, the current evidence still came from just two same-name records, which is not enough to assign semantic labels safely.
+
+**Rule for future plans:** When a repeated tuple/string content pattern appears, first prove which slots are constant versus varying and preserve the raw values. Do not assign semantic names to tuple slots until the sample widens beyond a narrow same-object slice or a Firestorm reference directly supports the mapping.
+
+**Files affected:** `viewer_net` tuple analysis helpers, `viewer_app` `RegionObjects` relay summarization, post-analysis object-ingress planning.
+
+---
+
+## L49 — Once code-side tuple widening is in place, a still-narrow tuple family usually means the current live content is narrow, not that the extractor is too small
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 31, 2026 tuple sample-widening slice after increasing the bounded `RegionObjects` child-map window and distinct-name reporting.
+
+**What happened:** The widened extraction path worked mechanically, but the bounded live run still produced only two tuple samples from the same object name (`DSS Candlier Frame`). That showed the limiting factor had moved from the code-side summary cap to the actual live region/window content.
+
+**Rule for future plans:** After widening the extractor and confirming the live tuple sample is still narrow, stop adding more local logging in the same place. Move the next branch to a broader capture window or different-region evidence run before assigning semantics.
+
+**Files affected:** `viewer_net` `RegionObjects` child-map limits and tuple analysis, `viewer_app` relay summaries, post-widening object-ingress planning.
+
+---
+
+## L50 — If a longer same-region tuple capture still stays narrow, the next evidence branch should change region instead of only increasing time
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 31, 2026 longer same-region tuple-capture slice after the extractor had already been widened.
+
+**What happened:** A 110-second bounded live run still produced only the same two tuple samples from `DSS Candlier Frame`, with the same slot pattern and the same varying slot `4`. That showed the limiting factor was no longer local logging depth or capture duration in the current region.
+
+**Rule for future plans:** After widening the extractor and extending the same-region capture window, do not spend another slice increasing local runtime in place. Move the next evidence step to a region-change / teleport capture, and if that still does not broaden the tuple family, treat the tuple as likely object-local content rather than a generally decodable structure.
+
+**Files affected:** object-ingress capture strategy, tuple-analysis planning, continuity docs.
+
+---
+
+## L51 — Reconnect-targeted SLURL support should normalize to Firestorm-style `uri:Region&x&y&z`, not pass raw SLURLs through as login start strings
+
+**Category:** Protocol / `viewer_app` + UI/startup orchestration
+
+**Learned when:** Implementing the March 31, 2026 bounded reconnect-based SLURL teleport slice.
+
+**What happened:** Firestorm references (`llslurl.cpp`, `lllogininstance.cpp`) show that location-style login targets are converted into `uri:Region&x&y&z` strings before login shaping. Passing raw `secondlife://...` or maps URLs through directly would not match the proven start-location format already accepted by the login/bootstrap path.
+
+**Rule for future plans:** When adding SLURL-driven start-location or reconnect controls, normalize supported SLURL forms into Firestorm-style login start strings first. Keep that logic in `viewer_app` orchestration/UI parsing, and defer true in-session teleport parity to a separate transport/handoff milestone.
+
+**Files affected:** `viewer_app` start-location parsing, worker command/reconnect flow, network-debug teleport tooling.
+
+---
+
+## L52 — Once region change shows stable cross-region typed `RegionObjects` fields and the tuple disappears, promote the stable fields instead of continuing tuple-first decoding
+
+**Category:** Protocol / `viewer_net` + `viewer_app`
+
+**Learned when:** Completing the March 31, 2026 reconnect-based teleport capture and the follow-on typed-feed promotion.
+
+**What happened:** The teleport capture changed both simulator host and object population. The new region still surfaced stable typed `RegionObjects` fields such as `name`, `owner`, `position`, `profile`, `linkset_use`, and `walkability`, but the earlier tuple-like description variant no longer appeared. That showed the tuple was likely local object content rather than the next universal protocol schema to decode.
+
+**Rule for future plans:** After a region-change capture broadens the `RegionObjects` sample and the previously suspicious tuple content disappears, stop treating tuple interpretation as the primary next branch. Promote the stable cross-region fields into a bounded typed feed first, and only return to tuple decoding if new evidence shows it matters again.
+
+**Files affected:** `viewer_net` `RegionObjects` typed extraction, `viewer_app` relay summarization, object-ingress planning.
+
+---

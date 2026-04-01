@@ -236,6 +236,7 @@ fn build_base_live_visual_snapshot(result: &GridLoginResult) -> LiveVisualSnapsh
     let mut snapshot = LiveVisualSnapshot {
         source: String::from("viewer_net_manual_example"),
         logged_in: false,
+        current_region_name: None,
         first_sim_endpoint: None,
         first_sim_region_x: None,
         first_sim_region_y: None,
@@ -277,6 +278,7 @@ fn build_base_live_visual_snapshot(result: &GridLoginResult) -> LiveVisualSnapsh
 
     if let GridLoginResult::Success(bootstrap) = result {
         snapshot.logged_in = true;
+        snapshot.current_region_name = bootstrap.start_location.clone();
         snapshot.first_sim_endpoint = Some(format!(
             "{}:{}",
             bootstrap.first_sim.sim_ip, bootstrap.first_sim.sim_port

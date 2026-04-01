@@ -190,6 +190,11 @@ These variables are read by `viewer_app` when in-process live startup is enabled
 
 - `VIEWER_APP_IN_PROCESS_PROBE` (bool-like, default `true`)
 - `VIEWER_APP_WORKER_TICK_MS` (u64, default `60`, min `10`)
+- `VIEWER_APP_AUTO_TELEPORT_SLURL` (optional string)
+  - one-shot reconnect-teleport target for terminal-driven capture runs
+  - accepts the same supported SLURL forms as the in-app `Network Debug` control
+- `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS` (u32, default `40`, max `10000`)
+  - delay after connected steady state before the one-shot auto-teleport fires
 - `VIEWER_APP_EVENT_QUEUE_POLL_TIMEOUT_MS` (u64, default `45000`, min `100`)
 - `VIEWER_APP_EVENT_QUEUE_POLL_EVERY_TICKS` (u32, default `10`, min `1`)
 - `VIEWER_APP_EVENT_QUEUE_FAILURES_BEFORE_RECONNECT` (u32, default `0`)
@@ -200,6 +205,17 @@ These variables are read by `viewer_app` when in-process live startup is enabled
 - `VIEWER_APP_NEARBY_SEND_RECEIVE_TIMEOUT_MS` (u64, default `40`, min `5`)
 - `VIEWER_APP_NEARBY_SEND_RECEIVE_PACKETS` (usize, default `0`)
 - `VIEWER_APP_PROFILE_CACHE_TTL_SECS` (u64, default `120`)
+- `VIEWER_NETWORK_DEBUG_LOG_PATH` (path, default `logs/network_debug.jsonl`)
+  - append-only JSONL sink for network-debug relay categories used by the in-app `Network Debug` window
+
+Example bounded reconnect-teleport capture run:
+```powershell
+$env:VIEWER_APP_LIVE_STARTUP='on'
+$env:VIEWER_APP_AUTO_TELEPORT_SLURL='secondlife://Ahern/50/60/70'
+$env:VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS='40'
+$env:VIEWER_NETWORK_DEBUG_LOG_PATH='artifacts/logs/network_debug_region_change.jsonl'
+cargo run -p viewer_app
+```
 
 ---
 

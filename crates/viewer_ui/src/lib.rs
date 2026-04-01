@@ -4,10 +4,10 @@ use egui_winit::State;
 use std::collections::{BTreeMap, HashMap};
 use viewer_core::{
     AvatarProfileState, AvatarProfileTab, AvatarRenderMode, Camera, ChatConnectionState,
-    ChatSendStatus, ChatState, HandoffOutcome, HandoffReason, LiveVisualSnapshot, ProbeResultCode,
-    ProfileFreshness, ProfileLoadStatus, RecoveryAction, RecoveryActionResult, RecoveryResultCode,
-    RuntimeRelayLevel, SessionUxReason, SessionUxStatus, SocialState, TransitionVisualState,
-    WorldAvatarPlaceholder,
+    ChatSendStatus, ChatState, HandoffOutcome, HandoffReason, LiveVisualSnapshot,
+    NetworkDebugState, ProbeResultCode, ProfileFreshness, ProfileLoadStatus, RecoveryAction,
+    RecoveryActionResult, RecoveryResultCode, RuntimeRelayLevel, SessionUxReason, SessionUxStatus,
+    SocialState, TransitionVisualState, WorldAvatarPlaceholder,
 };
 use wgpu::{
     CommandEncoder, Device, LoadOp, Operations, Queue, RenderPassColorAttachment,
@@ -21,6 +21,10 @@ fn live_visual_lines(snapshot: Option<&LiveVisualSnapshot>) -> Vec<String> {
             let mut lines = vec![
                 format!("Source: {}", snapshot.source),
                 format!("Logged in: {}", snapshot.logged_in),
+                format!(
+                    "Current region: {}",
+                    snapshot.current_region_name.as_deref().unwrap_or("n/a")
+                ),
                 format!(
                     "Handshake AMC reached: {}",
                     snapshot.handshake_agent_movement_complete
@@ -229,9 +233,11 @@ pub struct UiSystem {
     thread_filter: ThreadFilter,
     profile_texture_cache: HashMap<String, egui::TextureHandle>,
     profile_texture_failures: HashMap<String, String>,
+    network_debug_teleport_target: String,
     relay_filter_text: String,
     relay_level_filter: Option<RuntimeRelayLevel>,
     pub show_diagnostics: bool,
+    pub show_network_debug: bool,
     pub show_social: bool,
     pub focus_continuity_requested: bool,
     pub focus_social_requested: bool,
@@ -258,6 +264,7 @@ pub struct UiActions {
     pub select_avatar_profile_tab: Option<(String, AvatarProfileTab)>,
     pub refresh_avatar_profile: Option<(String, Option<AvatarProfileTab>)>,
     pub open_external_url: Option<String>,
+    pub teleport_via_slurl: Option<String>,
     pub retry_continuity_probe: bool,
     pub refresh_visible_assets: bool,
     pub clear_recovery_banner: bool,
@@ -294,6 +301,7 @@ pub struct RenderInput<'a> {
     pub can_retry_probe: bool,
     pub can_refresh_assets: bool,
     pub show_chat_window: bool,
+    pub network_debug: &'a NetworkDebugState,
 }
 
 fn should_submit_on_enter(enter_pressed: bool, shift_held: bool) -> bool {
@@ -514,9 +522,11 @@ impl UiSystem {
             thread_filter: ThreadFilter::Recent,
             profile_texture_cache: HashMap::new(),
             profile_texture_failures: HashMap::new(),
+            network_debug_teleport_target: String::new(),
             relay_filter_text: String::new(),
             relay_level_filter: None,
             show_diagnostics: true,
+            show_network_debug: true,
             show_social: false,
             focus_continuity_requested: false,
             focus_social_requested: false,
@@ -563,6 +573,7 @@ impl UiSystem {
             can_retry_probe,
             can_refresh_assets,
             show_chat_window: _show_chat_window,
+            network_debug,
         } = input;
         if surface_size.width == 0 || surface_size.height == 0 {
             return UiActions::default();
@@ -944,6 +955,90 @@ impl UiSystem {
                 });
             self.show_diagnostics = diag_open;
             self.focus_continuity_requested = focus_continuity;
+
+            if self.show_network_debug {
+                let mut network_open = self.show_network_debug;
+                egui::Window::new("Network Debug")
+                    .default_pos(egui::pos2(surface_size.width as f32 - 520.0, 48.0))
+                    .default_size(egui::vec2(420.0, 420.0))
+                    .resizable(true)
+                    .open(&mut network_open)
+                    .show(ctx, |ui| {
+                        ui.strong("Reconnect Teleport");
+                        ui.label(format!(
+                            "Current region: {}",
+                            world_sim_name.unwrap_or("unknown")
+                        ));
+                        ui.horizontal(|ui| {
+                            let response =
+                                ui.text_edit_singleline(&mut self.network_debug_teleport_target);
+                            let submit_on_enter = response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            let can_submit =
+                                !self.network_debug_teleport_target.trim().is_empty();
+                            let clicked = ui
+                                .add_enabled(
+                                    can_submit,
+                                    egui::Button::new("Reconnect via SLURL"),
+                                )
+                                .clicked();
+                            if (clicked || submit_on_enter) && can_submit {
+                                actions.teleport_via_slurl = Some(
+                                    self.network_debug_teleport_target.trim().to_string(),
+                                );
+                            }
+                        });
+                        ui.small(
+                            "Accepted: secondlife://..., secondlife:///app/teleport/..., maps.secondlife.com URLs, or uri:Region&x&y&z.",
+                        );
+                        ui.separator();
+
+                        for section in &network_debug.sections {
+                            egui::CollapsingHeader::new(section.title.as_str())
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    if section.lines.is_empty() {
+                                        ui.label("none");
+                                    } else {
+                                        for line in &section.lines {
+                                            ui.label(line);
+                                        }
+                                    }
+                                });
+                        }
+
+                        egui::CollapsingHeader::new("Recent Network Events")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.label(format!(
+                                    "showing {} events",
+                                    network_debug.recent_events.events.len()
+                                ));
+                                egui::ScrollArea::vertical()
+                                    .id_salt("network_debug_scroll")
+                                    .max_height(220.0)
+                                    .stick_to_bottom(true)
+                                    .show(ui, |ui| {
+                                        for event in &network_debug.recent_events.events {
+                                            let color = match event.level {
+                                                RuntimeRelayLevel::Trace => egui::Color32::GRAY,
+                                                RuntimeRelayLevel::Info => egui::Color32::WHITE,
+                                                RuntimeRelayLevel::Warn => egui::Color32::YELLOW,
+                                                RuntimeRelayLevel::Error => egui::Color32::RED,
+                                            };
+                                            ui.colored_label(
+                                                color,
+                                                format!(
+                                                    "[{}] {}: {}",
+                                                    event.at_unix_ms, event.category, event.message
+                                                ),
+                                            );
+                                        }
+                                    });
+                            });
+                    });
+                self.show_network_debug = network_open;
+            }
 
             let mut social_open = self.show_social;
             let mut focus_social = self.focus_social_requested;
@@ -1686,6 +1781,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("viewer_app_in_process:ready"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("127.0.0.1:13009")),
             first_sim_region_x: Some(1000),
             first_sim_region_y: Some(1001),

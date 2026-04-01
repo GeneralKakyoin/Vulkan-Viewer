@@ -38,6 +38,23 @@ It complements `AGENTS.md`.
 - Reports: `docs/reports/`
 - Tool setup: `docs/agents/`
 
+## Local Gemini CLI usage
+
+- Canonical reference: `docs/agents/GEMINI.md`
+- Use Gemini CLI only as a second eye for plan review, implementation review, and bounded repo scans
+- Do not use Gemini CLI as the primary planner or final decision-maker
+- Prefer headless prompts for saved-artifact work:
+
+```powershell
+gemini --approval-mode plan -p "<prompt>"
+```
+
+- Verify local availability/auth with:
+
+```powershell
+gemini -p "Reply with exactly the single word OK."
+```
+
 ## Push and merge policy
 
 - Branch creation allowed

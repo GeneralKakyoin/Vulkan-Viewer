@@ -896,6 +896,8 @@ pub struct RegionContinuitySummary {
 pub struct LiveVisualSnapshot {
     pub source: String,
     pub logged_in: bool,
+    #[serde(default)]
+    pub current_region_name: Option<String>,
     pub first_sim_endpoint: Option<String>,
     pub first_sim_region_x: Option<u32>,
     pub first_sim_region_y: Option<u32>,
@@ -1145,6 +1147,36 @@ impl RuntimeRelayState {
             let keep_from = self.events.len() - self.max_events;
             self.events.drain(0..keep_from);
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetworkDebugSection {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetworkDebugState {
+    pub sections: Vec<NetworkDebugSection>,
+    pub recent_events: RuntimeRelayState,
+}
+
+impl NetworkDebugState {
+    pub fn set_section_lines(&mut self, title: &str, lines: Vec<String>) {
+        if let Some(existing) = self
+            .sections
+            .iter_mut()
+            .find(|section| section.title == title)
+        {
+            existing.lines = lines;
+            return;
+        }
+        self.sections.push(NetworkDebugSection {
+            title: title.to_string(),
+            lines,
+        });
+        self.sections.sort_by(|a, b| a.title.cmp(&b.title));
     }
 }
 
@@ -4260,6 +4292,19 @@ mod social_tests {
     }
 
     #[test]
+    fn network_debug_state_replaces_existing_section_lines() {
+        let mut debug = NetworkDebugState::default();
+        debug.set_section_lines("EventQueue", vec![String::from("ack=1")]);
+        debug.set_section_lines("EventQueue", vec![String::from("ack=2")]);
+        debug.set_section_lines("LLUDP", vec![String::from("object_update=0")]);
+
+        assert_eq!(debug.sections.len(), 2);
+        assert_eq!(debug.sections[0].title, "EventQueue");
+        assert_eq!(debug.sections[0].lines, vec![String::from("ack=2")]);
+        assert_eq!(debug.sections[1].title, "LLUDP");
+    }
+
+    #[test]
     fn friend_name_resolution_sets_display_label_and_preserves_id() {
         let mut social = SocialState::default();
         social.upsert_friend(FriendEntry {
@@ -4333,6 +4378,7 @@ mod tests {
         LiveVisualSnapshot {
             source: String::from("test"),
             logged_in,
+            current_region_name: None,
             first_sim_endpoint: None,
             first_sim_region_x: None,
             first_sim_region_y: None,
@@ -4644,6 +4690,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("127.0.0.1:13009")),
             first_sim_region_x: Some(461824),
             first_sim_region_y: Some(307200),
@@ -4887,6 +4934,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.10:13009")),
             first_sim_region_x: Some(1000),
             first_sim_region_y: Some(2000),
@@ -4936,6 +4984,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.10:13009")),
             first_sim_region_x: Some(1000),
             first_sim_region_y: Some(2000),
@@ -5052,6 +5101,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.10:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5111,6 +5161,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5164,6 +5215,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("bad-endpoint")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5215,6 +5267,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5269,6 +5322,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5343,6 +5397,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5412,6 +5467,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -5609,6 +5665,7 @@ mod tests {
         let coarse_only = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.42:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -6149,6 +6206,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("198.51.100.10:13009")),
             first_sim_region_x: Some(1024),
             first_sim_region_y: Some(2048),
@@ -6598,6 +6656,7 @@ mod tests {
         let snapshot = LiveVisualSnapshot {
             source: String::from("test"),
             logged_in: true,
+            current_region_name: Some(String::from("Test Region")),
             first_sim_endpoint: Some(String::from("1.2.3.4:13009")),
             first_sim_region_x: Some(1000),
             first_sim_region_y: Some(2000),
