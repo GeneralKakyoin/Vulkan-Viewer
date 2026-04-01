@@ -1223,24 +1223,31 @@ async fn run_in_process_live_feed(
             match connection.fetch_region_objects_once(url).await {
                 Ok(inspection) => {
                     let summary = summarize_region_objects_inspection(&inspection);
+                    let classified_url = format_classified_url(url);
+                    let host_family = format_capability_host_family_tag(url);
                     push_protocol_event(
                         &mut protocol_events,
-                        format!("RegionObjects:ok {summary}"),
+                        format!("RegionObjects:ok {summary} {host_family}"),
                     );
                     emit_relay(
                         &tx,
                         RuntimeRelayLevel::Info,
                         "region_objects",
-                        &format!("primary probe {summary} {}", format_classified_url(url)),
+                        &format!("primary probe {summary} {classified_url} {host_family}"),
                     );
                 }
                 Err(err) => {
-                    push_protocol_event(&mut protocol_events, format!("RegionObjects:err {err}"));
+                    let classified_url = format_classified_url(url);
+                    let host_family = format_capability_host_family_tag(url);
+                    push_protocol_event(
+                        &mut protocol_events,
+                        format!("RegionObjects:err {err} {host_family}"),
+                    );
                     emit_relay(
                         &tx,
                         RuntimeRelayLevel::Warn,
                         "region_objects",
-                        &format!("primary probe failed {err} {}", format_classified_url(url)),
+                        &format!("primary probe failed {err} {classified_url} {host_family}"),
                     );
                 }
             }
@@ -1513,32 +1520,34 @@ async fn run_in_process_live_feed(
                     match connection.fetch_region_objects_once(url).await {
                         Ok(inspection) => {
                             let summary = summarize_region_objects_inspection(&inspection);
+                            let classified_url = format_classified_url(url);
+                            let host_family = format_capability_host_family_tag(url);
                             push_protocol_event(
                                 &mut protocol_events,
-                                format!("RegionObjects:reprobe_ok {summary}"),
+                                format!("RegionObjects:reprobe_ok {summary} {host_family}"),
                             );
                             emit_relay(
                                 &tx,
                                 RuntimeRelayLevel::Info,
                                 "region_objects",
                                 &format!(
-                                    "post-reconnect re-probe {summary} {}",
-                                    format_classified_url(url)
+                                    "post-reconnect re-probe {summary} {classified_url} {host_family}"
                                 ),
                             );
                         }
                         Err(err) => {
+                            let classified_url = format_classified_url(url);
+                            let host_family = format_capability_host_family_tag(url);
                             push_protocol_event(
                                 &mut protocol_events,
-                                format!("RegionObjects:reprobe_err {err}"),
+                                format!("RegionObjects:reprobe_err {err} {host_family}"),
                             );
                             emit_relay(
                                 &tx,
                                 RuntimeRelayLevel::Warn,
                                 "region_objects",
                                 &format!(
-                                    "post-reconnect re-probe failed {err} {}",
-                                    format_classified_url(url)
+                                    "post-reconnect re-probe failed {err} {classified_url} {host_family}"
                                 ),
                             );
                         }
@@ -3118,6 +3127,16 @@ fn format_classified_url(url: &str) -> String {
     }
 }
 
+fn format_capability_host_family_tag(url: &str) -> String {
+    let classification = classify_capability_url(url);
+    let host_family = classification
+        .host
+        .as_deref()
+        .and_then(|host| host.split('.').next())
+        .unwrap_or("unknown-host");
+    format!("host_family={host_family}")
+}
+
 fn summarize_seed_capability_inventory(entries: &[SeedCapabilityInventoryEntry]) -> String {
     if entries.is_empty() {
         return String::from("none");
@@ -3409,13 +3428,16 @@ fn summarize_region_objects_inspection(inspection: &RegionObjectsInspection) -> 
                 if let Some(description_shape) = &sample.description_shape {
                     parts.push(format!("description_shape={description_shape}"));
                 }
+                if let Some(landimpact) = sample.landimpact {
+                    parts.push(format!("landimpact={landimpact}"));
+                }
                 if let Some(owner) = &sample.owner {
                     parts.push(format!("owner={owner}"));
                 }
                 format!(
                     "{}={}",
                     sample.object_id,
-                    parts.into_iter().take(7).collect::<Vec<_>>().join("|")
+                    parts.into_iter().take(8).collect::<Vec<_>>().join("|")
                 )
             })
             .collect::<Vec<_>>()
@@ -6764,6 +6786,16 @@ mod tests {
     }
 
     #[test]
+    fn format_capability_host_family_tag_prefers_host_label() {
+        assert_eq!(
+            format_capability_host_family_tag(
+                "https://simhost-04e63a701b66ed282.agni.secondlife.io:12043/cap/region"
+            ),
+            String::from("host_family=simhost-04e63a701b66ed282")
+        );
+    }
+
+    #[test]
     fn summarize_region_objects_inspection_includes_typed_sample_summary() {
         let mut inspection = RegionObjectsInspection::default();
         inspection
@@ -6777,6 +6809,7 @@ mod tests {
                 description_shape: Some(String::from("free_text")),
                 linkset_use: Some(String::from("dynamic_obstacle")),
                 walkability_coefficients: Some([100, 100, 100, 100]),
+                landimpact: Some(2),
             });
 
         let summary = summarize_region_objects_inspection(&inspection);
@@ -6785,6 +6818,7 @@ mod tests {
         assert!(summary.contains("linkset_use=dynamic_obstacle"));
         assert!(summary.contains("walkability=100/100/100/100"));
         assert!(summary.contains("description_shape=free_text"));
+        assert!(summary.contains("landimpact=2"));
     }
 
     fn sample_in_process_config() -> InProcessLiveFeedConfig {

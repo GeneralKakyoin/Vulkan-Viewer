@@ -786,3 +786,31 @@ more than one session to establish correctly.
 **Files affected:** reconnect evidence strategy, `RegionObjects` branch selection, continuity next-step framing.
 
 ---
+
+## L56 — Reconnect `RegionObjects` outcomes must be judged across at least two targets; one target can stay empty while another returns rich typed samples with the same timing settings
+
+**Category:** Protocol / `viewer_app` reconnect diagnostics
+
+**Learned when:** Completing the April 1, 2026 Ahern target-comparison run after L55 (`VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80`).
+
+**What happened:** With the same bounded startup/reprobe settings, one simhost path (`simhost-0a962ce03cdb50c3e...`) returned `typed_sample=none`, while reconnecting to `secondlife://Ahern/50/60/70` on `simhost-04e63a701b66ed282...` returned rich typed samples on both primary probe and delayed re-probe.
+
+**Rule for future plans:** Do not classify reconnect `RegionObjects` behavior from a single target run. Require paired target comparison before deciding whether to deepen typed-field promotion or pivot branches.
+
+**Files affected:** reconnect evidence strategy, branch-selection criteria, continuity decision framing.
+
+---
+
+## L57 — Under identical reconnect timing knobs, `RegionObjects` outcomes can invert across target/simhost paths, so single-run direction calls are unsafe
+
+**Category:** Protocol / reconnect diagnostics and planning
+
+**Learned when:** Completing paired A/B captures on April 1, 2026 (`Morris` vs `Ahern`) with identical startup/reprobe settings.
+
+**What happened:** The Morris-target run produced rich typed samples before reconnect and `typed_sample=none` after reconnect, while the Ahern-target run produced the opposite sequence in the same configuration window. The split aligned with simulator-host path (`simhost-04e63a...` rich, `simhost-0a962c...` empty) in these captures.
+
+**Rule for future plans:** Do not pick the next branch from a single reconnect capture. Require paired A/B evidence with matched knobs and compare pre/post reconnect outcomes before deciding between typed-feed expansion and other branches.
+
+**Files affected:** object-ingress decision workflow, reconnect evidence plans, continuity branch selection.
+
+---

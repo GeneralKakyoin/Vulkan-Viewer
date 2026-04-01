@@ -5,16 +5,105 @@ The Vulkan-Viewer is a high-performance Second Life compatible viewer built in R
 
 ## Current Position (2026-04-01)
 - `RegionObjects` typed-feed ingestion is working and live-validated (`typed_sample=...` appears in bounded connected logs).
+- The typed sample now includes `landimpact` when present, and this is live-validated on the Ahern baseline (`landimpact=1` / `landimpact=20` observed).
 - LLUDP world-object ingress remains blocked (`RegionHandshake`, `RegionHandshakeReply`, and `ObjectUpdate*` still absent in bounded runs).
 - Reconnect teleport controls are working for evidence capture, and current region identity is surfaced in diagnostics.
 - A broader-SLURL capture (`secondlife://Morris/128/128/25`) showed a mixed post-reconnect result: pre-teleport `typed_sample=...` was present, but the first post-reconnect `RegionObjects` startup probe returned `typed_sample=none`.
 - A reconnect-only delayed `RegionObjects` re-probe path is now implemented and live-validated via `cargo run -p viewer_app`.
-- In the latest authoritative run, post-reconnect delayed re-probe still returned `typed_sample=none` on the same simhost (`simhost-0a962ce03cdb50c3e...`), so timing alone is not yet sufficient to explain emptiness.
+- The latest target-comparison run confirms route dependence:
+  - initial simhost (`simhost-0a962ce03cdb50c3e...`) still returned `typed_sample=none`
+  - reconnect target `secondlife://Ahern/50/60/70` on `simhost-04e63a701b66ed282...` returned rich `typed_sample=...` on both primary probe and delayed re-probe
+- New paired A/B evidence confirms this split is reproducible:
+  - Morris target run: rich pre-reconnect, empty post-reconnect
+  - Ahern target run: empty pre-reconnect, rich post-reconnect
+- `RegionObjects` transcript lines now include `host_family=...` tags, so route shifts are explicit in both relay and protocol-event views.
+- Strategic direction has pivoted: further incremental `RegionObjects` continuation is paused; active branch is now hard-gated LLUDP ingress (`first ObjectUpdate* decoded`).
 
 ## Next Steps (Recommended Order)
-1. Treat post-reconnect emptiness as a region/capability-behavior question, not a pure timing question, for this target.
-2. Run one bounded capture against a different SLURL target and compare `primary probe` + `re-probe` results side-by-side.
-3. If a target yields stable post-reconnect typed samples, continue typed-field promotion; otherwise document this lane as region-dependent and decide whether to prioritize LLUDP branching.
+1. Implement a bounded LLUDP startup parity bundle behind a runtime flag and run a strict pass/fail live validation.
+2. Hard acceptance criterion: first decoded `ObjectUpdate*` with non-empty local-id evidence in bounded run logs.
+3. If LLUDP parity bundle fails, immediately pivot to explicit simulator-host capability-invocation readiness checks (not more typed-feed continuation).
+
+## Latest Notable Changes (Object Ingress Host-Family Transcript Tag)
+- **RegionObjects lines now expose explicit route identity** with `host_family=...` tags.
+- **Tag coverage includes**:
+  - primary probe success/error
+  - post-reconnect re-probe success/error
+  - matching `RegionObjects:*` protocol-event entries
+- **Live validation confirms tag emission**, for example:
+  - `host_family=simhost-0629fe9f6de4b8693`
+  - `host_family=simhost-0eec03118f78cfe1f`
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_app`
+  - bounded connected run:
+    - `VIEWER_APP_LIVE_STARTUP=on`
+    - `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Ahern/50/60/70`
+    - `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS=40`
+    - `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80`
+    - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_region_objects_host_family_tag_2026-04-01.jsonl`
+    - `cargo run -p viewer_app`
+  - artifacts:
+    - `artifacts/logs/live_region_objects_host_family_tag_2026-04-01.out.log`
+    - `artifacts/logs/live_region_objects_host_family_tag_2026-04-01.err.log`
+    - `artifacts/logs/network_debug_region_objects_host_family_tag_2026-04-01.jsonl`
+
+## Latest Notable Changes (Object Ingress Reconnect A/B Compare)
+- **Paired comparison is complete and reproducible** with identical knobs across Morris and Ahern targets.
+- **Morris run**:
+  - pre-reconnect (`simhost-04e63a...`) showed rich typed samples with `landimpact`
+  - post-reconnect (`simhost-0a962c...`) stayed `typed_sample=none` on primary and delayed re-probe
+- **Ahern run**:
+  - pre-reconnect (`simhost-0a962c...`) showed `typed_sample=none`
+  - post-reconnect (`simhost-04e63a...`) showed rich typed samples with `landimpact=1|20` on primary and delayed re-probe
+- **Decision impact**: branch choice should be based on paired evidence; single reconnect captures are insufficient.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - bounded Morris and Ahern `cargo run -p viewer_app` captures with dedicated artifacts under `artifacts/logs/`
+
+## Latest Notable Changes (Object Ingress Typed Field Promotion: landimpact)
+- **One additional typed field is now promoted**: `typed_sample=...` includes `landimpact` when present.
+- **Live evidence is explicit on Ahern baseline**:
+  - `landimpact=1`
+  - `landimpact=20`
+- **Reconnect stability remained intact**: primary probe and delayed reconnect re-probe continued to surface rich typed samples in the same run.
+- **Validation**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `cargo test -p viewer_net -p viewer_app`
+  - bounded connected run:
+    - `VIEWER_APP_LIVE_STARTUP=on`
+    - `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Ahern/50/60/70`
+    - `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS=40`
+    - `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80`
+    - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_region_objects_typed_landimpact_2026-04-01.jsonl`
+    - `cargo run -p viewer_app`
+  - artifacts:
+    - `artifacts/logs/live_region_objects_typed_landimpact_2026-04-01.out.log`
+    - `artifacts/logs/live_region_objects_typed_landimpact_2026-04-01.err.log`
+    - `artifacts/logs/network_debug_region_objects_typed_landimpact_2026-04-01.jsonl`
+
+## Latest Notable Changes (Object Ingress Reprobe Target Comparison)
+- **Cross-target evidence is now explicit**: one bounded run contained both outcomes in sequence.
+- **Before reconnect**, `RegionObjects` on `simhost-0a962ce03cdb50c3e...` returned `<root>` and `typed_sample=none`.
+- **After auto-teleport reconnect** to `secondlife://Ahern/50/60/70`, `RegionObjects` on `simhost-04e63a701b66ed282...` returned UUID-keyed map payloads with typed samples (`Object`, `bamboo`) on:
+  - primary probe
+  - delayed post-reconnect re-probe (`delay_ticks=80`)
+- **Decision impact**: timing-only is not a universal explanation and emptiness is not universal either; branch selection now needs explicit target/route comparison.
+- **Validation**:
+  - bounded connected run:
+    - `VIEWER_APP_LIVE_STARTUP=on`
+    - `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Ahern/50/60/70`
+    - `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS=40`
+    - `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80`
+    - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_region_objects_post_reconnect_reprobe_target_ahern_2026-04-01.jsonl`
+    - `cargo run -p viewer_app`
+  - artifacts:
+    - `artifacts/logs/live_region_objects_post_reconnect_reprobe_target_ahern_2026-04-01.out.log`
+    - `artifacts/logs/live_region_objects_post_reconnect_reprobe_target_ahern_2026-04-01.err.log`
+    - `artifacts/logs/network_debug_region_objects_post_reconnect_reprobe_target_ahern_2026-04-01.jsonl`
 
 ## Latest Notable Changes (Object Ingress Post-Reconnect Reprobe Timing)
 - **Bounded reconnect-only re-probe logic is now implemented**: `viewer_app` can arm a one-shot delayed `RegionObjects` re-probe during reconnect sessions.
@@ -26,7 +115,7 @@ The Vulkan-Viewer is a high-performance Second Life compatible viewer built in R
   - `CARGO_INCREMENTAL=0 cargo test -p viewer_net`
   - `CARGO_INCREMENTAL=0 cargo test -p viewer_app`
 - **Current blocker**:
-  - none for this slice; authoritative `cargo run -p viewer_app` live validation completed
+  - none for this slice; authoritative `cargo run -p viewer_app` live validation completed, and follow-up target comparison shows mixed (target-dependent) reconnect outcomes
 
 ## Latest Notable Changes (Object Ingress RegionObjects Broader SLURL Capture)
 - **A broader reconnect target was executed live**: `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Morris/128/128/25`.

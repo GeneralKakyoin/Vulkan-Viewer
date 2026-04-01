@@ -1474,6 +1474,7 @@ pub struct RegionObjectsTypedObjectSample {
     pub description_shape: Option<String>,
     pub linkset_use: Option<String>,
     pub walkability_coefficients: Option<[i32; 4]>,
+    pub landimpact: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -8711,6 +8712,7 @@ fn populate_region_objects_typed_samples(inspection: &mut RegionObjectsInspectio
             description_shape: summary.description_shape.clone(),
             linkset_use: summary.linkset_use.clone(),
             walkability_coefficients: summary.walkability_coefficients,
+            landimpact: summary.landimpact,
         })
         .collect();
 }
@@ -11086,6 +11088,7 @@ mod tests {
         assert_eq!(typed.description_shape.as_deref(), Some("free_text"));
         assert_eq!(typed.linkset_use.as_deref(), Some("dynamic_phantom"));
         assert_eq!(typed.walkability_coefficients, Some([100, 90, 80, 70]));
+        assert_eq!(typed.landimpact, Some(2));
         assert_eq!(inspection.tuple_description_analysis, None);
     }
 

@@ -19,11 +19,13 @@ Last updated: 2026-04-01
   - `name`
   - `description`
   - `owner`
+  - `landimpact`
 - The viewer now surfaces live `position` values and `position_shape` for the first bounded `RegionObjects` pathfinding-linkset records.
 - `RegionObjectsInspection` now emits a bounded typed object sample list using trusted cross-region fields.
 - The app relay/debug path now emits a compact `typed_sample=...` summary for the current region.
 - The `typed_sample=...` relay has now been live-validated in a bounded connected run.
 - Reconnect-only delayed `RegionObjects` re-probe logic is implemented in `viewer_app`, with explicit relay markers for `reprobe_armed`, `reprobe_ok`, and `reprobe_err`.
+- `RegionObjects` transcript lines now include `host_family=...` tags for route identity on primary/reprobe success/error paths.
 
 ## Not Working
 - LLUDP `RegionHandshake` has still not appeared in bounded live runs.
@@ -54,6 +56,16 @@ Last updated: 2026-04-01
   - this points to a likely post-reconnect timing window rather than a proven schema regression
 - Reconnect re-probe is now live-validated, and for the tested target path it still returned `typed_sample=none` after delay.
 - This weakens a pure timing explanation for post-reconnect emptiness and points more toward route/region-dependent behavior on this lane.
+- A follow-up target-comparison run (`secondlife://Ahern/50/60/70`) showed the opposite outcome in the same bounded session:
+  - pre-reconnect simhost returned `typed_sample=none`
+  - post-reconnect simhost returned rich `typed_sample=...` on both primary probe and delayed re-probe
+- Current interpretation: this lane is operational but variable by reconnect target/region/content, and must be evaluated with paired captures rather than single-run conclusions.
+- Paired A/B captures with identical knobs now reproduced an inversion:
+  - Morris run: rich pre-reconnect, empty post-reconnect
+  - Ahern run: empty pre-reconnect, rich post-reconnect
+- In these runs, outcome aligned with simulator-host family:
+  - `simhost-04e63a...` => rich typed samples
+  - `simhost-0a962c...` => empty `typed_sample`
 
 ## Current Best Evidence
 - Firestorm pathfinding references match the currently surfaced `RegionObjects` field family:
@@ -65,14 +77,19 @@ Last updated: 2026-04-01
   - `artifacts/logs/network_debug_region_objects_typed_feed_live_validation_rerun_2026-03-31.jsonl`
 - Latest broader-SLURL capture:
   - `artifacts/logs/network_debug_region_objects_typed_feed_broader_slurl_capture_2026-04-01.jsonl`
+- Latest target-comparison capture (`Ahern`):
+  - `artifacts/logs/network_debug_region_objects_post_reconnect_reprobe_target_ahern_2026-04-01.jsonl`
+- Latest typed-field promotion capture (`landimpact`):
+  - `artifacts/logs/network_debug_region_objects_typed_landimpact_2026-04-01.jsonl`
+- Latest paired A/B reconnect captures:
+  - `artifacts/logs/network_debug_region_objects_reconnect_ab_morris_2026-04-01.jsonl`
+  - `artifacts/logs/network_debug_region_objects_reconnect_ab_ahern_2026-04-01.jsonl`
 
 ## Next Active Branch
-1. Run one bounded reconnect capture with a different SLURL target and compare `primary probe` vs delayed `re-probe`.
-2. If post-reconnect typed samples appear on another target, keep expanding the typed-feed lane with bounded field promotion.
-3. If post-reconnect remains empty across targets even after re-probe, treat this lane as route/region dependent and re-prioritize LLUDP branching.
-4. Keep LLUDP object-ingress investigation as a separate branch until evidence justifies protocol changes.
+1. Hard-pivot to LLUDP ingress with a bounded startup parity bundle behind a runtime flag.
+2. Use strict pass/fail acceptance: first `ObjectUpdate*` decoded with non-empty local-id evidence.
+3. If that fails, switch immediately to simulator-host capability-readiness invocation checks.
 
 ## Immediate Questions
-- Is the post-reconnect `typed_sample=none` result primarily a probe-timing artifact?
-- Is the current bounded field set enough for the next object-data consumer, or do we need one more promoted field such as `landimpact`?
-- Do we now want to deepen the `RegionObjects` lane, or pivot back to LLUDP with the tuple issue deprioritized?
+- Does the LLUDP startup parity bundle produce first `ObjectUpdate*` evidence in a bounded live run?
+- If not, which simulator-host capability-readiness invocation is missing or mistimed?
