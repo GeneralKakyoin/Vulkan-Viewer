@@ -1,6 +1,6 @@
 # Object Ingress Status
 
-Last updated: 2026-03-31
+Last updated: 2026-04-01
 
 ## Working
 - Login succeeds and the app reaches `handshake_complete=true`.
@@ -23,6 +23,7 @@ Last updated: 2026-03-31
 - `RegionObjectsInspection` now emits a bounded typed object sample list using trusted cross-region fields.
 - The app relay/debug path now emits a compact `typed_sample=...` summary for the current region.
 - The `typed_sample=...` relay has now been live-validated in a bounded connected run.
+- Reconnect-only delayed `RegionObjects` re-probe logic is implemented in `viewer_app`, with explicit relay markers for `reprobe_armed`, `reprobe_ok`, and `reprobe_err`.
 
 ## Not Working
 - LLUDP `RegionHandshake` has still not appeared in bounded live runs.
@@ -47,6 +48,12 @@ Last updated: 2026-03-31
   - the next region surfaced different object names and cleaner free-text/empty descriptions
   - this strongly suggests the tuple was local object content rather than a universal schema
 - The latest live rerun validated the new summary format, but it did not broaden into a clearly different visible object family.
+- A broader-SLURL reconnect capture (`Morris`) produced a new split result:
+  - pre-teleport still showed valid typed samples (`Object`, `bamboo`)
+  - post-reconnect first bounded startup probe returned `keys=<root>` and `typed_sample=none`
+  - this points to a likely post-reconnect timing window rather than a proven schema regression
+- Reconnect re-probe is now live-validated, and for the tested target path it still returned `typed_sample=none` after delay.
+- This weakens a pure timing explanation for post-reconnect emptiness and points more toward route/region-dependent behavior on this lane.
 
 ## Current Best Evidence
 - Firestorm pathfinding references match the currently surfaced `RegionObjects` field family:
@@ -56,13 +63,16 @@ Last updated: 2026-03-31
   - `artifacts/logs/network_debug_region_objects_tuple_teleport_capture_2026-03-31.jsonl`
 - Latest bounded typed-feed live validation:
   - `artifacts/logs/network_debug_region_objects_typed_feed_live_validation_rerun_2026-03-31.jsonl`
+- Latest broader-SLURL capture:
+  - `artifacts/logs/network_debug_region_objects_typed_feed_broader_slurl_capture_2026-04-01.jsonl`
 
 ## Next Active Branch
-- If broader sampling is needed, run another bounded reconnect pass with a different SLURL target.
-- Otherwise, deepen the now-live-validated `RegionObjects` typed-feed lane.
-- Keep LLUDP object-ingress investigation as a separate branch.
+1. Run one bounded reconnect capture with a different SLURL target and compare `primary probe` vs delayed `re-probe`.
+2. If post-reconnect typed samples appear on another target, keep expanding the typed-feed lane with bounded field promotion.
+3. If post-reconnect remains empty across targets even after re-probe, treat this lane as route/region dependent and re-prioritize LLUDP branching.
+4. Keep LLUDP object-ingress investigation as a separate branch until evidence justifies protocol changes.
 
 ## Immediate Questions
-- Which next region target gives a broader object family for typed-feed sampling?
+- Is the post-reconnect `typed_sample=none` result primarily a probe-timing artifact?
 - Is the current bounded field set enough for the next object-data consumer, or do we need one more promoted field such as `landimpact`?
 - Do we now want to deepen the `RegionObjects` lane, or pivot back to LLUDP with the tuple issue deprioritized?

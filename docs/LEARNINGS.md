@@ -744,3 +744,45 @@ more than one session to establish correctly.
 **Files affected:** `viewer_net` `RegionObjects` typed extraction, `viewer_app` relay summarization, object-ingress planning.
 
 ---
+
+## L53 — Treat first post-reconnect `RegionObjects` emptiness as a timing question before treating it as a schema/content conclusion
+
+**Category:** Protocol / `viewer_app` + `viewer_net`
+
+**Learned when:** Completing the April 1, 2026 broader-SLURL reconnect capture (`secondlife://Morris/128/128/25`) after typed-feed live validation.
+
+**What happened:** In a single bounded run, pre-teleport `RegionObjects` surfaced healthy `typed_sample=...` records, but the first post-reconnect startup probe on a different simhost returned `keys=<root>` and `typed_sample=none`. The transport/session remained alive and event queue progressed, so immediate emptiness could not be safely interpreted as total lane failure.
+
+**Rule for future plans:** When reconnecting into a new region/simhost, do not assume the first bounded `RegionObjects` startup probe is representative. Add one bounded delayed re-probe marker before concluding that post-reconnect typed object data is absent.
+
+**Files affected:** object-ingress capture strategy, reconnect probe timing plans, continuity decision flow.
+
+---
+
+## L54 — Direct-binary live validation must use a freshly built executable; stale binaries create false-signal protocol conclusions
+
+**Category:** Validation / runtime verification workflow
+
+**Learned when:** Implementing the April 1, 2026 post-reconnect re-probe timing branch and attempting bounded live verification under Windows file-lock contention.
+
+**What happened:** `cargo check`/tests passed, but local `cargo build` of `viewer_app` intermittently failed with Windows file-lock errors in `target*`. Running a previously built executable produced plausible runtime logs but could not be trusted as evidence for newly added probe markers.
+
+**Rule for future plans:** For any runtime/protocol validation that depends on newly added relay markers, require an explicit successful fresh binary build before interpreting live logs. If build locking blocks that, report the branch as implementation-complete but live-unvalidated.
+
+**Files affected:** runtime validation process, execution reports, continuity status wording.
+
+---
+
+## L55 — A successful delayed post-reconnect `RegionObjects` re-probe can still return `typed_sample=none`, so timing alone is not always the root cause
+
+**Category:** Protocol / `viewer_app` reconnect diagnostics
+
+**Learned when:** Completing the April 1, 2026 authoritative `cargo run -p viewer_app` live validation of reconnect re-probe timing (`VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80`).
+
+**What happened:** The run showed `RegionObjects:reprobe_armed` and a later `post-reconnect re-probe ... typed_sample=none` on the same simhost (`simhost-0a962ce03cdb50c3e...`). This proves the re-probe path executed, but delayed timing did not recover typed object samples for that route.
+
+**Rule for future plans:** After implementing bounded delayed re-probe, do not keep increasing delay by default. First compare across different reconnect targets; if emptiness persists across targets, classify it as route/region-dependent behavior and adjust branch priorities.
+
+**Files affected:** reconnect evidence strategy, `RegionObjects` branch selection, continuity next-step framing.
+
+---

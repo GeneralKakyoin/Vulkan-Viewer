@@ -1,45 +1,35 @@
-# HANDOFF: Object Ingress RegionObjects Typed Feed Live-Validated
+# HANDOFF: Object Ingress Post-Reconnect Reprobe Timing Live-Validated (2026-04-01)
 
 ## What Changed
-- Completed the bounded live validation pass for the `RegionObjects` typed-feed promotion.
-- Confirmed the `viewer_app` `region_objects` relay now emits `typed_sample=...` on-wire in the current build.
-- Captured fresh stdout/err and JSONL artifacts for the live-validated relay.
+- Added reconnect-only bounded delayed `RegionObjects` re-probe logic in `viewer_app`.
+- Added `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS` (default `80`) for timing control.
+- Added explicit protocol/log markers for re-probe arming/success/failure.
+- Completed authoritative live validation via `cargo run -p viewer_app` with re-probe enabled.
+- Updated testing reference and continuity artifacts for this branch.
 
 ## Validation Run
 - `cargo fmt --all`: PASSED
 - `cargo check -p viewer_net -p viewer_app`: PASSED
-- `cargo test -p viewer_net`: PASSED
-- `cargo test -p viewer_app`: PASSED
-- bounded direct-binary live run with:
-  - `VIEWER_APP_LIVE_STARTUP=on`: PASSED
-  - `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Ahern/50/60/70`: PASSED
-  - `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS=40`: PASSED
-  - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_region_objects_typed_feed_live_validation_rerun_2026-03-31.jsonl`: PASSED
-  - `target/debug/viewer_app.exe`: PASSED
+- `CARGO_INCREMENTAL=0 cargo test -p viewer_net`: PASSED
+- `CARGO_INCREMENTAL=0 cargo test -p viewer_app`: PASSED
+- authoritative live validation:
+  - `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 VIEWER_APP_LIVE_STARTUP=on VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Morris/128/128/25 VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS=40 VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80 VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_region_objects_post_reconnect_reprobe_timing_cargo_run_retry_2026-04-01.jsonl cargo run -p viewer_app`: PASSED
 
 ## Exact Current State
-- The `RegionObjects` lane now exposes a cleaner typed sample representation in code and in the live relay output.
-- Stable promoted fields are currently:
-  - `profile`
-  - `name`
-  - `owner`
-  - `position`
-  - `description_shape`
-  - `linkset_use`
-  - `walkability`
-- LLUDP object ingress is still unchanged:
+- The re-probe timing logic is implemented and live-validated.
+- Re-probe fired on reconnect (`RegionObjects:reprobe_armed`) and executed (`post-reconnect re-probe ...`), but still returned `typed_sample=none` in this run.
+- LLUDP object ingress remains unchanged:
   - `RegionHandshake` absent
   - `RegionHandshakeReply` absent
   - `ObjectUpdate*` absent
   - `update_messages=0`
   - `total_objects=0`
-- The live rerun validated `typed_sample=...`, but that reconnect landed back on the same visible object family (`Object`, `bamboo`) rather than broadening the sample set.
 
 ## Exact Next Step
-- If the goal is broader object sampling, rerun the bounded reconnect pass with a different SLURL target.
-- Otherwise, deepen the `RegionObjects` object-data lane from the now-live-validated typed feed.
-- Keep LLUDP object-ingress work as a separate branch; this slice did not change the LLUDP blocker.
+1. Run one bounded reconnect capture with a different SLURL target and compare `primary probe` vs `re-probe` output.
+2. Decide whether post-reconnect `typed_sample=none` is route/region dependent.
+3. If another target still stays empty after re-probe, prioritize LLUDP branch re-entry with this capability-lane constraint documented.
 
 ## Blockers / Risks
-- The broader LLUDP object-ingress blocker remains unresolved and separate from the `RegionObjects` lane.
-- The latest live rerun was good for validating the summary, but not ideal for diversity because it returned the same visible object family.
+- For the tested target path, delayed re-probe did not recover typed samples, so a timing-only explanation is now weaker.
+- LLUDP object ingress remains unresolved and separate.

@@ -302,6 +302,7 @@ struct InProcessLiveFeedConfig {
     stop_on_region_control: bool,
     auto_teleport_slurl: Option<String>,
     auto_teleport_delay_ticks: u32,
+    region_objects_reprobe_delay_ticks: u32,
     run_probe: bool,
     worker_tick_ms: u64,
     event_queue_poll_timeout_ms: u64,
@@ -820,6 +821,11 @@ where
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(40)
         .min(10_000);
+    let region_objects_reprobe_delay_ticks =
+        lookup("VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(80)
+            .clamp(1, 10_000);
     let run_probe = lookup("VIEWER_APP_IN_PROCESS_PROBE")
         .map(|v| parse_bool_like(&v))
         .unwrap_or(true);
@@ -886,6 +892,7 @@ where
         stop_on_region_control,
         auto_teleport_slurl,
         auto_teleport_delay_ticks,
+        region_objects_reprobe_delay_ticks,
         run_probe,
         worker_tick_ms,
         event_queue_poll_timeout_ms,
@@ -1142,6 +1149,7 @@ async fn run_in_process_live_feed(
             let _ = tx.send(LiveFeedUpdate::FriendsBootstrap(bootstrap_friends));
         }
 
+        let is_reconnect_session = reconnect_attempt > 0;
         let mut event_ack = 0u64;
         let mut event_queue_consecutive_failures = 0u32;
         let mut event_queue_poll_task: Option<
@@ -1236,6 +1244,26 @@ async fn run_in_process_live_feed(
                     );
                 }
             }
+        }
+        let mut post_reconnect_region_objects_reprobe_pending =
+            is_reconnect_session && region_objects_url.is_some();
+        if post_reconnect_region_objects_reprobe_pending {
+            emit_relay(
+                &tx,
+                RuntimeRelayLevel::Info,
+                "region_objects",
+                &format!(
+                    "post-reconnect re-probe armed delay_ticks={}",
+                    config.region_objects_reprobe_delay_ticks
+                ),
+            );
+            push_protocol_event(
+                &mut protocol_events,
+                format!(
+                    "RegionObjects:reprobe_armed delay_ticks={}",
+                    config.region_objects_reprobe_delay_ticks
+                ),
+            );
         }
 
         if config.run_probe && matches!(result, GridLoginResult::Success(_)) {
@@ -1475,6 +1503,47 @@ async fn run_in_process_live_feed(
                     slurl,
                     &format!("auto worker_tick={worker_tick}"),
                 );
+            }
+            if post_reconnect_region_objects_reprobe_pending
+                && !should_reconnect
+                && worker_tick >= u64::from(config.region_objects_reprobe_delay_ticks)
+            {
+                post_reconnect_region_objects_reprobe_pending = false;
+                if let Some(url) = region_objects_url.as_deref() {
+                    match connection.fetch_region_objects_once(url).await {
+                        Ok(inspection) => {
+                            let summary = summarize_region_objects_inspection(&inspection);
+                            push_protocol_event(
+                                &mut protocol_events,
+                                format!("RegionObjects:reprobe_ok {summary}"),
+                            );
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Info,
+                                "region_objects",
+                                &format!(
+                                    "post-reconnect re-probe {summary} {}",
+                                    format_classified_url(url)
+                                ),
+                            );
+                        }
+                        Err(err) => {
+                            push_protocol_event(
+                                &mut protocol_events,
+                                format!("RegionObjects:reprobe_err {err}"),
+                            );
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "region_objects",
+                                &format!(
+                                    "post-reconnect re-probe failed {err} {}",
+                                    format_classified_url(url)
+                                ),
+                            );
+                        }
+                    }
+                }
             }
             while let Ok(command) = command_rx.try_recv() {
                 match command {
@@ -6594,6 +6663,10 @@ mod tests {
             String::from("VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS"),
             String::from("77"),
         );
+        vars.insert(
+            String::from("VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS"),
+            String::from("99"),
+        );
         vars.insert(String::from("VIEWER_LOGIN_AGREE_TOS"), String::from("true"));
         vars.insert(
             String::from("VIEWER_LOGIN_READ_CRITICAL"),
@@ -6619,6 +6692,7 @@ mod tests {
             Some("secondlife://Ahern/50/60/70")
         );
         assert_eq!(cfg.auto_teleport_delay_ticks, 77);
+        assert_eq!(cfg.region_objects_reprobe_delay_ticks, 99);
         assert!(cfg.agree_to_tos);
         assert!(!cfg.read_critical);
         assert_eq!(cfg.mfa_token.as_deref(), Some("token123"));
@@ -6732,6 +6806,7 @@ mod tests {
             stop_on_region_control: false,
             auto_teleport_slurl: None,
             auto_teleport_delay_ticks: 40,
+            region_objects_reprobe_delay_ticks: 80,
             run_probe: true,
             worker_tick_ms: 60,
             event_queue_poll_timeout_ms: 45_000,

@@ -3,6 +3,42 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Current Position (2026-04-01)
+- `RegionObjects` typed-feed ingestion is working and live-validated (`typed_sample=...` appears in bounded connected logs).
+- LLUDP world-object ingress remains blocked (`RegionHandshake`, `RegionHandshakeReply`, and `ObjectUpdate*` still absent in bounded runs).
+- Reconnect teleport controls are working for evidence capture, and current region identity is surfaced in diagnostics.
+- A broader-SLURL capture (`secondlife://Morris/128/128/25`) showed a mixed post-reconnect result: pre-teleport `typed_sample=...` was present, but the first post-reconnect `RegionObjects` startup probe returned `typed_sample=none`.
+- A reconnect-only delayed `RegionObjects` re-probe path is now implemented and live-validated via `cargo run -p viewer_app`.
+- In the latest authoritative run, post-reconnect delayed re-probe still returned `typed_sample=none` on the same simhost (`simhost-0a962ce03cdb50c3e...`), so timing alone is not yet sufficient to explain emptiness.
+
+## Next Steps (Recommended Order)
+1. Treat post-reconnect emptiness as a region/capability-behavior question, not a pure timing question, for this target.
+2. Run one bounded capture against a different SLURL target and compare `primary probe` + `re-probe` results side-by-side.
+3. If a target yields stable post-reconnect typed samples, continue typed-field promotion; otherwise document this lane as region-dependent and decide whether to prioritize LLUDP branching.
+
+## Latest Notable Changes (Object Ingress Post-Reconnect Reprobe Timing)
+- **Bounded reconnect-only re-probe logic is now implemented**: `viewer_app` can arm a one-shot delayed `RegionObjects` re-probe during reconnect sessions.
+- **A new runtime knob is available**: `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS` (default `80`) controls the re-probe delay window.
+- **Log/protocol markers are explicit**: `RegionObjects:reprobe_armed`, `RegionObjects:reprobe_ok`, and `RegionObjects:reprobe_err` were added for unambiguous timeline reading.
+- **Static/unit validation passed**:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app`
+  - `CARGO_INCREMENTAL=0 cargo test -p viewer_net`
+  - `CARGO_INCREMENTAL=0 cargo test -p viewer_app`
+- **Current blocker**:
+  - none for this slice; authoritative `cargo run -p viewer_app` live validation completed
+
+## Latest Notable Changes (Object Ingress RegionObjects Broader SLURL Capture)
+- **A broader reconnect target was executed live**: `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Morris/128/128/25`.
+- **Pre-teleport behavior remained healthy**: `typed_sample=...` surfaced as expected with `Object`/`bamboo` pathfinding-linkset records.
+- **Post-reconnect behavior changed materially**: the first bounded probe on the new simhost returned `keys=<root>` and `typed_sample=none`.
+- **New direction is now timing-focused**: next branch is bounded post-reconnect `RegionObjects` re-probe timing, not immediate field-promotion.
+- **Validation**:
+  - bounded direct-binary live run with artifacts:
+    - `artifacts/logs/live_region_objects_typed_feed_broader_slurl_capture_2026-04-01.out.log`
+    - `artifacts/logs/live_region_objects_typed_feed_broader_slurl_capture_2026-04-01.err.log`
+    - `artifacts/logs/network_debug_region_objects_typed_feed_broader_slurl_capture_2026-04-01.jsonl`
+
 ## Latest Notable Changes (Object Ingress RegionObjects Typed Feed Live Validation)
 - **The bounded `RegionObjects` typed-feed promotion is now live-validated**: the current build emits the new `typed_sample=...` relay on-wire during a bounded connected run.
 - **The relay stays compact and readable in the live JSONL transcript**: trusted fields such as `profile`, `name`, `linkset_use`, `walkability`, `position`, `description_shape`, and `owner` now appear in the existing `region_objects` summary line.

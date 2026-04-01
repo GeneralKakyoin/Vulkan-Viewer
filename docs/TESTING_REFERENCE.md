@@ -195,6 +195,9 @@ These variables are read by `viewer_app` when in-process live startup is enabled
   - accepts the same supported SLURL forms as the in-app `Network Debug` control
 - `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS` (u32, default `40`, max `10000`)
   - delay after connected steady state before the one-shot auto-teleport fires
+- `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS` (u32, default `80`, `1..10000`)
+  - reconnect-only bounded delay before the one-shot post-reconnect `RegionObjects` re-probe
+  - used to test whether first post-reconnect `typed_sample=none` is a timing artifact
 - `VIEWER_APP_EVENT_QUEUE_POLL_TIMEOUT_MS` (u64, default `45000`, min `100`)
 - `VIEWER_APP_EVENT_QUEUE_POLL_EVERY_TICKS` (u32, default `10`, min `1`)
 - `VIEWER_APP_EVENT_QUEUE_FAILURES_BEFORE_RECONNECT` (u32, default `0`)
