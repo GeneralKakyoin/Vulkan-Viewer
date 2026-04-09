@@ -1,41 +1,35 @@
-# HANDOFF: Object Ingress Host-Family Transcript Tag Completed (2026-04-01)
+# HANDOFF: EventQueue LLSD Root Hardening Live Verify (2026-04-09)
 
 ## What Changed
-- Added `host_family=...` tags to `RegionObjects` transcript lines and matching protocol-event entries.
-- Tag now appears on:
-  - primary probe success/error
-  - post-reconnect re-probe success/error
-- This makes reconnect route shifts explicit without parsing full URLs.
+- Executed a bounded live verification run after EventQueue LLSD root-shape hardening.
+- Captured fresh network-debug evidence at:
+  - `artifacts/logs/network_debug_event_queue_llsd_root_hardening_verify_2026-04-09.jsonl`
+- Confirmed in this run:
+  - no `missing llsd map` EventQueue decode errors
+  - `EventQueueGet:ok` and `probe_gate:open reason=EventQueueGet:ok`
+  - readiness `ok` for `EventQueueGet`, `InterestList`, and `UntrustedSimulatorMessage`
+  - LLUDP object ingress progressed (`lludp_object_gate: verdict=PASS`, sustained `ObjectUpdate*` traffic)
+- Added verification report:
+  - `docs/reports/REPORT_EVENT_QUEUE_LLSD_ROOT_HARDENING_LIVE_VERIFY_2026-04-09.md`
 
 ## Validation Run
-- `cargo fmt --all`: PASSED
-- `cargo check -p viewer_net -p viewer_app`: PASSED
-- `cargo test -p viewer_app`: PASSED
-- authoritative bounded run:
+- `cargo run -p viewer_app` with:
   - `VIEWER_APP_LIVE_STARTUP=on`
-  - `VIEWER_APP_AUTO_TELEPORT_SLURL=secondlife://Ahern/50/60/70`
-  - `VIEWER_APP_AUTO_TELEPORT_DELAY_TICKS=40`
-  - `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS=80`
-  - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_region_objects_host_family_tag_2026-04-01.jsonl`
-  - `cargo run -p viewer_app`
-- artifact outputs:
-  - `artifacts/logs/live_region_objects_host_family_tag_2026-04-01.out.log`
-  - `artifacts/logs/live_region_objects_host_family_tag_2026-04-01.err.log`
-  - `artifacts/logs/network_debug_region_objects_host_family_tag_2026-04-01.jsonl`
+  - `VIEWER_APP_LLUDP_STARTUP_PARITY_BUNDLE=on`
+  - `VIEWER_APP_CAPABILITY_PROBES_REQUIRE_EVENT_QUEUE_OK=true`
+  - `VIEWER_APP_EVENT_QUEUE_CAP_NOT_FOUND_BEFORE_RECONNECT=3`
+  - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_event_queue_llsd_root_hardening_verify_2026-04-09.jsonl`
+- Run was shell-timeout bounded; log artifact captured and analyzed.
 
 ## Exact Current State
-- `RegionObjects` typed feed remains operational and includes `landimpact` when present.
-- Transcript lines now include explicit host-family tags (example: `host_family=simhost-0629fe9f6de4b8693`).
-- LLUDP world object ingress remains unresolved:
-  - `RegionHandshake` absent
-  - `RegionHandshakeReply` absent
-  - `ObjectUpdate*` absent
+- The prior EventQueue decode blocker (`missing llsd map`) is not reproduced in the latest bounded live evidence.
+- Startup gate and capability-readiness sequencing are functioning in this path.
+- LLUDP object ingress is active in-window on this route.
+- Remaining instability: late-session EventQueue cap rotation still produces `404 cap not found` and bounded reconnect behavior.
 
 ## Exact Next Step
-1. Execute a bounded LLUDP startup parity bundle behind a runtime flag.
-2. Validate with a hard pass/fail gate: first decoded `ObjectUpdate*` (local-id evidence > 0).
-3. If the gate fails, immediately switch to simulator-host capability-readiness invocation investigation.
+1. Implement and verify a bounded EventQueue cap-rotation re-prime branch (refresh/rebind EventQueue URL after cap-not-found reconnect trigger) to stabilize late-session polling.
 
 ## Blockers / Risks
-- Reconnect routing/content drift remains a risk; single-run conclusions are still unsafe.
-- Diagnostics are improved, but object ingress is still unresolved until LLUDP hard-gate criteria pass.
+- Existing working tree remains broadly dirty from prior continuity and refactor work; isolate staging by task scope.
+- Late-session reconnect behavior may involve simulator cap lifecycle semantics outside viewer control; keep diagnostics explicit.

@@ -1,5 +1,4 @@
-use quick_xml::Reader;
-use quick_xml::events::Event;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::{
     Method, StatusCode,
     header::{ACCEPT, CONTENT_TYPE},
@@ -7,7 +6,7 @@ use reqwest::{
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -22,6 +21,23 @@ use viewer_grid::{
     GridLoginResult, LoginIntent, SessionBootstrap,
 };
 
+mod asset_fetch;
+mod cookie_utils;
+mod login_codec_utils;
+mod object_decode_utils;
+pub use crate::asset_fetch::{
+    fetch_asset_bytes, fetch_mesh_asset_bytes, fetch_mesh_asset_bytes_with_attempts,
+    fetch_texture_asset_bytes,
+};
+use crate::cookie_utils::{extract_cookie_header_from_set_cookie, merge_cookie_header};
+use crate::login_codec_utils::{
+    XmlRpcValue, escape_xml, first_child_with_tag, llsd_boolean, llsd_string, llsd_to_bool,
+    llsd_to_string, llsd_to_u16, llsd_to_u32, parse_llsd_buddy_list, parse_llsd_map,
+    parse_xmlrpc_value, xmlrpc_as_bool, xmlrpc_as_buddy_list, xmlrpc_as_string, xmlrpc_as_u16,
+    xmlrpc_as_u32, xmlrpc_member_array_of_strings, xmlrpc_member_bool, xmlrpc_member_string,
+};
+use crate::object_decode_utils::*;
+
 const MAX_LOGIN_REDIRECTS: usize = 4;
 const MAX_EVENT_QUEUE_ONE_SHOT_ATTEMPTS: usize = 3;
 const EVENT_QUEUE_ONE_SHOT_MIN_TIMEOUT: Duration = Duration::from_secs(35);
@@ -29,6 +45,10 @@ const EVENT_QUEUE_ONE_SHOT_RETRY_BASE_DELAY: Duration = Duration::from_millis(25
 const EVENT_QUEUE_ONE_SHOT_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 const LLSD_XML_CONTENT_TYPE: &str = "application/llsd+xml";
 const TEXTURE_FETCH_ACCEPT_HEADER: &str = "image/x-j2c,image/jp2,image/*,*/*";
+const MESH_FETCH_ACCEPT_HEADER: &str = "application/vnd.ll.mesh";
+const MESH_FETCH_RANGE_HEADER_FIRESTORM: &str = "bytes=0-4095";
+const MESH_FETCH_RANGE_HEADER_FULL: &str = "bytes=0-";
+const FIRESTORM_USER_AGENT_HEADER: &str = "Firestorm";
 const LLUDP_PACKET_ID_SIZE: usize = 6;
 const LLUDP_MINIMUM_VALID_PACKET_SIZE: usize = LLUDP_PACKET_ID_SIZE + 1;
 const LLUDP_MESSAGE_PREFIX: u8 = 0xFF;
@@ -47,6 +67,7 @@ const LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID: u16 = 83;
 const LLUDP_SET_ALWAYS_RUN_LOW_ID: u16 = 88;
 const LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID: u16 = 249;
 const LLUDP_TEST_MESSAGE_LOW_ID: u16 = 1;
+const LLUDP_OBJECT_EXTRA_PARAMS_LOW_ID: u16 = 99;
 const LLUDP_REGION_HANDSHAKE_LOW_ID: u16 = 148;
 const LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID: u16 = 149;
 const LLUDP_HEALTH_MESSAGE_LOW_ID: u16 = 138;
@@ -84,13 +105,17 @@ const LLUDP_CAMERA_CONSTRAINT_HIGH_ID: u8 = 22;
 const LLUDP_AGENT_UPDATE_HIGH_ID: u8 = 4;
 const LLUDP_AGENT_ANIMATION_HIGH_ID: u8 = 5;
 const LLUDP_VIEWER_EFFECT_MEDIUM_ID: u8 = 17;
+const LLUDP_REQUEST_MULTIPLE_OBJECTS_MEDIUM_ID: u8 = 3;
 const LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID: u8 = 6;
 const LLUDP_ATTACHED_SOUND_MEDIUM_ID: u8 = 13;
 const LLUDP_CROSSED_REGION_MEDIUM_ID: u8 = 7;
 const LLUDP_CONFIRM_ENABLE_SIMULATOR_MEDIUM_ID: u8 = 8;
+const LLUDP_CACHE_MISS_TYPE_TOTAL: u8 = 0;
 const MAX_OBJECT_FEED_OBJECTS: usize = 1024;
 const MAX_OBJECT_FEED_EXPORT_OBJECTS: usize = 128;
 const MAX_OBJECT_FEED_RECENT_KILLS: usize = 128;
+const MAX_PENDING_OBJECT_CACHE_MISS_IDS: usize = 2048;
+const LLUDP_MAX_REQUEST_MULTIPLE_OBJECTS_BLOCKS: usize = 255;
 const MAX_ZEROCODED_BODY_BYTES: usize = 256 * 1024;
 const MAX_CONTINUITY_NEIGHBORS: usize = 8;
 const MAX_CONTINUITY_OBSERVATIONS: usize = 16;
@@ -101,17 +126,129 @@ const STARTUP_AGENT_HEIGHT: u16 = 720;
 const STARTUP_AGENT_WIDTH: u16 = 1280;
 const STARTUP_AGENT_UPDATE_FAR: f32 = 96.0;
 const STARTUP_AGENT_ANIMATION_ID: &str = "efcf670c-2d18-8128-973a-034ebc806b67";
+// Firestorm sends viewer capability bits here (not echoed simulator RegionFlags).
+// OpenSim gates initial data on bit 0x1000 in RegionHandshakeReply.
+const REGION_HANDSHAKE_REPLY_FLAG_SUPPORTS_SELF_APPEARANCE: u32 = 0x0000_1000;
+// Firestorm reference (behavior only): llviewerregion.cpp capabilityNames.append(...)
+// This broader request set improves capability-lane discovery on simulator-host routes where
+// object-relevant data may surface outside the minimal baseline probes.
 const DEFAULT_SEED_CAPABILITY_REQUEST: &[&str] = &[
-    "EventQueueGet",
-    "UntrustedSimulatorMessage",
-    "InterestList",
-    "RegionObjects",
+    "AbuseCategories",
+    "AcceptFriendship",
+    "AcceptGroupInvite",
+    "AgentPreferences",
     "AgentProfile",
-    "GetTexture",
+    "AgentState",
+    "AttachmentResources",
+    "AvatarPickerSearch",
+    "AvatarRenderInfo",
+    "CharacterProperties",
+    "ChatSessionRequest",
+    "CopyInventoryFromNotecard",
+    "CreateInventoryCategory",
+    "DeclineFriendship",
+    "DeclineGroupInvite",
+    "DispatchRegionInfo",
+    "DirectDelivery",
+    "EnvironmentSettings",
+    "EstateAccess",
+    "DispatchOpenRegionSettings",
+    "EstateChangeInfo",
+    "EventQueueGet",
+    "ExtEnvironment",
+    "FetchLib2",
+    "FetchLibDescendents2",
+    "FetchInventory2",
+    "FetchInventoryDescendents2",
+    "IncrementCOFVersion",
+    "RequestTaskInventory",
+    "InterestList",
+    "InventoryThumbnailUpload",
     "GetDisplayNames",
-    "SimulatorFeatures",
+    "GetExperiences",
+    "AgentExperiences",
+    "FindExperienceByName",
+    "GetExperienceInfo",
+    "GetAdminExperiences",
+    "GetCreatorExperiences",
+    "ExperiencePreferences",
+    "GroupExperiences",
+    "UpdateExperience",
+    "IsExperienceAdmin",
+    "IsExperienceContributor",
+    "RegionExperiences",
+    "ExperienceQuery",
+    "GetMesh",
+    "GetMesh2",
+    "GetMetadata",
+    "GetObjectCost",
+    "GetObjectPhysicsData",
+    "GetTexture",
+    "GroupAPIv1",
+    "GroupMemberData",
+    "GroupProposalBallot",
+    "HomeLocation",
+    "LandResources",
+    "LSLSyntax",
     "MapLayer",
+    "MapLayerGod",
+    "MeshUploadFlag",
+    "ModifyMaterialParams",
+    "ModifyRegion",
+    "NavMeshGenerationStatus",
+    "NewFileAgentInventory",
+    "ObjectAnimation",
+    "ObjectMedia",
+    "ObjectMediaNavigate",
+    "ObjectNavMeshProperties",
+    "ParcelPropertiesUpdate",
+    "ParcelVoiceInfoRequest",
+    "ProductInfoRequest",
+    "ProvisionVoiceAccountRequest",
+    "VoiceSignalingRequest",
+    "ReadOfflineMsgs",
+    "RegionObjects",
+    "RegionSchedule",
+    "RemoteParcelRequest",
+    "RenderMaterials",
+    "RequestTextureDownload",
+    "ResourceCostSelected",
+    "RetrieveNavMeshSrc",
+    "SearchStatRequest",
+    "SearchStatTracking",
+    "SendPostcard",
+    "SendUserReport",
+    "SendUserReportWithScreenshot",
+    "ServerReleaseNotes",
+    "SetDisplayName",
+    "SimConsoleAsync",
+    "SimulatorFeatures",
+    "StartGroupProposal",
+    "TerrainNavMeshProperties",
+    "TextureStats",
+    "UntrustedSimulatorMessage",
+    "UpdateAgentInformation",
+    "UpdateAgentLanguage",
+    "UpdateAvatarAppearance",
+    "UpdateGestureAgentInventory",
+    "UpdateGestureTaskInventory",
+    "UpdateNotecardAgentInventory",
+    "UpdateNotecardTaskInventory",
+    "UpdateScriptAgent",
+    "UpdateScriptTask",
+    "UpdateSettingsAgentInventory",
+    "UpdateSettingsTaskInventory",
+    "UploadAgentProfileImage",
+    "UpdateMaterialAgentInventory",
+    "UpdateMaterialTaskInventory",
+    "UploadBakedTexture",
+    "UserInfo",
     "ViewerAsset",
+    "ViewerBenefits",
+    "ViewerMetrics",
+    "ViewerStartAuction",
+    "ViewerStats",
+    "VETPBR",
 ];
 
 pub trait LoginCodec {
@@ -373,416 +510,6 @@ impl LoginCodec for XmlRpcLoginCodec {
     }
 }
 
-fn llsd_string(key: &str, value: &str) -> String {
-    format!(
-        "<key>{}</key><string>{}</string>",
-        escape_xml(key),
-        escape_xml(value)
-    )
-}
-
-fn llsd_boolean(key: &str, value: bool) -> String {
-    format!("<key>{}</key><boolean>{}</boolean>", escape_xml(key), value)
-}
-
-fn xmlrpc_member_string(xml: &mut String, name: &str, value: &str) {
-    xml.push_str("<member>");
-    xml.push_str(&format!("<name>{}</name>", escape_xml(name)));
-    xml.push_str(&format!(
-        "<value><string>{}</string></value>",
-        escape_xml(value)
-    ));
-    xml.push_str("</member>");
-}
-
-fn xmlrpc_member_bool(xml: &mut String, name: &str, value: bool) {
-    let xmlrpc_bool = if value { "1" } else { "0" };
-    xml.push_str("<member>");
-    xml.push_str(&format!("<name>{}</name>", escape_xml(name)));
-    xml.push_str(&format!("<value><boolean>{xmlrpc_bool}</boolean></value>"));
-    xml.push_str("</member>");
-}
-
-fn xmlrpc_member_array_of_strings(xml: &mut String, name: &str, values: &[String]) {
-    xml.push_str("<member>");
-    xml.push_str(&format!("<name>{}</name>", escape_xml(name)));
-    xml.push_str("<value><array><data>");
-    for value in values {
-        xml.push_str(&format!(
-            "<value><string>{}</string></value>",
-            escape_xml(value)
-        ));
-    }
-    xml.push_str("</data></array></value>");
-    xml.push_str("</member>");
-}
-
-#[derive(Debug, Clone)]
-enum XmlRpcValue {
-    String(String),
-    Int(i64),
-    Bool(bool),
-    Struct(HashMap<String, XmlRpcValue>),
-    Array(Vec<XmlRpcValue>),
-}
-
-fn first_child_with_tag<'a, 'i>(node: Node<'a, 'i>, tag: &str) -> Option<Node<'a, 'i>> {
-    node.children()
-        .find(|child| child.is_element() && child.has_tag_name(tag))
-}
-
-fn parse_xmlrpc_value(value_node: Node<'_, '_>) -> Result<XmlRpcValue, CodecError> {
-    let typed_child = value_node.children().find(|child| child.is_element());
-    let Some(typed_child) = typed_child else {
-        let text = value_node
-            .text()
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_string();
-        return Ok(XmlRpcValue::String(text));
-    };
-
-    match typed_child.tag_name().name() {
-        "string" => Ok(XmlRpcValue::String(
-            typed_child.text().unwrap_or_default().to_string(),
-        )),
-        "int" | "i4" => {
-            let parsed = typed_child
-                .text()
-                .unwrap_or_default()
-                .trim()
-                .parse::<i64>()
-                .map_err(|err| CodecError::Deserialize(err.to_string()))?;
-            Ok(XmlRpcValue::Int(parsed))
-        }
-        "boolean" => {
-            let bool_text = typed_child.text().unwrap_or_default().trim();
-            let parsed = matches!(bool_text, "1" | "true" | "TRUE");
-            Ok(XmlRpcValue::Bool(parsed))
-        }
-        "double" => Ok(XmlRpcValue::String(
-            typed_child.text().unwrap_or_default().to_string(),
-        )),
-        "struct" => {
-            let mut map = HashMap::new();
-            for member in typed_child
-                .children()
-                .filter(|child| child.has_tag_name("member"))
-            {
-                let name = first_child_with_tag(member, "name")
-                    .and_then(|name_node| name_node.text())
-                    .ok_or_else(|| {
-                        CodecError::Deserialize(String::from(
-                            "xml-rpc struct member missing name text",
-                        ))
-                    })?
-                    .to_string();
-                let child_value = first_child_with_tag(member, "value").ok_or_else(|| {
-                    CodecError::Deserialize(String::from("xml-rpc struct member missing value"))
-                })?;
-                let parsed_value = parse_xmlrpc_value(child_value)?;
-                map.insert(name, parsed_value);
-            }
-            Ok(XmlRpcValue::Struct(map))
-        }
-        "array" => {
-            let data_node = first_child_with_tag(typed_child, "data").ok_or_else(|| {
-                CodecError::Deserialize(String::from("xml-rpc array missing data node"))
-            })?;
-            let mut values = Vec::new();
-            for child_value in data_node
-                .children()
-                .filter(|child| child.has_tag_name("value"))
-            {
-                values.push(parse_xmlrpc_value(child_value)?);
-            }
-            Ok(XmlRpcValue::Array(values))
-        }
-        other => Err(CodecError::Deserialize(format!(
-            "unsupported xml-rpc value type: {other}"
-        ))),
-    }
-}
-
-fn xmlrpc_as_string(value: &XmlRpcValue) -> Option<String> {
-    match value {
-        XmlRpcValue::String(text) => Some(text.clone()),
-        XmlRpcValue::Int(value) => Some(value.to_string()),
-        XmlRpcValue::Bool(value) => Some(value.to_string()),
-        XmlRpcValue::Struct(_) => None,
-        XmlRpcValue::Array(values) => Some(
-            values
-                .iter()
-                .filter_map(xmlrpc_as_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
-    }
-}
-
-fn xmlrpc_as_bool(value: &XmlRpcValue) -> Option<bool> {
-    match value {
-        XmlRpcValue::Bool(value) => Some(*value),
-        XmlRpcValue::Int(value) => Some(*value != 0),
-        XmlRpcValue::String(text) => match text.to_ascii_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        },
-        XmlRpcValue::Struct(_) | XmlRpcValue::Array(_) => None,
-    }
-}
-
-fn xmlrpc_as_u32(value: &XmlRpcValue) -> Option<u32> {
-    match value {
-        XmlRpcValue::Int(value) => u32::try_from(*value).ok(),
-        XmlRpcValue::String(text) => text.parse::<u32>().ok(),
-        XmlRpcValue::Bool(value) => Some(if *value { 1 } else { 0 }),
-        XmlRpcValue::Struct(_) | XmlRpcValue::Array(_) => None,
-    }
-}
-
-fn xmlrpc_as_u16(value: &XmlRpcValue) -> Option<u16> {
-    xmlrpc_as_u32(value).and_then(|value| u16::try_from(value).ok())
-}
-
-fn xmlrpc_as_buddy_list(value: &XmlRpcValue) -> Option<Vec<FriendBootstrapEntry>> {
-    let XmlRpcValue::Array(items) = value else {
-        return None;
-    };
-    let mut buddies = Vec::new();
-    for item in items {
-        let XmlRpcValue::Struct(map) = item else {
-            continue;
-        };
-        let buddy_id = map
-            .get("buddy_id")
-            .and_then(xmlrpc_as_string)
-            .unwrap_or_default();
-        if buddy_id.is_empty() {
-            continue;
-        }
-        let rights_has = map
-            .get("buddy_rights_has")
-            .and_then(xmlrpc_as_u32)
-            .map(|v| v as i32)
-            .unwrap_or_default();
-        let rights_given = map
-            .get("buddy_rights_given")
-            .and_then(xmlrpc_as_u32)
-            .map(|v| v as i32)
-            .unwrap_or_default();
-        buddies.push(FriendBootstrapEntry {
-            buddy_id,
-            rights_has,
-            rights_given,
-        });
-    }
-    Some(buddies)
-}
-
-fn escape_xml(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-fn parse_llsd_map(body: &[u8]) -> Result<HashMap<String, LlsdValue>, CodecError> {
-    let mut reader = Reader::from_reader(body);
-    reader.trim_text(true);
-    let mut map = HashMap::new();
-    let mut map_depth: usize = 0;
-    let mut current_key: Option<String> = None;
-    let mut current_tag: Option<TagType> = None;
-
-    loop {
-        let event = match reader.read_event() {
-            Ok(event) => event,
-            Err(err) => return Err(CodecError::Deserialize(err.to_string())),
-        };
-
-        match event {
-            Event::Start(ref e) => match e.name().as_ref() {
-                b"map" => map_depth += 1,
-                b"key" if map_depth == 1 => current_tag = Some(TagType::Key),
-                b"string" if map_depth == 1 => current_tag = Some(TagType::String),
-                b"integer" if map_depth == 1 => current_tag = Some(TagType::Integer),
-                b"boolean" if map_depth == 1 => current_tag = Some(TagType::Boolean),
-                _ => {}
-            },
-            Event::Empty(ref e) => {
-                if map_depth == 1 {
-                    if let Some(key) = current_key.take() {
-                        match e.name().as_ref() {
-                            b"true" => {
-                                map.insert(key, LlsdValue::Bool(true));
-                            }
-                            b"false" => {
-                                map.insert(key, LlsdValue::Bool(false));
-                            }
-                            _ => {}
-                        }
-                    }
-                    current_tag = None;
-                }
-            }
-            Event::Text(e) => {
-                if map_depth == 1
-                    && let Ok(text) = e.unescape()
-                {
-                    let text = text.into_owned();
-                    match current_tag.take() {
-                        Some(TagType::Key) => {
-                            current_key = Some(text);
-                        }
-                        Some(tag) => {
-                            if let Some(key) = current_key.take() {
-                                match tag {
-                                    TagType::String => {
-                                        map.insert(key, LlsdValue::String(text));
-                                    }
-                                    TagType::Integer => {
-                                        if let Ok(value) = text.parse::<i64>() {
-                                            map.insert(key, LlsdValue::Integer(value));
-                                        }
-                                    }
-                                    TagType::Boolean => {
-                                        let normalized =
-                                            matches!(text.to_lowercase().as_str(), "true" | "1");
-                                        map.insert(key, LlsdValue::Bool(normalized));
-                                    }
-                                    TagType::Key => {}
-                                }
-                            }
-                        }
-                        None => {}
-                    }
-                }
-            }
-            Event::End(ref e) => {
-                if e.name().as_ref() == b"map" {
-                    map_depth = map_depth.saturating_sub(1);
-                }
-                current_tag = None;
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-
-    Ok(map)
-}
-
-fn parse_llsd_buddy_list(body: &[u8]) -> Result<Vec<FriendBootstrapEntry>, CodecError> {
-    let text = std::str::from_utf8(body).map_err(|err| CodecError::Deserialize(err.to_string()))?;
-    let doc = Document::parse(text).map_err(|err| CodecError::Deserialize(err.to_string()))?;
-    let top_map = doc
-        .descendants()
-        .find(|node| node.has_tag_name("map"))
-        .ok_or_else(|| CodecError::Deserialize(String::from("missing llsd map")))?;
-    let children: Vec<Node<'_, '_>> = top_map
-        .children()
-        .filter(|node| node.is_element())
-        .collect();
-    let mut idx = 0usize;
-    while idx + 1 < children.len() {
-        let key_node = children[idx];
-        let value_node = children[idx + 1];
-        if key_node.has_tag_name("key") && key_node.text().unwrap_or_default() == "buddy-list" {
-            if !value_node.has_tag_name("array") {
-                return Ok(Vec::new());
-            }
-            let mut buddies = Vec::new();
-            for item in value_node
-                .children()
-                .filter(|node| node.has_tag_name("map"))
-            {
-                let map = parse_llsd_scalar_map(item);
-                let buddy_id = map.get("buddy_id").cloned().unwrap_or_default();
-                if buddy_id.is_empty() {
-                    continue;
-                }
-                let rights_has = map
-                    .get("buddy_rights_has")
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or_default();
-                let rights_given = map
-                    .get("buddy_rights_given")
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .unwrap_or_default();
-                buddies.push(FriendBootstrapEntry {
-                    buddy_id,
-                    rights_has,
-                    rights_given,
-                });
-            }
-            return Ok(buddies);
-        }
-        idx += 2;
-    }
-    Ok(Vec::new())
-}
-
-enum TagType {
-    Key,
-    String,
-    Integer,
-    Boolean,
-}
-
-enum LlsdValue {
-    String(String),
-    Integer(i64),
-    Bool(bool),
-}
-
-impl LlsdValue {
-    fn as_integer(&self) -> Option<i64> {
-        match self {
-            LlsdValue::Integer(value) => Some(*value),
-            LlsdValue::String(text) => text.parse().ok(),
-            LlsdValue::Bool(_) => None,
-        }
-    }
-}
-
-fn llsd_to_string(value: &LlsdValue) -> Option<String> {
-    match value {
-        LlsdValue::String(text) => Some(text.clone()),
-        LlsdValue::Integer(num) => Some(num.to_string()),
-        LlsdValue::Bool(flag) => Some(flag.to_string()),
-    }
-}
-
-fn llsd_to_bool(value: &LlsdValue) -> Option<bool> {
-    match value {
-        LlsdValue::Bool(flag) => Some(*flag),
-        LlsdValue::String(text) => match text.to_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        },
-        LlsdValue::Integer(num) => Some(*num != 0),
-    }
-}
-
-fn llsd_to_u32(value: &LlsdValue) -> Option<u32> {
-    value.as_integer().and_then(|i| u32::try_from(i).ok())
-}
-
-fn llsd_to_u16(value: &LlsdValue) -> Option<u16> {
-    value.as_integer().and_then(|i| u16::try_from(i).ok())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub first_name: String,
@@ -960,6 +687,7 @@ pub enum FirstSimulatorInboundMessageKind {
     ObjectUpdateCompressed,
     ObjectUpdateCached,
     ImprovedTerseObjectUpdate,
+    ObjectExtraParams,
     KillObject,
     Irrelevant,
 }
@@ -1124,9 +852,35 @@ pub struct DecodedSimulatorViewerTimeMessage {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedObjectFaceMaterial {
+    pub face_id: u16,
+    pub texture_id: Option<String>,
+    pub normal_id: Option<String>,
+    pub specular_id: Option<String>,
+    pub material_id: Option<String>,
+    pub rgba: [u8; 4],
+    pub offset_s: i16,
+    pub offset_t: i16,
+    pub scale_s: i16,
+    pub scale_t: i16,
+    pub rotation: i16,
+    pub bump: u8,
+    pub fullbright: bool,
+    pub shiny: u8,
+    pub media_flags: u8,
+    pub glow: u8,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedObjectFeedObject {
     pub local_id: u32,
     pub scale_centi: Option<[u16; 3]>,
+    pub position_centi: Option<[i32; 3]>,
+    pub mesh_id: Option<String>,
+    pub texture_id: Option<String>,
+    pub default_face_material: Option<DecodedObjectFaceMaterial>,
+    pub face_material_overrides: Vec<DecodedObjectFaceMaterial>,
+    pub object_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1149,10 +903,21 @@ pub struct SimulatorPayloadDecodeSummary {
     pub simulator_viewer_time_last_body_len: Option<u16>,
     pub simulator_viewer_time_last_signature: Option<u32>,
     pub object_feed_update_messages: usize,
+    pub object_feed_object_update_messages: usize,
+    pub object_feed_object_update_mesh_hits: usize,
+    pub object_feed_object_update_compressed_messages: usize,
+    pub object_feed_object_update_compressed_mesh_hits: usize,
+    pub object_feed_object_update_cached_messages: usize,
+    pub object_feed_improved_terse_messages: usize,
+    pub object_feed_object_extra_params_messages: usize,
+    pub object_feed_object_extra_params_mesh_hits: usize,
     pub object_feed_kill_messages: usize,
     pub object_feed_decode_dropped: usize,
     pub object_feed_evicted: usize,
     pub object_feed_total_objects: usize,
+    pub object_feed_state_mesh_objects: usize,
+    pub object_feed_export_objects: usize,
+    pub object_feed_export_mesh_objects: usize,
     pub object_feed_export_truncated: bool,
     pub object_feed_objects: Vec<DecodedObjectFeedObject>,
     pub object_feed_recent_kills: Vec<u32>,
@@ -1166,6 +931,15 @@ pub struct FirstSimulatorAckForensicsSummary {
     pub outbound_appended_ack_ids_last: Vec<u32>,
     pub explicit_packet_ack_receives: usize,
     pub first_packet_ack_receive_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetFetchAttempt {
+    pub url: String,
+    pub range_header: Option<String>,
+    pub status: Option<u16>,
+    pub error: Option<String>,
+    pub response_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,6 +965,20 @@ pub struct FirstSimulatorStartupTimelineSummary {
 pub struct FirstSimulatorStartupTranscriptSummary {
     pub send_events: Vec<String>,
     pub receive_events: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorStartupInterestSendEvidence {
+    pub message: String,
+    pub order_index: usize,
+    pub packet_id: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstSimulatorStartupInterestGateSummary {
+    pub passed: bool,
+    pub required: Vec<FirstSimulatorStartupInterestSendEvidence>,
+    pub missing: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1263,6 +1051,9 @@ pub struct EventQueueSimulatorTarget {
     pub port: Option<String>,
     pub sim_ip_and_port: Option<String>,
     pub seed_capability: Option<String>,
+    pub endpoint_ip: Option<String>,
+    pub endpoint_port: Option<u16>,
+    pub endpoint_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1392,6 +1183,12 @@ pub struct SocialCircuit {
     socket: UdpSocket,
 }
 
+impl SocialCircuit {
+    pub fn target_endpoint(&self) -> (&str, u16) {
+        (&self.target.sim_ip, self.target.sim_port)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventQueueAttemptDiagnostic {
     pub attempt: usize,
@@ -1426,6 +1223,29 @@ pub struct SimulatorFeaturesInspection {
 pub type MapLayerInspection = SimulatorFeaturesInspection;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapabilityTransportProbe {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub body_bytes: usize,
+    pub selected_url: Option<String>,
+    pub method: String,
+    pub decode: String,
+    pub body_preview_hash: Option<String>,
+    pub body_preview: Option<String>,
+    pub response_class: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapabilityProbeRequest {
+    pub method: String,
+    pub url_candidates: Vec<String>,
+    pub accept: Option<String>,
+    pub content_type: Option<String>,
+    pub range: Option<String>,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionObjectsInspection {
     pub top_level_keys: Vec<String>,
     pub scalar_values: BTreeMap<String, String>,
@@ -1439,6 +1259,7 @@ pub struct RegionObjectsInspection {
     pub child_map_pathfinding_summaries: BTreeMap<String, RegionObjectsPathfindingSummary>,
     pub typed_object_samples: Vec<RegionObjectsTypedObjectSample>,
     pub tuple_description_analysis: Option<RegionObjectsTupleDescriptionAnalysis>,
+    pub candidate_mesh_asset_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1573,16 +1394,79 @@ pub struct Connection {
     object_feed_tick: u64,
     next_first_simulator_packet_id: u32,
     pending_first_simulator_ack_ids: Vec<u32>,
+    pending_object_cache_miss_ids: Vec<u32>,
     pending_region_handshake_reply_flags: Option<u32>,
     region_handshake_reply_sent: bool,
+    require_observed_region_handshake_for_reply: bool,
+    last_bootstrap_sender_endpoint: Option<SocketAddr>,
+    last_region_handshake_sender_endpoint: Option<SocketAddr>,
     continuity_summary: RegionContinuitySummary,
     last_phase_change_at: Instant,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
+struct ObjectFaceMaterialState {
+    texture_id_bytes: Option<[u8; 16]>,
+    normal_id_bytes: Option<[u8; 16]>,
+    specular_id_bytes: Option<[u8; 16]>,
+    material_id_bytes: Option<[u8; 16]>,
+    rgba: [u8; 4],
+    offset_s: i16,
+    offset_t: i16,
+    scale_s: i16,
+    scale_t: i16,
+    rotation: i16,
+    bump: u8,
+    fullbright: bool,
+    shiny: u8,
+    media_flags: u8,
+    glow: u8,
+}
+
+impl ObjectFaceMaterialState {
+    fn with_defaults(texture_id_bytes: Option<[u8; 16]>) -> Self {
+        Self {
+            texture_id_bytes,
+            normal_id_bytes: None,
+            specular_id_bytes: None,
+            material_id_bytes: None,
+            rgba: [255, 255, 255, 255],
+            offset_s: 0,
+            offset_t: 0,
+            scale_s: 10_000,
+            scale_t: 10_000,
+            rotation: 0,
+            bump: 0,
+            fullbright: false,
+            shiny: 0,
+            media_flags: 0,
+            glow: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct ObjectFeedObjectState {
     last_seen_tick: u64,
     scale_centi: Option<[u16; 3]>,
+    position_centi: Option<[i32; 3]>,
+    mesh_id_bytes: Option<[u8; 16]>,
+    texture_id_bytes: Option<[u8; 16]>,
+    default_face_material: Option<ObjectFaceMaterialState>,
+    face_material_overrides: BTreeMap<u8, ObjectFaceMaterialState>,
+    object_id_bytes: Option<[u8; 16]>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DecodedObjectFeedIngressObject {
+    local_id: u32,
+    scale_centi: Option<[u16; 3]>,
+    position_centi: Option<[i32; 3]>,
+    mesh_id_bytes: Option<[u8; 16]>,
+    texture_id_bytes: Option<[u8; 16]>,
+    default_face_material: Option<ObjectFaceMaterialState>,
+    face_material_overrides: Vec<(u8, ObjectFaceMaterialState)>,
+    object_id_bytes: Option<[u8; 16]>,
 }
 
 impl Connection {
@@ -1605,8 +1489,12 @@ impl Connection {
             object_feed_tick: 0,
             next_first_simulator_packet_id: 1,
             pending_first_simulator_ack_ids: Vec::new(),
+            pending_object_cache_miss_ids: Vec::new(),
             pending_region_handshake_reply_flags: None,
             region_handshake_reply_sent: false,
+            require_observed_region_handshake_for_reply: false,
+            last_bootstrap_sender_endpoint: None,
+            last_region_handshake_sender_endpoint: None,
             continuity_summary: RegionContinuitySummary::default(),
             last_phase_change_at: Instant::now(),
         }
@@ -1638,6 +1526,19 @@ impl Connection {
         &self,
     ) -> &[FirstSimulatorHandshakeReceiveDiagnostic] {
         &self.first_simulator_handshake_receive_diagnostics
+    }
+
+    pub fn has_observed_region_handshake(&self) -> bool {
+        self.first_simulator_handshake_receive_diagnostics
+            .iter()
+            .any(|diag| {
+                diag.kind == FirstSimulatorInboundMessageKind::RegionHandshake
+                    && diag.decode_source == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+            })
+    }
+
+    pub fn set_require_observed_region_handshake_for_reply(&mut self, require: bool) {
+        self.require_observed_region_handshake_for_reply = require;
     }
 
     pub fn first_simulator_socket_diagnostics(&self) -> &[FirstSimulatorSocketDiagnostic] {
@@ -1959,6 +1860,72 @@ impl Connection {
         }
     }
 
+    pub fn summarize_first_simulator_startup_interest_gate(
+        &self,
+    ) -> FirstSimulatorStartupInterestGateSummary {
+        let mut throttle = None;
+        let mut update = None;
+        let mut height_width = None;
+
+        for (order_index, diag) in self
+            .first_simulator_handshake_send_diagnostics
+            .iter()
+            .enumerate()
+        {
+            let Some(message_number) = diag.packet_message_number else {
+                continue;
+            };
+            if message_number == lludp_low_frequency_message_number(LLUDP_AGENT_THROTTLE_LOW_ID)
+                && throttle.is_none()
+            {
+                throttle = Some(FirstSimulatorStartupInterestSendEvidence {
+                    message: String::from("AgentThrottle"),
+                    order_index,
+                    packet_id: diag.packet_id,
+                });
+            } else if message_number == u32::from(LLUDP_AGENT_UPDATE_HIGH_ID) && update.is_none() {
+                update = Some(FirstSimulatorStartupInterestSendEvidence {
+                    message: String::from("AgentUpdate"),
+                    order_index,
+                    packet_id: diag.packet_id,
+                });
+            } else if message_number
+                == lludp_low_frequency_message_number(LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID)
+                && height_width.is_none()
+            {
+                height_width = Some(FirstSimulatorStartupInterestSendEvidence {
+                    message: String::from("AgentHeightWidth"),
+                    order_index,
+                    packet_id: diag.packet_id,
+                });
+            }
+        }
+
+        let mut required = Vec::new();
+        let mut missing = Vec::new();
+        if let Some(entry) = throttle {
+            required.push(entry);
+        } else {
+            missing.push(String::from("AgentThrottle"));
+        }
+        if let Some(entry) = update {
+            required.push(entry);
+        } else {
+            missing.push(String::from("AgentUpdate"));
+        }
+        if let Some(entry) = height_width {
+            required.push(entry);
+        } else {
+            missing.push(String::from("AgentHeightWidth"));
+        }
+
+        FirstSimulatorStartupInterestGateSummary {
+            passed: missing.is_empty(),
+            required,
+            missing,
+        }
+    }
+
     pub fn summarize_seed_capability_inventory(
         &self,
         map: &SeedCapabilityMap,
@@ -1966,15 +1933,48 @@ impl Connection {
         summarize_seed_capability_inventory(map)
     }
 
-    fn object_feed_upsert(&mut self, local_id: u32, scale_centi: Option<[u16; 3]>) {
+    #[allow(clippy::too_many_arguments)]
+    fn object_feed_upsert(
+        &mut self,
+        local_id: u32,
+        scale_centi: Option<[u16; 3]>,
+        position_centi: Option<[i32; 3]>,
+        mesh_id_bytes: Option<[u8; 16]>,
+        texture_id_bytes: Option<[u8; 16]>,
+        default_face_material: Option<ObjectFaceMaterialState>,
+        face_material_overrides: &[(u8, ObjectFaceMaterialState)],
+        object_id_bytes: Option<[u8; 16]>,
+    ) {
         if local_id == 0 {
             return;
         }
         self.object_feed_tick = self.object_feed_tick.saturating_add(1);
         let entry = self.object_feed_objects.entry(local_id).or_default();
         entry.last_seen_tick = self.object_feed_tick;
-        if scale_centi.is_some() {
-            entry.scale_centi = scale_centi;
+        if let Some(scale) = scale_centi {
+            entry.scale_centi = Some(scale);
+        }
+        if let Some(pos) = position_centi {
+            entry.position_centi = Some(pos);
+        }
+        if let Some(mesh) = mesh_id_bytes {
+            entry.mesh_id_bytes = Some(mesh);
+        }
+        if let Some(tex) = texture_id_bytes {
+            entry.texture_id_bytes = Some(tex);
+        }
+        if let Some(mat) = default_face_material {
+            entry.default_face_material = Some(mat);
+        }
+        if !face_material_overrides.is_empty() {
+            for (face_id, material) in face_material_overrides {
+                entry
+                    .face_material_overrides
+                    .insert(*face_id, material.clone());
+            }
+        }
+        if let Some(obj) = object_id_bytes {
+            entry.object_id_bytes = Some(obj);
         }
 
         if self.object_feed_objects.len() > MAX_OBJECT_FEED_OBJECTS
@@ -2005,28 +2005,73 @@ impl Connection {
         self.simulator_payload_decode_summary
             .object_feed_total_objects = self.object_feed_objects.len();
         self.simulator_payload_decode_summary
+            .object_feed_state_mesh_objects = self
+            .object_feed_objects
+            .values()
+            .filter(|state| {
+                state
+                    .mesh_id_bytes
+                    .is_some_and(|id| !is_null_uuid_bytes(id))
+            })
+            .count();
+        self.simulator_payload_decode_summary
             .object_feed_export_truncated =
             self.object_feed_objects.len() > MAX_OBJECT_FEED_EXPORT_OBJECTS;
+        let export_truncated = self
+            .simulator_payload_decode_summary
+            .object_feed_export_truncated;
 
         let mut entries: Vec<(u32, ObjectFeedObjectState)> = self
             .object_feed_objects
             .iter()
-            .map(|(id, state)| (*id, *state))
+            .map(|(id, state)| (*id, state.clone()))
             .collect();
-        entries.sort_by(|a, b| {
-            b.1.last_seen_tick
-                .cmp(&a.1.last_seen_tick)
-                .then_with(|| a.0.cmp(&b.0))
-        });
+        if export_truncated {
+            entries.sort_by(|a, b| {
+                b.1.mesh_id_bytes
+                    .is_some_and(|id| !is_null_uuid_bytes(id))
+                    .cmp(&a.1.mesh_id_bytes.is_some_and(|id| !is_null_uuid_bytes(id)))
+                    .then_with(|| b.1.last_seen_tick.cmp(&a.1.last_seen_tick))
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+        } else {
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+        }
         entries.truncate(MAX_OBJECT_FEED_EXPORT_OBJECTS);
-        let mut export: Vec<DecodedObjectFeedObject> = entries
+        let export: Vec<DecodedObjectFeedObject> = entries
             .into_iter()
             .map(|(local_id, state)| DecodedObjectFeedObject {
                 local_id,
                 scale_centi: state.scale_centi,
+                position_centi: state.position_centi,
+                mesh_id: state
+                    .mesh_id_bytes
+                    .map(format_uuid_bytes)
+                    .filter(|id| !is_null_uuid(id)),
+                texture_id: state
+                    .texture_id_bytes
+                    .map(format_uuid_bytes)
+                    .filter(|id| !is_null_uuid(id)),
+                default_face_material: state
+                    .default_face_material
+                    .as_ref()
+                    .map(format_object_face_material),
+                face_material_overrides: state
+                    .face_material_overrides
+                    .iter()
+                    .map(|(face_id, mat)| format_object_face_material_with_face(*face_id, mat))
+                    .collect(),
+                object_id: state
+                    .object_id_bytes
+                    .map(format_uuid_bytes)
+                    .filter(|id| !is_null_uuid(id)),
             })
             .collect();
-        export.sort_by_key(|obj| obj.local_id);
+        self.simulator_payload_decode_summary
+            .object_feed_export_objects = export.len();
+        self.simulator_payload_decode_summary
+            .object_feed_export_mesh_objects =
+            export.iter().filter(|obj| obj.mesh_id.is_some()).count();
         self.simulator_payload_decode_summary.object_feed_objects = export;
         self.simulator_payload_decode_summary
             .object_feed_recent_kills = self.object_feed_recent_kills.clone();
@@ -2110,8 +2155,11 @@ impl Connection {
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
         self.pending_first_simulator_ack_ids.clear();
+        self.pending_object_cache_miss_ids.clear();
         self.pending_region_handshake_reply_flags = None;
         self.region_handshake_reply_sent = false;
+        self.last_bootstrap_sender_endpoint = None;
+        self.last_region_handshake_sender_endpoint = None;
         self.continuity_summary = RegionContinuitySummary::default();
         self.state = ConnectionState::LoggedIn;
         Ok(())
@@ -2284,8 +2332,11 @@ impl Connection {
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
         self.pending_first_simulator_ack_ids.clear();
+        self.pending_object_cache_miss_ids.clear();
         self.pending_region_handshake_reply_flags = None;
         self.region_handshake_reply_sent = false;
+        self.last_bootstrap_sender_endpoint = None;
+        self.last_region_handshake_sender_endpoint = None;
         self.state = ConnectionState::Disconnected;
         Ok(())
     }
@@ -2597,9 +2648,25 @@ impl Connection {
                 FirstSimulatorInboundMessageKind::ObjectUpdate => {
                     self.simulator_payload_decode_summary
                         .object_feed_update_messages += 1;
+                    self.simulator_payload_decode_summary
+                        .object_feed_object_update_messages += 1;
                     if let Some(objects) = decode_object_update_ids_and_scales(payload) {
-                        for (local_id, scale_centi) in objects {
-                            self.object_feed_upsert(local_id, scale_centi);
+                        self.simulator_payload_decode_summary
+                            .object_feed_object_update_mesh_hits += objects
+                            .iter()
+                            .filter(|obj| obj.mesh_id_bytes.is_some())
+                            .count();
+                        for obj in objects {
+                            self.object_feed_upsert(
+                                obj.local_id,
+                                obj.scale_centi,
+                                obj.position_centi,
+                                obj.mesh_id_bytes,
+                                obj.texture_id_bytes,
+                                obj.default_face_material.clone(),
+                                &obj.face_material_overrides,
+                                obj.object_id_bytes,
+                            );
                         }
                     } else {
                         self.simulator_payload_decode_summary
@@ -2610,9 +2677,25 @@ impl Connection {
                 FirstSimulatorInboundMessageKind::ObjectUpdateCompressed => {
                     self.simulator_payload_decode_summary
                         .object_feed_update_messages += 1;
-                    if let Some(ids) = decode_object_update_compressed_local_ids(payload) {
-                        for local_id in ids {
-                            self.object_feed_upsert(local_id, None);
+                    self.simulator_payload_decode_summary
+                        .object_feed_object_update_compressed_messages += 1;
+                    if let Some(objects) = decode_object_update_compressed_objects(payload) {
+                        self.simulator_payload_decode_summary
+                            .object_feed_object_update_compressed_mesh_hits += objects
+                            .iter()
+                            .filter(|obj| obj.mesh_id_bytes.is_some())
+                            .count();
+                        for obj in objects {
+                            self.object_feed_upsert(
+                                obj.local_id,
+                                obj.scale_centi,
+                                obj.position_centi,
+                                obj.mesh_id_bytes,
+                                obj.texture_id_bytes,
+                                obj.default_face_material.clone(),
+                                &obj.face_material_overrides,
+                                obj.object_id_bytes,
+                            );
                         }
                     } else {
                         self.simulator_payload_decode_summary
@@ -2623,9 +2706,21 @@ impl Connection {
                 FirstSimulatorInboundMessageKind::ObjectUpdateCached => {
                     self.simulator_payload_decode_summary
                         .object_feed_update_messages += 1;
+                    self.simulator_payload_decode_summary
+                        .object_feed_object_update_cached_messages += 1;
                     if let Some(ids) = decode_object_update_cached_local_ids(payload) {
                         for local_id in ids {
-                            self.object_feed_upsert(local_id, None);
+                            self.object_feed_upsert(
+                                local_id,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                &[],
+                                None,
+                            );
+                            self.queue_object_cache_miss(local_id);
                         }
                     } else {
                         self.simulator_payload_decode_summary
@@ -2636,9 +2731,49 @@ impl Connection {
                 FirstSimulatorInboundMessageKind::ImprovedTerseObjectUpdate => {
                     self.simulator_payload_decode_summary
                         .object_feed_update_messages += 1;
-                    if let Some(ids) = decode_improved_terse_object_update_local_ids(payload) {
-                        for local_id in ids {
-                            self.object_feed_upsert(local_id, None);
+                    self.simulator_payload_decode_summary
+                        .object_feed_improved_terse_messages += 1;
+                    if let Some(objects) = decode_improved_terse_object_update_objects(payload) {
+                        for obj in objects {
+                            self.object_feed_upsert(
+                                obj.local_id,
+                                obj.scale_centi,
+                                obj.position_centi,
+                                obj.mesh_id_bytes,
+                                obj.texture_id_bytes,
+                                obj.default_face_material.clone(),
+                                &obj.face_material_overrides,
+                                obj.object_id_bytes,
+                            );
+                        }
+                    } else {
+                        self.simulator_payload_decode_summary
+                            .object_feed_decode_dropped += 1;
+                    }
+                    self.refresh_object_feed_summary_export();
+                }
+                FirstSimulatorInboundMessageKind::ObjectExtraParams => {
+                    self.simulator_payload_decode_summary
+                        .object_feed_update_messages += 1;
+                    self.simulator_payload_decode_summary
+                        .object_feed_object_extra_params_messages += 1;
+                    if let Some(objects) = decode_object_extra_params_mesh_updates(payload) {
+                        self.simulator_payload_decode_summary
+                            .object_feed_object_extra_params_mesh_hits += objects
+                            .iter()
+                            .filter(|obj| obj.mesh_id_bytes.is_some())
+                            .count();
+                        for obj in objects {
+                            self.object_feed_upsert(
+                                obj.local_id,
+                                obj.scale_centi,
+                                obj.position_centi,
+                                obj.mesh_id_bytes,
+                                obj.texture_id_bytes,
+                                obj.default_face_material.clone(),
+                                &obj.face_material_overrides,
+                                obj.object_id_bytes,
+                            );
                         }
                     } else {
                         self.simulator_payload_decode_summary
@@ -2712,17 +2847,26 @@ impl Connection {
     }
 
     fn queue_first_simulator_ack_id(&mut self, packet_id: u32) {
-        if self
-            .pending_first_simulator_ack_ids
-            .iter()
-            .any(|queued| *queued == packet_id)
-        {
+        if self.pending_first_simulator_ack_ids.contains(&packet_id) {
             return;
         }
         if self.pending_first_simulator_ack_ids.len() >= MAX_PENDING_FIRST_SIMULATOR_ACK_IDS {
             self.pending_first_simulator_ack_ids.remove(0);
         }
         self.pending_first_simulator_ack_ids.push(packet_id);
+    }
+
+    fn queue_object_cache_miss(&mut self, local_id: u32) {
+        if local_id == 0 {
+            return;
+        }
+        if self.pending_object_cache_miss_ids.contains(&local_id) {
+            return;
+        }
+        if self.pending_object_cache_miss_ids.len() >= MAX_PENDING_OBJECT_CACHE_MISS_IDS {
+            self.pending_object_cache_miss_ids.remove(0);
+        }
+        self.pending_object_cache_miss_ids.push(local_id);
     }
 
     fn first_simulator_ack_batch(&self, payload: &[u8]) -> Vec<u32> {
@@ -2832,7 +2976,9 @@ impl Connection {
             Some(received_len),
         );
 
-        self.observe_first_simulator_inbound_payload(&buf[..received_len])
+        let classification = self.observe_first_simulator_inbound_payload(&buf[..received_len])?;
+        self.note_first_simulator_sender_endpoint(&sender, &classification);
+        Ok(classification)
     }
 
     pub async fn probe_first_simulator_handshake_once(
@@ -3075,6 +3221,7 @@ impl Connection {
 
             let classification =
                 self.observe_first_simulator_inbound_payload(&buf[..received_len])?;
+            self.note_first_simulator_sender_endpoint(&sender, &classification);
             let observation_index = self.first_simulator_handshake_receive_diagnostics.len();
             observations.push(FirstSimulatorHandshakeProbeObservation {
                 observation_index,
@@ -3882,6 +4029,17 @@ impl Connection {
         circuit: &SocialCircuit,
         port: u16,
     ) -> Result<(), ConnectionError> {
+        let sim_ip = circuit.target.sim_ip.as_str();
+        self.send_use_circuit_code_on_circuit_to_target(circuit, sim_ip, port)
+            .await
+    }
+
+    pub async fn send_use_circuit_code_on_circuit_to_target(
+        &mut self,
+        circuit: &SocialCircuit,
+        sim_ip: &str,
+        port: u16,
+    ) -> Result<(), ConnectionError> {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
         }
@@ -3890,6 +4048,7 @@ impl Connection {
             .clone()
             .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
         let mut target = circuit.target.clone();
+        target.sim_ip = sim_ip.to_string();
         target.sim_port = port;
         let payload = encode_first_simulator_use_circuit_code_payload(
             &prerequisites,
@@ -3903,6 +4062,67 @@ impl Connection {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn send_complete_agent_movement_on_circuit_to_port(
+        &mut self,
+        circuit: &SocialCircuit,
+        port: u16,
+    ) -> Result<(), ConnectionError> {
+        let sim_ip = circuit.target.sim_ip.as_str();
+        self.send_complete_agent_movement_on_circuit_to_target(circuit, sim_ip, port)
+            .await
+    }
+
+    pub async fn send_complete_agent_movement_on_circuit_to_target(
+        &mut self,
+        circuit: &SocialCircuit,
+        sim_ip: &str,
+        port: u16,
+    ) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let mut target = circuit.target.clone();
+        target.sim_ip = sim_ip.to_string();
+        target.sim_port = port;
+        let payload = encode_first_simulator_complete_agent_movement_payload(
+            &prerequisites,
+            self.next_first_simulator_packet_id(),
+        )?;
+        self.send_first_simulator_handshake_datagram_with_socket(
+            FirstSimulatorHandshakeAction::CompleteAgentMovement,
+            &target,
+            &payload,
+            &circuit.socket,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn send_handshake_reprime_bundle(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<usize, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let endpoints = self.handshake_reprime_endpoints(circuit);
+        let mut datagrams_sent = 0usize;
+        for (sim_ip, sim_port) in endpoints {
+            self.send_use_circuit_code_on_circuit_to_target(circuit, &sim_ip, sim_port)
+                .await?;
+            datagrams_sent = datagrams_sent.saturating_add(1);
+            self.send_complete_agent_movement_on_circuit_to_target(circuit, &sim_ip, sim_port)
+                .await?;
+            datagrams_sent = datagrams_sent.saturating_add(1);
+        }
+        Ok(datagrams_sent)
     }
 
     pub async fn send_retrieve_instant_messages(
@@ -3936,11 +4156,36 @@ impl Connection {
         if self.region_handshake_reply_sent {
             return Ok(false);
         }
-        let Some(region_flags) = self.pending_region_handshake_reply_flags else {
-            return Ok(false);
-        };
-        self.send_region_handshake_reply(circuit, region_flags)
-            .await?;
+        if self.pending_region_handshake_reply_flags.is_none() {
+            if self.require_observed_region_handshake_for_reply {
+                return Ok(false);
+            }
+            let stage_allows_fallback = matches!(
+                self.first_simulator_handshake_state
+                    .as_ref()
+                    .map(|state| state.stage),
+                Some(FirstSimulatorHandshakeStage::WaitingForAgentMovementComplete)
+                    | Some(FirstSimulatorHandshakeStage::AgentMovementComplete)
+            );
+            let observed_agent_movement_complete = self
+                .first_simulator_handshake_receive_diagnostics
+                .iter()
+                .any(|diag| {
+                    diag.kind == FirstSimulatorInboundMessageKind::AgentMovementComplete
+                        && diag.decode_source
+                            == FirstSimulatorInboundDecodeSource::PacketMessageNumber
+                });
+            if !(stage_allows_fallback || observed_agent_movement_complete) {
+                return Ok(false);
+            }
+        }
+        let target = self.resolve_region_handshake_reply_target(circuit);
+        self.send_region_handshake_reply_to_target(
+            circuit,
+            &target,
+            viewer_region_handshake_reply_flags(),
+        )
+        .await?;
         self.region_handshake_reply_sent = true;
         Ok(true)
     }
@@ -4002,10 +4247,60 @@ impl Connection {
         Ok(flushed)
     }
 
+    async fn flush_pending_object_cache_miss_ids_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+    ) -> Result<usize, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if self.pending_object_cache_miss_ids.is_empty() {
+            return Ok(0);
+        }
+        let prerequisites = self
+            .first_simulator_handshake_prerequisites
+            .clone()
+            .ok_or(ConnectionError::MissingFirstSimulatorHandshakePrerequisites)?;
+        let mut flushed = 0usize;
+        while !self.pending_object_cache_miss_ids.is_empty() {
+            let batch_len = self
+                .pending_object_cache_miss_ids
+                .len()
+                .min(LLUDP_MAX_REQUEST_MULTIPLE_OBJECTS_BLOCKS);
+            let ids = self.pending_object_cache_miss_ids[..batch_len].to_vec();
+            let payload = encode_request_multiple_objects_payload(
+                &prerequisites,
+                self.next_first_simulator_packet_id(),
+                &ids,
+            )?;
+            self.send_first_simulator_handshake_datagram_with_socket(
+                FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                &circuit.target,
+                &payload,
+                &circuit.socket,
+            )
+            .await?;
+            self.pending_object_cache_miss_ids.drain(0..batch_len);
+            flushed = flushed.saturating_add(batch_len);
+        }
+        Ok(flushed)
+    }
+
     pub async fn send_agent_update_on_circuit(
         &mut self,
         circuit: &SocialCircuit,
         reliable: bool,
+    ) -> Result<(), ConnectionError> {
+        self.send_agent_update_custom_on_circuit(circuit, reliable, STARTUP_AGENT_UPDATE_FAR, 0)
+            .await
+    }
+
+    pub async fn send_agent_update_custom_on_circuit(
+        &mut self,
+        circuit: &SocialCircuit,
+        reliable: bool,
+        far: f32,
+        control_flags: u32,
     ) -> Result<(), ConnectionError> {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
@@ -4021,8 +4316,8 @@ impl Connection {
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
-            STARTUP_AGENT_UPDATE_FAR,
-            0,
+            far,
+            control_flags,
             0,
             reliable,
         )?;
@@ -4035,9 +4330,14 @@ impl Connection {
         .await
     }
 
-    async fn send_region_handshake_reply(
+    pub fn current_agent_update_camera_center(&self) -> [f32; 3] {
+        self.agent_update_camera_center()
+    }
+
+    async fn send_region_handshake_reply_to_target(
         &mut self,
         circuit: &SocialCircuit,
+        target: &FirstSimulatorTarget,
         region_flags: u32,
     ) -> Result<(), ConnectionError> {
         let prerequisites = self
@@ -4051,11 +4351,73 @@ impl Connection {
         )?;
         self.send_first_simulator_handshake_datagram_with_socket(
             FirstSimulatorHandshakeAction::CompleteAgentMovement,
-            &circuit.target,
+            target,
             &payload,
             &circuit.socket,
         )
         .await
+    }
+
+    fn note_first_simulator_sender_endpoint(
+        &mut self,
+        sender: &SocketAddr,
+        classification: &FirstSimulatorInboundClassification,
+    ) {
+        if matches!(
+            classification.scope,
+            FirstSimulatorInboundTrafficScope::BootstrapRelevant
+                | FirstSimulatorInboundTrafficScope::RegionTransitionControl
+        ) {
+            self.last_bootstrap_sender_endpoint = Some(*sender);
+        }
+        if classification.kind == FirstSimulatorInboundMessageKind::RegionHandshake {
+            self.last_region_handshake_sender_endpoint = Some(*sender);
+        }
+    }
+
+    fn resolve_region_handshake_reply_target(
+        &self,
+        circuit: &SocialCircuit,
+    ) -> FirstSimulatorTarget {
+        if let Some(sender) = self.last_region_handshake_sender_endpoint {
+            return self.with_target_endpoint(circuit, sender);
+        }
+        if let Some(sender) = self.last_bootstrap_sender_endpoint {
+            return self.with_target_endpoint(circuit, sender);
+        }
+        circuit.target.clone()
+    }
+
+    fn handshake_reprime_endpoints(&self, circuit: &SocialCircuit) -> Vec<(String, u16)> {
+        let mut endpoints = Vec::new();
+        let mut seen = BTreeSet::<String>::new();
+        let mut push_endpoint = |ip: String, port: u16| {
+            let key = format!("{ip}:{port}");
+            if seen.insert(key) {
+                endpoints.push((ip, port));
+            }
+        };
+
+        if let Some(sender) = self.last_region_handshake_sender_endpoint {
+            push_endpoint(sender.ip().to_string(), sender.port());
+        }
+        if let Some(sender) = self.last_bootstrap_sender_endpoint {
+            push_endpoint(sender.ip().to_string(), sender.port());
+        }
+        push_endpoint(circuit.target.sim_ip.clone(), circuit.target.sim_port);
+
+        endpoints
+    }
+
+    fn with_target_endpoint(
+        &self,
+        circuit: &SocialCircuit,
+        sender: SocketAddr,
+    ) -> FirstSimulatorTarget {
+        let mut target = circuit.target.clone();
+        target.sim_ip = sender.ip().to_string();
+        target.sim_port = sender.port();
+        target
     }
 
     pub async fn send_direct_im(
@@ -4367,7 +4729,9 @@ impl Connection {
                 decode_first_simulator_packet_header(packet).map(|header| header.message_number),
                 Some(received_len),
             );
-            let _ = self.observe_first_simulator_inbound_payload(packet);
+            if let Ok(classification) = self.observe_first_simulator_inbound_payload(packet) {
+                self.note_first_simulator_sender_endpoint(&sender, &classification);
+            }
             if let Some(profile) = decode_legacy_avatar_properties_reply(packet, avatar_id) {
                 out.id = profile.id;
                 out.sl_about_text = profile.sl_about_text;
@@ -4480,7 +4844,9 @@ impl Connection {
         if self.state != ConnectionState::LoggedIn {
             return Err(ConnectionError::InvalidState(self.state));
         }
-        let _ = self.send_pending_region_handshake_reply(circuit).await?;
+        let _ = self
+            .flush_pending_object_cache_miss_ids_on_circuit(circuit)
+            .await?;
         let mut events = Vec::new();
         let mut buf = vec![0u8; 4096];
         let local_addr = socket_local_addr_text(&circuit.socket);
@@ -4505,8 +4871,14 @@ impl Connection {
                 decode_first_simulator_packet_header(payload).map(|header| header.message_number),
                 Some(received_len),
             );
-            let _ = self.observe_first_simulator_inbound_payload(payload);
+            if let Ok(classification) = self.observe_first_simulator_inbound_payload(payload) {
+                self.note_first_simulator_sender_endpoint(&sender, &classification);
+            }
             let _ = self.send_pending_region_handshake_reply(circuit).await?;
+            let _ = self.flush_pending_ack_ids_on_circuit(circuit).await?;
+            let _ = self
+                .flush_pending_object_cache_miss_ids_on_circuit(circuit)
+                .await?;
             events.extend(decode_social_events(payload));
         }
         Ok(events)
@@ -4516,35 +4888,8 @@ impl Connection {
         &self,
         simulator_features_url: &str,
     ) -> Result<SimulatorFeaturesInspection, ConnectionError> {
-        if self.state != ConnectionState::LoggedIn {
-            return Err(ConnectionError::InvalidState(self.state));
-        }
-
-        let client = reqwest::Client::builder()
-            .timeout(self.config.connect_timeout)
-            .build()?;
-
-        let response = client
-            .get(simulator_features_url)
-            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
-            .send()
-            .await?;
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_ascii_lowercase());
-        let bytes = response.bytes().await?;
-
-        if !status.is_success() {
-            return Err(ConnectionError::HttpStatus {
-                status,
-                body: String::from_utf8_lossy(&bytes).to_string(),
-            });
-        }
-
-        parse_simulator_features_response(&bytes, content_type.as_deref())
+        self.fetch_simulator_capability_shape_once(simulator_features_url)
+            .await
     }
 
     pub async fn fetch_map_layer_once(
@@ -4555,22 +4900,8 @@ impl Connection {
             return Err(ConnectionError::InvalidState(self.state));
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(self.config.connect_timeout)
-            .build()?;
-
-        let response = client
-            .get(map_layer_url)
-            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
-            .send()
-            .await?;
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_ascii_lowercase());
-        let bytes = response.bytes().await?;
+        let (status, content_type, bytes) =
+            self.fetch_simulator_capability_bytes(map_layer_url).await?;
 
         if !status.is_success() {
             if status == StatusCode::METHOD_NOT_ALLOWED {
@@ -4588,6 +4919,74 @@ impl Connection {
         parse_simulator_features_response(&bytes, content_type.as_deref())
     }
 
+    pub async fn fetch_interest_list_once(
+        &self,
+        interest_list_url: &str,
+    ) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+        self.fetch_simulator_capability_shape_once(interest_list_url)
+            .await
+    }
+
+    pub async fn fetch_untrusted_simulator_message_once(
+        &self,
+        untrusted_simulator_message_url: &str,
+    ) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+
+        let (get_probe, get_bytes) = self
+            .execute_capability_probe_once_with_body(&CapabilityProbeRequest {
+                method: String::from("GET"),
+                url_candidates: vec![untrusted_simulator_message_url.to_string()],
+                accept: Some(String::from(LLSD_XML_CONTENT_TYPE)),
+                ..Default::default()
+            })
+            .await?;
+        let get_status = StatusCode::from_u16(get_probe.status).map_err(|err| {
+            ConnectionError::CapabilityDecode(format!("invalid probe status code: {err}"))
+        })?;
+        if get_status.is_success() {
+            return Ok(parse_untrusted_probe_inspection_or_transport_fallback(
+                &get_bytes,
+                get_probe.content_type.as_deref(),
+                get_status,
+            ));
+        }
+        if get_status != StatusCode::METHOD_NOT_ALLOWED {
+            return Err(ConnectionError::HttpStatus {
+                status: get_status,
+                body: String::from_utf8_lossy(&get_bytes).to_string(),
+            });
+        }
+
+        let probe_body = self.build_untrusted_simulator_message_probe_llsd_body();
+        let (post_probe, post_bytes) = self
+            .execute_capability_probe_once_with_body(&CapabilityProbeRequest {
+                method: String::from("POST"),
+                url_candidates: vec![untrusted_simulator_message_url.to_string()],
+                accept: Some(String::from(LLSD_XML_CONTENT_TYPE)),
+                content_type: Some(String::from(LLSD_XML_CONTENT_TYPE)),
+                body: Some(probe_body.clone()),
+                ..Default::default()
+            })
+            .await?;
+        let post_status = StatusCode::from_u16(post_probe.status).map_err(|err| {
+            ConnectionError::CapabilityDecode(format!("invalid probe status code: {err}"))
+        })?;
+        if !post_status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status: post_status,
+                body: String::from_utf8_lossy(&post_bytes).to_string(),
+            });
+        }
+        Ok(parse_untrusted_probe_inspection_or_transport_fallback(
+            &post_bytes,
+            post_probe.content_type.as_deref(),
+            post_status,
+        ))
+    }
+
     pub async fn fetch_region_objects_once(
         &self,
         region_objects_url: &str,
@@ -4596,22 +4995,9 @@ impl Connection {
             return Err(ConnectionError::InvalidState(self.state));
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(self.config.connect_timeout)
-            .build()?;
-
-        let response = client
-            .get(region_objects_url)
-            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
-            .send()
+        let (status, content_type, bytes) = self
+            .fetch_simulator_capability_bytes(region_objects_url)
             .await?;
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_ascii_lowercase());
-        let bytes = response.bytes().await?;
 
         if !status.is_success() {
             return Err(ConnectionError::HttpStatus {
@@ -4621,6 +5007,161 @@ impl Connection {
         }
 
         parse_region_objects_response(&bytes, content_type.as_deref())
+    }
+
+    pub async fn probe_capability_transport_once(
+        &self,
+        capability_url: &str,
+    ) -> Result<CapabilityTransportProbe, ConnectionError> {
+        let request = CapabilityProbeRequest {
+            method: String::from("GET"),
+            url_candidates: vec![capability_url.to_string()],
+            accept: Some(String::from(LLSD_XML_CONTENT_TYPE)),
+            ..Default::default()
+        };
+        self.execute_capability_probe_once(&request).await
+    }
+
+    pub async fn execute_capability_probe_once(
+        &self,
+        request: &CapabilityProbeRequest,
+    ) -> Result<CapabilityTransportProbe, ConnectionError> {
+        let (probe, _) = self
+            .execute_capability_probe_once_with_body(request)
+            .await?;
+        Ok(probe)
+    }
+
+    async fn execute_capability_probe_once_with_body(
+        &self,
+        request: &CapabilityProbeRequest,
+    ) -> Result<(CapabilityTransportProbe, Vec<u8>), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        if request.url_candidates.is_empty() {
+            return Err(ConnectionError::MissingCapability(String::from(
+                "capability probe url candidates",
+            )));
+        }
+        let method = parse_probe_method(&request.method)?;
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+        let mut last_error: Option<ConnectionError> = None;
+        for url in &request.url_candidates {
+            let mut req = client.request(method.clone(), url);
+            if let Some(accept) = request.accept.as_deref() {
+                req = req.header(ACCEPT, accept);
+            }
+            if let Some(content_type) = request.content_type.as_deref() {
+                req = req.header(CONTENT_TYPE, content_type);
+            }
+            if let Some(range) = request.range.as_deref() {
+                req = req.header("Range", range);
+            }
+            if let Some(body) = request.body.as_ref() {
+                req = req.body(body.clone());
+            }
+            let response = match req.send().await {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error = Some(ConnectionError::Http(err));
+                    continue;
+                }
+            };
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.to_ascii_lowercase());
+            let bytes = response.bytes().await?.to_vec();
+            let decode = classify_probe_decode(content_type.as_deref(), &bytes);
+            let body_preview = bounded_probe_body_preview(&bytes);
+            let body_preview_hash = body_preview
+                .as_deref()
+                .map(|preview| stable_probe_hash_hex(preview.as_bytes()));
+            let probe = CapabilityTransportProbe {
+                status: status.as_u16(),
+                content_type,
+                body_bytes: bytes.len(),
+                selected_url: Some(url.clone()),
+                method: request.method.to_ascii_uppercase(),
+                decode,
+                body_preview_hash,
+                body_preview,
+                response_class: classify_probe_response_class(status),
+            };
+            return Ok((probe, bytes));
+        }
+        Err(last_error.unwrap_or_else(|| {
+            ConnectionError::CapabilityDecode(String::from("capability probe transport failed"))
+        }))
+    }
+
+    async fn fetch_simulator_capability_shape_once(
+        &self,
+        capability_url: &str,
+    ) -> Result<SimulatorFeaturesInspection, ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let (status, content_type, bytes) = self
+            .fetch_simulator_capability_bytes(capability_url)
+            .await?;
+        if !status.is_success() {
+            return Err(ConnectionError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&bytes).to_string(),
+            });
+        }
+        parse_simulator_features_response(&bytes, content_type.as_deref())
+    }
+
+    async fn fetch_simulator_capability_bytes(
+        &self,
+        capability_url: &str,
+    ) -> Result<(StatusCode, Option<String>, Vec<u8>), ConnectionError> {
+        if self.state != ConnectionState::LoggedIn {
+            return Err(ConnectionError::InvalidState(self.state));
+        }
+        let client = reqwest::Client::builder()
+            .timeout(self.config.connect_timeout)
+            .build()?;
+
+        let response = client
+            .get(capability_url)
+            .header(ACCEPT, LLSD_XML_CONTENT_TYPE)
+            .send()
+            .await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase());
+        let bytes = response.bytes().await?.to_vec();
+        Ok((status, content_type, bytes))
+    }
+
+    fn build_untrusted_simulator_message_probe_llsd_body(&self) -> String {
+        let (agent_id, session_id) = self
+            .first_simulator_handshake_prerequisites
+            .as_ref()
+            .map(|p| (p.agent_id.as_str(), p.session_id.as_str()))
+            .unwrap_or(("", ""));
+        format!(
+            "<llsd><map>\
+<key>message</key><string>AgentDataUpdateRequest</string>\
+<key>body</key><map>\
+<key>AgentData</key><array><map>\
+<key>AgentID</key><uuid>{agent_id}</uuid>\
+<key>SessionID</key><uuid>{session_id}</uuid>\
+</map></array>\
+</map>\
+</map></llsd>"
+        )
     }
 
     async fn http_transport_login(
@@ -4686,8 +5227,11 @@ impl Connection {
         self.object_feed_tick = 0;
         self.next_first_simulator_packet_id = 1;
         self.pending_first_simulator_ack_ids.clear();
+        self.pending_object_cache_miss_ids.clear();
         self.pending_region_handshake_reply_flags = None;
         self.region_handshake_reply_sent = false;
+        self.last_bootstrap_sender_endpoint = None;
+        self.last_region_handshake_sender_endpoint = None;
         self.continuity_summary = RegionContinuitySummary {
             phase: HandoffPhase::None,
             outcome: viewer_core::HandoffOutcome::Normal,
@@ -4942,65 +5486,15 @@ impl Connection {
                 decode_first_simulator_packet_header(payload).map(|header| header.message_number),
                 Some(received_len),
             );
-            let _ = self.observe_first_simulator_inbound_payload(payload);
+            if let Ok(classification) = self.observe_first_simulator_inbound_payload(payload) {
+                self.note_first_simulator_sender_endpoint(&sender, &classification);
+            }
             if let Some(chat) = decode_chat_from_simulator(payload) {
                 nearby.push(chat);
             }
         }
         Ok(nearby)
     }
-}
-
-pub async fn fetch_asset_bytes(url: &str, timeout: Duration) -> Result<Vec<u8>, ConnectionError> {
-    let urls = vec![url.to_string()];
-    fetch_bytes_from_candidate_urls(&urls, timeout, None).await
-}
-
-pub async fn fetch_texture_asset_bytes(
-    urls: &[String],
-    timeout: Duration,
-) -> Result<Vec<u8>, ConnectionError> {
-    if urls.is_empty() {
-        return Err(ConnectionError::MissingCapability(String::from(
-            "GetTexture/ViewerAsset",
-        )));
-    }
-    fetch_bytes_from_candidate_urls(urls, timeout, Some(TEXTURE_FETCH_ACCEPT_HEADER)).await
-}
-
-async fn fetch_bytes_from_candidate_urls(
-    urls: &[String],
-    timeout: Duration,
-    accept_header: Option<&str>,
-) -> Result<Vec<u8>, ConnectionError> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout.max(Duration::from_secs(1)))
-        .build()?;
-    let mut last_error: Option<ConnectionError> = None;
-    for url in urls {
-        let mut request = client.get(url);
-        if let Some(accept_header) = accept_header {
-            request = request.header(ACCEPT, accept_header);
-        }
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(err) => {
-                last_error = Some(ConnectionError::Http(err));
-                continue;
-            }
-        };
-        let status = response.status();
-        let bytes = response.bytes().await?;
-        if status.is_success() {
-            return Ok(bytes.to_vec());
-        }
-        last_error = Some(ConnectionError::HttpStatus {
-            status,
-            body: String::from_utf8_lossy(&bytes).to_string(),
-        });
-    }
-    Err(last_error
-        .unwrap_or_else(|| ConnectionError::CapabilityDecode(String::from("asset fetch failed"))))
 }
 
 pub async fn poll_event_queue_url_once(
@@ -5230,6 +5724,34 @@ fn encode_packet_ack_payload(packet_id: u32, ack_ids: &[u32]) -> Result<Vec<u8>,
     ))
 }
 
+fn encode_request_multiple_objects_payload(
+    prerequisites: &FirstSimulatorHandshakePrerequisites,
+    packet_id: u32,
+    local_ids: &[u32],
+) -> Result<Vec<u8>, ConnectionError> {
+    let block_count = u8::try_from(local_ids.len()).map_err(|_| {
+        ConnectionError::CapabilityDecode(String::from(
+            "too many RequestMultipleObjects blocks in one datagram",
+        ))
+    })?;
+    let agent_id = parse_uuid_bytes(&prerequisites.agent_id)?;
+    let session_id = parse_uuid_bytes(&prerequisites.session_id)?;
+    let mut body = Vec::with_capacity(16 + 16 + 1 + local_ids.len() * 5);
+    body.extend_from_slice(&agent_id);
+    body.extend_from_slice(&session_id);
+    body.push(block_count);
+    for local_id in local_ids {
+        body.push(LLUDP_CACHE_MISS_TYPE_TOTAL);
+        body.extend_from_slice(&local_id.to_le_bytes());
+    }
+    Ok(encode_lludp_medium_frequency_packet(
+        packet_id,
+        LLUDP_REQUEST_MULTIPLE_OBJECTS_MEDIUM_ID,
+        &body,
+        true,
+    ))
+}
+
 fn encode_avatar_properties_request_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
     packet_id: u32,
@@ -5411,6 +5933,10 @@ fn encode_region_handshake_reply_payload(
     ))
 }
 
+fn viewer_region_handshake_reply_flags() -> u32 {
+    REGION_HANDSHAKE_REPLY_FLAG_SUPPORTS_SELF_APPEARANCE
+}
+
 fn encode_agent_throttle_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
     packet_id: u32,
@@ -5505,6 +6031,7 @@ fn encode_agent_animation_payload(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_agent_update_payload(
     prerequisites: &FirstSimulatorHandshakePrerequisites,
     packet_id: u32,
@@ -5597,6 +6124,22 @@ fn encode_lludp_low_frequency_packet(packet_id: u32, message_id: u16, body: &[u8
     payload.push(LLUDP_MESSAGE_PREFIX);
     payload.push(LLUDP_MESSAGE_PREFIX);
     payload.extend_from_slice(&message_id.to_be_bytes());
+    payload.extend_from_slice(body);
+    payload
+}
+
+fn encode_lludp_medium_frequency_packet(
+    packet_id: u32,
+    message_id: u8,
+    body: &[u8],
+    reliable: bool,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(LLUDP_PACKET_ID_SIZE + 2 + body.len());
+    payload.push(if reliable { LLUDP_RELIABLE_FLAG } else { 0 });
+    payload.extend_from_slice(&packet_id.to_be_bytes());
+    payload.push(0);
+    payload.push(LLUDP_MESSAGE_PREFIX);
+    payload.push(message_id);
     payload.extend_from_slice(body);
     payload
 }
@@ -5808,6 +6351,15 @@ fn classify_first_simulator_inbound_from_packet(
                 packet_message_number: Some(header.message_number),
             })
         }
+        num if num == lludp_low_frequency_message_number(LLUDP_OBJECT_EXTRA_PARAMS_LOW_ID) => {
+            Some(FirstSimulatorInboundClassification {
+                kind: FirstSimulatorInboundMessageKind::ObjectExtraParams,
+                scope: FirstSimulatorInboundTrafficScope::LikelyBroaderTraffic,
+                signal,
+                decode_source: FirstSimulatorInboundDecodeSource::PacketMessageNumber,
+                packet_message_number: Some(header.message_number),
+            })
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID) => {
             Some(FirstSimulatorInboundClassification {
                 kind: FirstSimulatorInboundMessageKind::PacketAck,
@@ -6013,7 +6565,9 @@ fn first_simulator_action_label(action: FirstSimulatorHandshakeAction) -> &'stat
 
 fn first_simulator_message_label(message_number: u32) -> String {
     let name = match message_number {
-        num if num == u32::from(LLUDP_USE_CIRCUIT_CODE_LOW_ID) => "UseCircuitCode",
+        num if num == lludp_low_frequency_message_number(LLUDP_USE_CIRCUIT_CODE_LOW_ID) => {
+            "UseCircuitCode"
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID) => {
             "CompleteAgentMovement"
         }
@@ -6031,6 +6585,9 @@ fn first_simulator_message_label(message_number: u32) -> String {
             "TestMessage"
         }
         num if num == lludp_low_frequency_message_number(LLUDP_PACKET_ACK_LOW_ID) => "PacketAck",
+        num if num == lludp_low_frequency_message_number(LLUDP_OBJECT_EXTRA_PARAMS_LOW_ID) => {
+            "ObjectExtraParams"
+        }
         num if num == lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) => {
             "RegionHandshake"
         }
@@ -6082,6 +6639,11 @@ fn first_simulator_message_label(message_number: u32) -> String {
         }
         num if num == lludp_medium_frequency_message_number(LLUDP_VIEWER_EFFECT_MEDIUM_ID) => {
             "ViewerEffect"
+        }
+        num if num
+            == lludp_medium_frequency_message_number(LLUDP_REQUEST_MULTIPLE_OBJECTS_MEDIUM_ID) =>
+        {
+            "RequestMultipleObjects"
         }
         num if num
             == lludp_medium_frequency_message_number(LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID) =>
@@ -6153,1011 +6715,6 @@ pub fn summarize_seed_capability_inventory(
             classification: classify_capability_url(url),
         })
         .collect()
-}
-
-fn decode_coarse_location_update(payload: &[u8]) -> Option<DecodedCoarseLocationUpdate> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number
-        != lludp_medium_frequency_message_number(LLUDP_COARSE_LOCATION_UPDATE_MEDIUM_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let location_count = *body.first()?;
-    let needed = 1usize.saturating_add(usize::from(location_count).saturating_mul(3));
-    if body.len() < needed {
-        return None;
-    }
-    let count = usize::from(location_count);
-    // Message-template shape:
-    // [Location variable count:u8][count * (x:u8,y:u8,z:u8)][Index You:i16,Prey:i16][AgentData variable count:u8][count * AgentID:uuid]
-    // We decode location entries first (always), then index/agent blocks when present.
-    let mut avatars = Vec::with_capacity(count);
-    let mut first_location = None;
-    let mut second_location = None;
-    let mut third_location = None;
-    for idx in 0..count {
-        let base = 1 + idx * 3;
-        let xyz = [body[base], body[base + 1], body[base + 2]];
-        if idx == 0 {
-            first_location = Some(xyz);
-        } else if idx == 1 {
-            second_location = Some(xyz);
-        } else if idx == 2 {
-            third_location = Some(xyz);
-        }
-        avatars.push(DecodedCoarseAvatar {
-            agent_id: None,
-            xyz,
-        });
-    }
-    let mut self_index: Option<u16> = None;
-    let mut offset = 1usize.saturating_add(count.saturating_mul(3));
-    if body.len() >= offset + 4 {
-        let you = i16::from_le_bytes(body.get(offset..offset + 2)?.try_into().ok()?);
-        let _prey = i16::from_le_bytes(body.get(offset + 2..offset + 4)?.try_into().ok()?);
-        if you >= 0 {
-            let you_idx = you as usize;
-            if you_idx < count {
-                self_index = Some(you as u16);
-            }
-        }
-        offset += 4;
-    }
-    if body.len() > offset {
-        let agent_count = usize::from(*body.get(offset)?);
-        offset += 1;
-        let max_assign = agent_count.min(count);
-        if body.len() >= offset + max_assign * 16 {
-            for idx in 0..max_assign {
-                let raw: [u8; 16] = body
-                    .get(offset..offset + 16)
-                    .and_then(|s| s.try_into().ok())?;
-                offset += 16;
-                let id = format_uuid_bytes(raw);
-                if !is_null_uuid(&id)
-                    && let Some(entry) = avatars.get_mut(idx)
-                {
-                    entry.agent_id = Some(id);
-                }
-            }
-        }
-    }
-    Some(DecodedCoarseLocationUpdate {
-        location_count,
-        first_location,
-        second_location,
-        third_location,
-        avatars,
-        self_index,
-    })
-}
-
-fn decode_health_message(payload: &[u8]) -> Option<DecodedHealthMessage> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_HEALTH_MESSAGE_LOW_ID) {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let health_bytes: [u8; 4] = body.get(0..4)?.try_into().ok()?;
-    let health = f32::from_le_bytes(health_bytes);
-    if !health.is_finite() {
-        return None;
-    }
-    Some(DecodedHealthMessage { health })
-}
-
-fn decode_zerocoded_body(body: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(body.len().min(4096));
-    let mut i = 0usize;
-    while i < body.len() {
-        let b = body[i];
-        i += 1;
-        if b != 0 {
-            out.push(b);
-            continue;
-        }
-        let zeros = *body.get(i)? as usize;
-        i += 1;
-        if out.len().saturating_add(zeros) > MAX_ZEROCODED_BODY_BYTES {
-            return None;
-        }
-        out.extend(std::iter::repeat_n(0u8, zeros));
-    }
-    Some(out)
-}
-
-fn quantize_vector3_centi(vec: [f32; 3]) -> Option<[u16; 3]> {
-    let mut out = [0u16; 3];
-    for (idx, v) in vec.iter().copied().enumerate() {
-        if !v.is_finite() {
-            return None;
-        }
-        let scaled = (v * 100.0).round();
-        if scaled < 0.0 {
-            return None;
-        }
-        out[idx] = u16::try_from(scaled as i64).ok()?;
-    }
-    Some(out)
-}
-
-fn read_u8(body: &[u8], offset: &mut usize) -> Option<u8> {
-    let v = *body.get(*offset)?;
-    *offset += 1;
-    Some(v)
-}
-
-fn read_u16_le(body: &[u8], offset: &mut usize) -> Option<u16> {
-    let bytes: [u8; 2] = body.get(*offset..(*offset + 2))?.try_into().ok()?;
-    *offset += 2;
-    Some(u16::from_le_bytes(bytes))
-}
-
-fn read_u32_le(body: &[u8], offset: &mut usize) -> Option<u32> {
-    let bytes: [u8; 4] = body.get(*offset..(*offset + 4))?.try_into().ok()?;
-    *offset += 4;
-    Some(u32::from_le_bytes(bytes))
-}
-
-fn read_u64_le(body: &[u8], offset: &mut usize) -> Option<u64> {
-    let bytes: [u8; 8] = body.get(*offset..(*offset + 8))?.try_into().ok()?;
-    *offset += 8;
-    Some(u64::from_le_bytes(bytes))
-}
-
-fn read_f32_le(body: &[u8], offset: &mut usize) -> Option<f32> {
-    let bytes: [u8; 4] = body.get(*offset..(*offset + 4))?.try_into().ok()?;
-    *offset += 4;
-    Some(f32::from_le_bytes(bytes))
-}
-
-fn read_vector3f(body: &[u8], offset: &mut usize) -> Option<[f32; 3]> {
-    let x = read_f32_le(body, offset)?;
-    let y = read_f32_le(body, offset)?;
-    let z = read_f32_le(body, offset)?;
-    Some([x, y, z])
-}
-
-fn decode_object_update_ids_and_scales(payload: &[u8]) -> Option<Vec<(u32, Option<[u16; 3]>)>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_HIGH_ID) {
-        return None;
-    }
-
-    let body_raw = header.body(payload)?;
-    let body = decode_zerocoded_body(body_raw)?;
-    let mut offset = 0usize;
-
-    // RegionData single
-    let _region_handle = read_u64_le(&body, &mut offset)?;
-    let _time_dilation = read_u16_le(&body, &mut offset)?;
-
-    // ObjectData variable
-    let count = read_u8(&body, &mut offset)? as usize;
-    let mut out = Vec::with_capacity(count.min(32));
-    for _ in 0..count {
-        let local_id = read_u32_le(&body, &mut offset)?;
-        offset += 1; // State
-        offset += 16; // FullID
-        offset += 4; // CRC
-        offset += 1; // PCode
-        offset += 1; // Material
-        offset += 1; // ClickAction
-        let scale = read_vector3f(&body, &mut offset)?;
-        let scale_centi = quantize_vector3_centi(scale);
-
-        // ObjectData (packed), variable 1 (u8 length)
-        let object_data_len = read_u8(&body, &mut offset)? as usize;
-        offset = offset.checked_add(object_data_len)?;
-
-        // ParentID, UpdateFlags
-        offset += 4;
-        offset += 4;
-
-        // Path/Profile params (fixed sizes)
-        offset += 1; // PathCurve
-        offset += 1; // ProfileCurve
-        offset += 2; // PathBegin
-        offset += 2; // PathEnd
-        offset += 1; // PathScaleX
-        offset += 1; // PathScaleY
-        offset += 1; // PathShearX
-        offset += 1; // PathShearY
-        offset += 1; // PathTwist
-        offset += 1; // PathTwistBegin
-        offset += 1; // PathRadiusOffset
-        offset += 1; // PathTaperX
-        offset += 1; // PathTaperY
-        offset += 1; // PathRevolutions
-        offset += 1; // PathSkew
-        offset += 2; // ProfileBegin
-        offset += 2; // ProfileEnd
-        offset += 2; // ProfileHollow
-
-        // TextureEntry (var 2), TextureAnim (var 1), NameValue (var 2), Data (var 2), Text (var 1)
-        let texture_entry_len = read_u16_le(&body, &mut offset)? as usize;
-        offset = offset.checked_add(texture_entry_len)?;
-        let texture_anim_len = read_u8(&body, &mut offset)? as usize;
-        offset = offset.checked_add(texture_anim_len)?;
-        let name_value_len = read_u16_le(&body, &mut offset)? as usize;
-        offset = offset.checked_add(name_value_len)?;
-        let data_len = read_u16_le(&body, &mut offset)? as usize;
-        offset = offset.checked_add(data_len)?;
-        let text_len = read_u8(&body, &mut offset)? as usize;
-        offset = offset.checked_add(text_len)?;
-
-        // TextColor fixed 4, MediaURL var 1, PSBlock var 1, ExtraParams var 1
-        offset += 4;
-        let media_url_len = read_u8(&body, &mut offset)? as usize;
-        offset = offset.checked_add(media_url_len)?;
-        let ps_len = read_u8(&body, &mut offset)? as usize;
-        offset = offset.checked_add(ps_len)?;
-        let extra_params_len = read_u8(&body, &mut offset)? as usize;
-        offset = offset.checked_add(extra_params_len)?;
-
-        // Sound UUID, OwnerID UUID, Gain f32, Flags u8, Radius f32
-        offset += 16;
-        offset += 16;
-        offset += 4;
-        offset += 1;
-        offset += 4;
-
-        // JointType u8, JointPivot vec3, JointAxisOrAnchor vec3
-        offset += 1;
-        offset += 12;
-        offset += 12;
-
-        out.push((local_id, scale_centi));
-    }
-    Some(out)
-}
-
-fn decode_object_update_cached_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID) {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let mut offset = 0usize;
-    offset += 8; // RegionHandle
-    offset += 2; // TimeDilation
-    let count = read_u8(body, &mut offset)? as usize;
-    let mut out = Vec::with_capacity(count.min(32));
-    for _ in 0..count {
-        let id = read_u32_le(body, &mut offset)?;
-        offset += 4; // CRC
-        offset += 4; // UpdateFlags
-        out.push(id);
-    }
-    Some(out)
-}
-
-fn decode_object_update_compressed_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != u32::from(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID) {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let mut offset = 0usize;
-    offset += 8; // RegionHandle
-    offset += 2; // TimeDilation
-    let count = read_u8(body, &mut offset)? as usize;
-    let mut out = Vec::with_capacity(count.min(32));
-    for _ in 0..count {
-        offset += 4; // UpdateFlags
-        let data_len = read_u16_le(body, &mut offset)? as usize;
-        let data = body.get(offset..offset + data_len)?;
-        offset += data_len;
-        if data.len() >= 20 {
-            let local_id_bytes: [u8; 4] = data.get(16..20)?.try_into().ok()?;
-            out.push(u32::from_le_bytes(local_id_bytes));
-        }
-    }
-    Some(out)
-}
-
-fn decode_improved_terse_object_update_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != u32::from(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID) {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let mut offset = 0usize;
-    offset += 8; // RegionHandle
-    offset += 2; // TimeDilation
-    let count = read_u8(body, &mut offset)? as usize;
-    let mut out = Vec::with_capacity(count.min(32));
-    for _ in 0..count {
-        let data_len = read_u8(body, &mut offset)? as usize;
-        let data = body.get(offset..offset + data_len)?;
-        offset += data_len;
-        if data.len() >= 4 {
-            let local_id_bytes: [u8; 4] = data.get(0..4)?.try_into().ok()?;
-            out.push(u32::from_le_bytes(local_id_bytes));
-        }
-        let tex_len = read_u16_le(body, &mut offset)? as usize;
-        offset = offset.checked_add(tex_len)?;
-    }
-    Some(out)
-}
-
-fn decode_kill_object_local_ids(payload: &[u8]) -> Option<Vec<u32>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != u32::from(LLUDP_KILL_OBJECT_HIGH_ID) {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let mut offset = 0usize;
-    let count = read_u8(body, &mut offset)? as usize;
-    let mut out = Vec::with_capacity(count.min(32));
-    for _ in 0..count {
-        out.push(read_u32_le(body, &mut offset)?);
-    }
-    Some(out)
-}
-
-fn decode_region_handshake(payload: &[u8]) -> Option<DecodedRegionHandshake> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_LOW_ID) {
-        return None;
-    }
-    let body = decode_maybe_zerocoded_body(payload, header)?;
-    let mut offset = 0usize;
-    let region_flags = read_u32_le(&body, &mut offset)?;
-    offset += 1; // SimAccess
-    let sim_name = read_var_string_u8(&body, &mut offset)?;
-    Some(DecodedRegionHandshake {
-        region_flags,
-        sim_name: if sim_name.trim().is_empty() {
-            None
-        } else {
-            Some(sim_name)
-        },
-    })
-}
-
-fn decode_maybe_zerocoded_body(
-    payload: &[u8],
-    header: FirstSimulatorPacketHeader,
-) -> Option<Vec<u8>> {
-    let body = header.body(payload)?;
-    if payload.first().copied().unwrap_or_default() & LLUDP_ZERO_CODE_FLAG != 0 {
-        decode_zerocoded_body(body)
-    } else {
-        Some(body.to_vec())
-    }
-}
-
-fn read_vector3f_i32(body: &[u8], offset: &mut usize) -> Option<[i32; 3]> {
-    if body.len() < *offset + 12 {
-        return None;
-    }
-    let x = f32::from_le_bytes(body.get(*offset..(*offset + 4))?.try_into().ok()?);
-    *offset += 4;
-    let y = f32::from_le_bytes(body.get(*offset..(*offset + 4))?.try_into().ok()?);
-    *offset += 4;
-    let z = f32::from_le_bytes(body.get(*offset..(*offset + 4))?.try_into().ok()?);
-    *offset += 4;
-    Some([x.round() as i32, y.round() as i32, z.round() as i32])
-}
-
-fn decode_agent_movement_complete(payload: &[u8]) -> Option<DecodedAgentMovementComplete> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number
-        != lludp_low_frequency_message_number(LLUDP_AGENT_MOVEMENT_COMPLETE_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    offset += 16; // SessionID
-    let position = read_vector3f_i32(body, &mut offset)?;
-    offset += 12; // LookAt
-    let region_handle = u64::from_le_bytes(body.get(offset..offset + 8)?.try_into().ok()?);
-    Some(DecodedAgentMovementComplete {
-        position,
-        region_handle,
-    })
-}
-
-fn decode_chat_from_simulator(payload: &[u8]) -> Option<NearbyChatMessage> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-
-    let mut offset = 0usize;
-    let from_name_len = usize::from(*body.get(offset)?);
-    offset += 1;
-    let from_name = std::str::from_utf8(body.get(offset..offset + from_name_len)?)
-        .ok()?
-        .trim_end_matches('\0')
-        .to_string();
-    offset += from_name_len;
-
-    offset += 16; // SourceID
-    offset += 16; // OwnerID
-    offset += 1; // SourceType
-    offset += 1; // ChatType
-    offset += 1; // Audible
-    offset += 12; // Position
-
-    let msg_len_bytes: [u8; 2] = body.get(offset..offset + 2)?.try_into().ok()?;
-    let msg_len = usize::from(u16::from_le_bytes(msg_len_bytes));
-    offset += 2;
-    let text = std::str::from_utf8(body.get(offset..offset + msg_len)?)
-        .ok()?
-        .trim_end_matches('\0')
-        .to_string();
-
-    Some(NearbyChatMessage {
-        sender: if from_name.is_empty() {
-            String::from("unknown")
-        } else {
-            from_name
-        },
-        text,
-        source: String::from("ChatFromSimulator"),
-    })
-}
-
-fn decode_social_events(payload: &[u8]) -> Vec<SocialEvent> {
-    let Some(header) = decode_first_simulator_packet_header(payload) else {
-        return Vec::new();
-    };
-    let body = match header.body(payload) {
-        Some(v) => v,
-        None => return Vec::new(),
-    };
-    if header.message_number == lludp_low_frequency_message_number(LLUDP_ONLINE_NOTIFICATION_LOW_ID)
-    {
-        return decode_online_offline_notification_events(body, true);
-    }
-    if header.message_number
-        == lludp_low_frequency_message_number(LLUDP_OFFLINE_NOTIFICATION_LOW_ID)
-    {
-        return decode_online_offline_notification_events(body, false);
-    }
-    if header.message_number == lludp_low_frequency_message_number(LLUDP_CHANGE_USER_RIGHTS_LOW_ID)
-    {
-        return decode_change_user_rights_events(body);
-    }
-    if header.message_number
-        == lludp_low_frequency_message_number(LLUDP_IMPROVED_INSTANT_MESSAGE_LOW_ID)
-    {
-        return decode_improved_instant_message_event(body)
-            .into_iter()
-            .collect();
-    }
-    Vec::new()
-}
-
-fn decode_online_offline_notification_events(body: &[u8], online: bool) -> Vec<SocialEvent> {
-    let mut out = Vec::new();
-    let count = match body.first() {
-        Some(v) => usize::from(*v),
-        None => return out,
-    };
-    let mut offset = 1usize;
-    for _ in 0..count {
-        let raw: [u8; 16] = match body
-            .get(offset..offset + 16)
-            .and_then(|s| s.try_into().ok())
-        {
-            Some(v) => v,
-            None => break,
-        };
-        offset += 16;
-        let agent_id = format_uuid_bytes(raw);
-        if online {
-            out.push(SocialEvent::FriendOnline { agent_id });
-        } else {
-            out.push(SocialEvent::FriendOffline { agent_id });
-        }
-    }
-    out
-}
-
-fn decode_change_user_rights_events(body: &[u8]) -> Vec<SocialEvent> {
-    let mut out = Vec::new();
-    if body.len() < 17 {
-        return out;
-    }
-    let agent_id = match body.get(0..16).and_then(|s| s.try_into().ok()) {
-        Some(raw) => format_uuid_bytes(raw),
-        None => return out,
-    };
-    let rights_count = usize::from(body[16]);
-    let mut offset = 17usize;
-    for _ in 0..rights_count {
-        let related_id = match body
-            .get(offset..offset + 16)
-            .and_then(|s| s.try_into().ok())
-        {
-            Some(raw) => format_uuid_bytes(raw),
-            None => break,
-        };
-        offset += 16;
-        let rights = match body
-            .get(offset..offset + 4)
-            .and_then(|s| s.try_into().ok())
-            .map(i32::from_le_bytes)
-        {
-            Some(v) => v,
-            None => break,
-        };
-        offset += 4;
-        out.push(SocialEvent::FriendRights {
-            agent_id: agent_id.clone(),
-            related_id,
-            rights,
-        });
-    }
-    out
-}
-
-fn decode_improved_instant_message_event(body: &[u8]) -> Option<SocialEvent> {
-    if body.len() < 32 + 1 + 16 + 4 + 16 + 12 + 1 + 1 + 16 + 4 + 1 + 2 + 2 {
-        return None;
-    }
-    let mut offset = 0usize;
-    let from_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    offset += 16; // agent session id
-    offset += 1; // from_group
-    let to_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    offset += 4; // parent estate
-    offset += 16; // region id
-    offset += 12; // position
-    offset += 1; // offline
-    let dialog = *body.get(offset)?;
-    offset += 1;
-    let session_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let timestamp = u32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
-    offset += 4;
-    let from_name_len = usize::from(*body.get(offset)?);
-    offset += 1;
-    let from_name = std::str::from_utf8(body.get(offset..offset + from_name_len)?)
-        .ok()?
-        .trim_end_matches('\0')
-        .to_string();
-    offset += from_name_len;
-    let message_len = usize::from(u16::from_le_bytes(
-        body.get(offset..offset + 2)?.try_into().ok()?,
-    ));
-    offset += 2;
-    let message = std::str::from_utf8(body.get(offset..offset + message_len)?)
-        .ok()?
-        .trim_end_matches('\0')
-        .to_string();
-    Some(SocialEvent::DirectIm(DirectImPayload {
-        from_id,
-        to_id,
-        session_id,
-        from_name,
-        message,
-        dialog,
-        timestamp,
-    }))
-}
-
-fn decode_legacy_avatar_properties_reply(
-    payload: &[u8],
-    expected_avatar_id: &str,
-) -> Option<AgentProfileData> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number
-        != lludp_low_frequency_message_number(LLUDP_AVATAR_PROPERTIES_REPLY_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 68 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let avatar_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !avatar_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    let sl_image_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let fl_image_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let partner_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-
-    let sl_about_text = read_var_string_u16(body, &mut offset)?;
-    let fl_about_text = read_var_string_u8(body, &mut offset)?;
-    let born_on = read_var_string_u8(body, &mut offset)?;
-    let profile_url = read_var_string_u8(body, &mut offset)?;
-    let _caption = read_var_string_u8(body, &mut offset)?;
-    let flags = i32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
-
-    Some(AgentProfileData {
-        id: avatar_id,
-        profile_url: if profile_url.is_empty() {
-            None
-        } else {
-            Some(profile_url)
-        },
-        sl_about_text,
-        fl_about_text,
-        notes: String::new(),
-        sl_image_id: if is_null_uuid(&sl_image_id) {
-            None
-        } else {
-            Some(sl_image_id)
-        },
-        fl_image_id: if is_null_uuid(&fl_image_id) {
-            None
-        } else {
-            Some(fl_image_id)
-        },
-        partner_id: if is_null_uuid(&partner_id) {
-            None
-        } else {
-            Some(partner_id)
-        },
-        member_since: if born_on.is_empty() {
-            None
-        } else {
-            Some(born_on)
-        },
-        online: Some((flags & (1 << 4)) != 0),
-        allow_publish: Some((flags & (1 << 0)) != 0),
-        identified: Some((flags & (1 << 2)) != 0),
-        transacted: Some((flags & (1 << 3)) != 0),
-        display_name: None,
-        username: None,
-        groups: Vec::new(),
-        picks: Vec::new(),
-        pick_details: Vec::new(),
-        classifieds: Vec::new(),
-        classified_details: Vec::new(),
-    })
-}
-
-fn decode_legacy_avatar_groups_reply(
-    payload: &[u8],
-    expected_avatar_id: &str,
-) -> Option<Vec<AgentProfileGroup>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_AVATAR_GROUPS_REPLY_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 33 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let avatar_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !avatar_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    let group_count = usize::from(*body.get(offset)?);
-    offset += 1;
-    let mut groups = Vec::new();
-    for _ in 0..group_count {
-        if body.len() < offset + 8 + 1 + 16 + 16 {
-            break;
-        }
-        offset += 8; // GroupPowers
-        offset += 1; // AcceptNotices
-        let _group_title = read_var_string_u8(body, &mut offset)?;
-        let group_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-        offset += 16;
-        let group_name = read_var_string_u8(body, &mut offset)?;
-        let insignia_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-        offset += 16;
-        groups.push(AgentProfileGroup {
-            id: group_id,
-            name: group_name,
-            image_id: if is_null_uuid(&insignia_id) {
-                None
-            } else {
-                Some(insignia_id)
-            },
-        });
-    }
-    Some(groups)
-}
-
-fn decode_legacy_avatar_notes_reply(payload: &[u8], expected_avatar_id: &str) -> Option<String> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_AVATAR_NOTES_REPLY_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 32 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !target_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    read_var_string_u16(body, &mut offset)
-}
-
-fn decode_legacy_avatar_picks_reply(
-    payload: &[u8],
-    expected_avatar_id: &str,
-) -> Option<Vec<AgentProfilePick>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_AVATAR_PICKS_REPLY_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 33 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !target_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    let mut picks = Vec::new();
-    while offset < body.len() {
-        if body.len() < offset + 16 {
-            break;
-        }
-        let pick_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-        offset += 16;
-        let pick_name = read_var_string_u8(body, &mut offset)?;
-        picks.push(AgentProfilePick {
-            id: pick_id,
-            name: pick_name,
-        });
-    }
-    Some(picks)
-}
-
-fn decode_legacy_pick_info_reply(
-    payload: &[u8],
-    expected_avatar_id: &str,
-) -> Option<AgentProfilePickDetails> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number != lludp_low_frequency_message_number(LLUDP_PICK_INFO_REPLY_LOW_ID) {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 16 + 16 + 1 + 16 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let pick_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let creator_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !creator_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    offset += 1; // top_pick
-    let parcel_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let name = read_var_string_u8(body, &mut offset)?;
-    let desc = read_var_string_u16(body, &mut offset)?;
-    let snapshot_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let _user = read_var_string_u8(body, &mut offset)?;
-    let _original_name = read_var_string_u8(body, &mut offset)?;
-    let sim_name = read_var_string_u8(body, &mut offset)?;
-    let global_position = read_vector3d_i32(body, &mut offset)?;
-    Some(AgentProfilePickDetails {
-        id: pick_id,
-        name: if name.is_empty() { None } else { Some(name) },
-        description: if desc.is_empty() { None } else { Some(desc) },
-        snapshot_id: if is_null_uuid(&snapshot_id) {
-            None
-        } else {
-            Some(snapshot_id)
-        },
-        parcel_id: if is_null_uuid(&parcel_id) {
-            None
-        } else {
-            Some(parcel_id)
-        },
-        sim_name: if sim_name.is_empty() {
-            None
-        } else {
-            Some(sim_name)
-        },
-        parcel_name: None,
-        global_position: Some(global_position),
-    })
-}
-
-fn decode_legacy_avatar_classifieds_reply(
-    payload: &[u8],
-    expected_avatar_id: &str,
-) -> Option<Vec<AgentProfileClassified>> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number
-        != lludp_low_frequency_message_number(LLUDP_AVATAR_CLASSIFIED_REPLY_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 32 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let target_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !target_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    let mut classifieds = Vec::new();
-    while offset < body.len() {
-        if body.len() < offset + 16 {
-            break;
-        }
-        let classified_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-        offset += 16;
-        let name = read_var_string_u8(body, &mut offset)?;
-        classifieds.push(AgentProfileClassified {
-            id: classified_id,
-            name,
-        });
-    }
-    Some(classifieds)
-}
-
-fn decode_legacy_classified_info_reply(
-    payload: &[u8],
-    expected_avatar_id: &str,
-) -> Option<AgentProfileClassifiedDetails> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number
-        != lludp_low_frequency_message_number(LLUDP_CLASSIFIED_INFO_REPLY_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    if body.len() < 16 + 16 + 4 + 4 + 4 {
-        return None;
-    }
-    let mut offset = 0usize;
-    offset += 16; // AgentID
-    let classified_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let creator_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    if !expected_avatar_id.is_empty() && !creator_id.eq_ignore_ascii_case(expected_avatar_id) {
-        return None;
-    }
-    offset += 16;
-    offset += 4; // creation date
-    offset += 4; // expiration date
-    let category = u32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
-    offset += 4;
-    let name = read_var_string_u8(body, &mut offset)?;
-    let desc = read_var_string_u16(body, &mut offset)?;
-    let parcel_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    offset += 4; // parent estate
-    let snapshot_id = format_uuid_bytes(body.get(offset..offset + 16)?.try_into().ok()?);
-    offset += 16;
-    let sim_name = read_var_string_u8(body, &mut offset)?;
-    let global_position = read_vector3d_i32(body, &mut offset)?;
-    let parcel_name = read_var_string_u8(body, &mut offset)?;
-    let flags = *body.get(offset)?;
-    offset += 1;
-    let price_for_listing = i32::from_le_bytes(body.get(offset..offset + 4)?.try_into().ok()?);
-
-    Some(AgentProfileClassifiedDetails {
-        id: classified_id,
-        name: if name.is_empty() { None } else { Some(name) },
-        description: if desc.is_empty() { None } else { Some(desc) },
-        snapshot_id: if is_null_uuid(&snapshot_id) {
-            None
-        } else {
-            Some(snapshot_id)
-        },
-        parcel_id: if is_null_uuid(&parcel_id) {
-            None
-        } else {
-            Some(parcel_id)
-        },
-        sim_name: if sim_name.is_empty() {
-            None
-        } else {
-            Some(sim_name)
-        },
-        parcel_name: if parcel_name.is_empty() {
-            None
-        } else {
-            Some(parcel_name)
-        },
-        global_position: Some(global_position),
-        category: Some(category),
-        flags: Some(flags),
-        price_for_listing: Some(price_for_listing),
-    })
-}
-
-fn read_var_string_u8(body: &[u8], offset: &mut usize) -> Option<String> {
-    let len = usize::from(*body.get(*offset)?);
-    *offset += 1;
-    let text = std::str::from_utf8(body.get(*offset..(*offset + len))?).ok()?;
-    *offset += len;
-    Some(text.trim_end_matches('\0').to_string())
-}
-
-fn read_var_string_u16(body: &[u8], offset: &mut usize) -> Option<String> {
-    let len = usize::from(u16::from_le_bytes(
-        body.get(*offset..(*offset + 2))?.try_into().ok()?,
-    ));
-    *offset += 2;
-    let text = std::str::from_utf8(body.get(*offset..(*offset + len))?).ok()?;
-    *offset += len;
-    Some(text.trim_end_matches('\0').to_string())
-}
-
-fn read_vector3d_i32(body: &[u8], offset: &mut usize) -> Option<[i32; 3]> {
-    if body.len() < *offset + 24 {
-        return None;
-    }
-    let x = f64::from_le_bytes(body.get(*offset..(*offset + 8))?.try_into().ok()?);
-    *offset += 8;
-    let y = f64::from_le_bytes(body.get(*offset..(*offset + 8))?.try_into().ok()?);
-    *offset += 8;
-    let z = f64::from_le_bytes(body.get(*offset..(*offset + 8))?.try_into().ok()?);
-    *offset += 8;
-    Some([x.round() as i32, y.round() as i32, z.round() as i32])
-}
-
-fn is_null_uuid(uuid: &str) -> bool {
-    uuid == "00000000-0000-0000-0000-000000000000"
-}
-
-fn decode_simulator_viewer_time_message(
-    payload: &[u8],
-) -> Option<DecodedSimulatorViewerTimeMessage> {
-    let header = decode_first_simulator_packet_header(payload)?;
-    if header.message_number
-        != lludp_low_frequency_message_number(LLUDP_SIMULATOR_VIEWER_TIME_LOW_ID)
-    {
-        return None;
-    }
-    let body = header.body(payload)?;
-    let body_len = u16::try_from(body.len()).ok()?;
-    let signature = body.get(0..4).and_then(|bytes| {
-        let raw: [u8; 4] = bytes.try_into().ok()?;
-        Some(u32::from_le_bytes(raw))
-    });
-    Some(DecodedSimulatorViewerTimeMessage {
-        body_len,
-        signature,
-    })
-}
-
-fn health_to_basis_points(value: f32) -> u16 {
-    let normalized = if value > 1.0 {
-        (value / 100.0).clamp(0.0, 1.0)
-    } else {
-        value.clamp(0.0, 1.0)
-    };
-    (normalized * 10_000.0).round() as u16
 }
 
 fn classify_first_simulator_inbound_message(payload: &[u8]) -> FirstSimulatorInboundClassification {
@@ -7504,10 +7061,9 @@ fn parse_event_queue_from_llsd_xml(body: &[u8]) -> Result<EventQueueInspection, 
         .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
     let doc =
         Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
-    let map = doc
-        .descendants()
-        .find(|node| node.has_tag_name("map"))
-        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+    let Some(map) = find_llsd_root_map(&doc)? else {
+        return Ok(EventQueueInspection::default());
+    };
 
     let mut keys = Vec::new();
     let mut inspection = EventQueueInspection::default();
@@ -7541,10 +7097,12 @@ fn parse_event_queue_poll_from_llsd_xml(
         .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
     let doc =
         Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
-    let map = doc
-        .descendants()
-        .find(|node| node.has_tag_name("map"))
-        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+    let Some(map) = find_llsd_root_map(&doc)? else {
+        return Ok(EventQueuePollResult {
+            id: None,
+            events: Vec::new(),
+        });
+    };
 
     let mut id = None;
     let mut events = Vec::new();
@@ -7673,10 +7231,9 @@ fn parse_resolved_avatar_names_from_llsd_xml(
         .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
     let doc =
         Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
-    let map = doc
-        .descendants()
-        .find(|node| node.has_tag_name("map"))
-        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+    let Some(map) = find_llsd_root_map(&doc)? else {
+        return Ok(Vec::new());
+    };
 
     let children: Vec<Node<'_, '_>> = map.children().filter(|node| node.is_element()).collect();
     let mut idx = 0usize;
@@ -7913,6 +7470,22 @@ fn extract_event_queue_simulator_target(
         return None;
     }
 
+    let ip = event_queue_field_value(event, &["SimulatorInfo.IP", "SimulatorInfo[0].IP", "ip"])
+        .map(str::to_string);
+    let port = event_queue_field_value(
+        event,
+        &["SimulatorInfo.Port", "SimulatorInfo[0].Port", "port"],
+    )
+    .map(str::to_string);
+    let sim_ip_and_port =
+        event_queue_field_value(event, &["sim-ip-and-port", "sim_ip_and_port", "sim"])
+            .map(str::to_string);
+    let (endpoint_ip, endpoint_port, endpoint_source) = extract_event_queue_target_endpoint(
+        ip.as_deref(),
+        port.as_deref(),
+        sim_ip_and_port.as_deref(),
+    );
+
     Some(EventQueueSimulatorTarget {
         message: event.message.clone(),
         handle: event_queue_field_value(
@@ -7925,21 +7498,68 @@ fn extract_event_queue_simulator_target(
             ],
         )
         .map(str::to_string),
-        ip: event_queue_field_value(event, &["SimulatorInfo.IP", "SimulatorInfo[0].IP", "ip"])
-            .map(str::to_string),
-        port: event_queue_field_value(
-            event,
-            &["SimulatorInfo.Port", "SimulatorInfo[0].Port", "port"],
-        )
-        .map(str::to_string),
-        sim_ip_and_port: event_queue_field_value(
-            event,
-            &["sim-ip-and-port", "sim_ip_and_port", "sim"],
-        )
-        .map(str::to_string),
+        ip,
+        port,
+        sim_ip_and_port,
         seed_capability: event_queue_field_value(event, &["seed-capability", "seed_capability"])
             .map(str::to_string),
+        endpoint_ip,
+        endpoint_port,
+        endpoint_source,
     })
+}
+
+fn extract_event_queue_target_endpoint(
+    raw_ip: Option<&str>,
+    raw_port: Option<&str>,
+    raw_sim_ip_and_port: Option<&str>,
+) -> (Option<String>, Option<u16>, Option<String>) {
+    if let Some(sim_ip_and_port) = raw_sim_ip_and_port
+        && let Ok(parsed) = sim_ip_and_port.parse::<SocketAddr>()
+    {
+        return (
+            Some(parsed.ip().to_string()),
+            Some(parsed.port()),
+            Some(String::from("sim_ip_and_port")),
+        );
+    }
+
+    let parsed_port = raw_port.and_then(|value| value.parse::<u16>().ok());
+    #[allow(clippy::collapsible_if)]
+    if let (Some(raw_ip), Some(port)) = (raw_ip, parsed_port) {
+        if let Some(ip) = parse_event_queue_endpoint_ip(raw_ip) {
+            let source = if raw_ip.parse::<std::net::IpAddr>().is_ok() {
+                "ip_port_fields"
+            } else {
+                "simulatorinfo_binary_ip_port"
+            };
+            return (Some(ip), Some(port), Some(source.to_string()));
+        }
+    }
+
+    (None, parsed_port, None)
+}
+
+fn parse_event_queue_endpoint_ip(raw_ip: &str) -> Option<String> {
+    let raw_ip = raw_ip.trim();
+    if raw_ip.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = raw_ip.parse::<std::net::IpAddr>() {
+        return Some(parsed.to_string());
+    }
+    let decoded = BASE64_STANDARD.decode(raw_ip).ok()?;
+    match decoded.len() {
+        4 => {
+            let bytes: [u8; 4] = decoded.try_into().ok()?;
+            Some(std::net::Ipv4Addr::from(bytes).to_string())
+        }
+        16 => {
+            let bytes: [u8; 16] = decoded.try_into().ok()?;
+            Some(std::net::Ipv6Addr::from(bytes).to_string())
+        }
+        _ => None,
+    }
 }
 
 fn extract_event_queue_parcel_summary(
@@ -7975,6 +7595,9 @@ fn llsd_node_scalar_to_string(node: Node<'_, '_>) -> Option<String> {
     }
     if node.has_tag_name("false") {
         return Some(String::from("false"));
+    }
+    if node.has_tag_name("binary") {
+        return Some(node.text().unwrap_or_default().trim().to_string());
     }
     None
 }
@@ -8413,6 +8036,114 @@ fn parse_bool_text(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_probe_method(method: &str) -> Result<Method, ConnectionError> {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "GET" => Ok(Method::GET),
+        "POST" => Ok(Method::POST),
+        "DEL" | "DELETE" => Ok(Method::DELETE),
+        other => Err(ConnectionError::InvalidResponse(format!(
+            "unsupported capability probe method: {other}"
+        ))),
+    }
+}
+
+fn classify_probe_response_class(status: StatusCode) -> String {
+    if status.is_success() {
+        return String::from("success");
+    }
+    if status.is_redirection() {
+        return String::from("redirect");
+    }
+    if status.is_client_error() {
+        return String::from("client_error");
+    }
+    if status.is_server_error() {
+        return String::from("server_error");
+    }
+    String::from("other")
+}
+
+fn classify_probe_decode(content_type: Option<&str>, body: &[u8]) -> String {
+    if body.is_empty() {
+        return String::from("unparsed");
+    }
+    if let Some(ct) = content_type {
+        if ct.contains("json")
+            && serde_json::from_slice::<Value>(body)
+                .ok()
+                .and_then(|v| v.as_object().map(|_| ()))
+                .is_some()
+        {
+            return String::from("json_obj");
+        }
+        if ct.contains("xml") || ct.contains("llsd") {
+            let text = String::from_utf8_lossy(body);
+            if let Ok(doc) = Document::parse(&text) {
+                if doc.descendants().any(|node| node.has_tag_name("map")) {
+                    return String::from("llsd_map");
+                }
+                if text.to_ascii_lowercase().contains("<error") {
+                    return String::from("xml_error");
+                }
+            } else {
+                return String::from("xml_error");
+            }
+        }
+        if ct.contains("text/plain") || ct.contains("text/html") {
+            return String::from("plain_text");
+        }
+    }
+    if serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.as_object().map(|_| ()))
+        .is_some()
+    {
+        return String::from("json_obj");
+    }
+    let text = String::from_utf8_lossy(body);
+    if text.trim_start().starts_with('<')
+        && let Ok(doc) = Document::parse(&text)
+    {
+        if doc.descendants().any(|node| node.has_tag_name("map")) {
+            return String::from("llsd_map");
+        }
+        if text.to_ascii_lowercase().contains("<error") {
+            return String::from("xml_error");
+        }
+    }
+    if text
+        .chars()
+        .take(128)
+        .all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+    {
+        return String::from("plain_text");
+    }
+    String::from("unparsed")
+}
+
+fn bounded_probe_body_preview(body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(body);
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    Some(compact.chars().take(96).collect())
+}
+
+fn stable_probe_hash_hex(bytes: &[u8]) -> String {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
 fn parse_simulator_features_response(
     body: &[u8],
     content_type: Option<&str>,
@@ -8427,6 +8158,40 @@ fn parse_simulator_features_response(
     }
 
     parse_simulator_features_from_llsd_xml(body)
+}
+
+fn parse_untrusted_probe_inspection_or_transport_fallback(
+    body: &[u8],
+    content_type: Option<&str>,
+    status: StatusCode,
+) -> SimulatorFeaturesInspection {
+    match parse_simulator_features_response(body, content_type) {
+        Ok(inspection) => inspection,
+        Err(_) => {
+            let mut inspection = SimulatorFeaturesInspection::default();
+            inspection
+                .top_level_keys
+                .push(String::from("probe_transport_status"));
+            inspection
+                .top_level_keys
+                .push(String::from("probe_body_bytes"));
+            inspection.scalar_values.insert(
+                String::from("probe_transport_status"),
+                status.as_u16().to_string(),
+            );
+            inspection
+                .scalar_values
+                .insert(String::from("probe_body_bytes"), body.len().to_string());
+            inspection.scalar_values.insert(
+                String::from("probe_content_type"),
+                content_type.unwrap_or("unknown").to_string(),
+            );
+            inspection
+                .scalar_values
+                .insert(String::from("probe_decode"), String::from("unparsed_body"));
+            inspection
+        }
+    }
 }
 
 fn parse_simulator_features_from_json(
@@ -8483,10 +8248,9 @@ fn parse_simulator_features_from_llsd_xml(
         .map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
     let doc =
         Document::parse(text).map_err(|err| ConnectionError::CapabilityDecode(err.to_string()))?;
-    let map = doc
-        .descendants()
-        .find(|node| node.has_tag_name("map"))
-        .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd map")))?;
+    let Some(map) = find_llsd_root_map(&doc)? else {
+        return Ok(SimulatorFeaturesInspection::default());
+    };
 
     let mut inspection = SimulatorFeaturesInspection::default();
     let children: Vec<Node<'_, '_>> = map.children().filter(|node| node.is_element()).collect();
@@ -8698,6 +8462,29 @@ fn parse_region_objects_from_llsd_xml(
     Ok(inspection)
 }
 
+fn find_llsd_root_map<'a>(doc: &'a Document<'a>) -> Result<Option<Node<'a, 'a>>, ConnectionError> {
+    let root = if let Some(llsd) = doc.descendants().find(|node| node.has_tag_name("llsd")) {
+        llsd.children().find(|node| node.is_element())
+    } else {
+        Some(doc.root_element())
+    }
+    .ok_or_else(|| ConnectionError::CapabilityDecode(String::from("missing llsd value")))?;
+
+    if root.has_tag_name("map") {
+        return Ok(Some(root));
+    }
+    if root.has_tag_name("array") {
+        return Ok(root.children().find(|node| node.has_tag_name("map")));
+    }
+    if root.has_tag_name("undef") {
+        return Ok(None);
+    }
+    Err(ConnectionError::CapabilityDecode(format!(
+        "unsupported llsd root value: {}",
+        root.tag_name().name()
+    )))
+}
+
 fn populate_region_objects_typed_samples(inspection: &mut RegionObjectsInspection) {
     inspection.typed_object_samples = inspection
         .child_map_pathfinding_summaries
@@ -8800,6 +8587,7 @@ fn record_region_objects_child_json_map(
                     scalar_entries.push(format!("{child_key}={text}"));
                 }
                 scalar_fields.insert(child_key.clone(), text.clone());
+                maybe_record_region_objects_mesh_candidate(inspection, child_key, text);
             }
             Value::Number(num) => {
                 let value = num.to_string();
@@ -8869,6 +8657,9 @@ fn record_region_objects_child_llsd_map(
                     scalar_entries.push(format!("{child_key}={value}"));
                 }
                 scalar_fields.insert(child_key.to_string(), value);
+                if let Some(value) = scalar_fields.get(child_key) {
+                    maybe_record_region_objects_mesh_candidate(inspection, child_key, value);
+                }
             }
         }
         idx += 2;
@@ -8885,6 +8676,48 @@ fn record_region_objects_child_llsd_map(
         &scalar_fields,
         inspect_region_objects_llsd_position(value_node),
     );
+}
+
+const MAX_REGION_OBJECTS_MESH_CANDIDATES: usize = 12;
+
+fn maybe_record_region_objects_mesh_candidate(
+    inspection: &mut RegionObjectsInspection,
+    field_key: &str,
+    field_value: &str,
+) {
+    if inspection.candidate_mesh_asset_ids.len() >= MAX_REGION_OBJECTS_MESH_CANDIDATES {
+        return;
+    }
+
+    let key = field_key.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return;
+    }
+    let looks_mesh_related = key.contains("mesh")
+        || key.contains("sculpt")
+        || key.contains("model")
+        || key.contains("shape")
+        || key.contains("asset");
+    if !looks_mesh_related {
+        return;
+    }
+
+    let value = field_value.trim().to_ascii_lowercase();
+    if !looks_like_uuid(&value) {
+        return;
+    }
+
+    if !inspection.candidate_mesh_asset_ids.contains(&value) {
+        inspection.candidate_mesh_asset_ids.push(value);
+    }
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    let compact = value.replace('-', "");
+    if compact.len() != 32 {
+        return false;
+    }
+    compact.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn record_region_objects_child_semantics<'a, I>(
@@ -9574,6 +9407,17 @@ mod tests {
         payload
     }
 
+    fn decode_test_hex(raw: &str) -> Vec<u8> {
+        assert_eq!(raw.len() % 2, 0, "hex payload should be even length");
+        raw.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("hex should be utf8");
+                u8::from_str_radix(pair, 16).expect("hex byte should parse")
+            })
+            .collect()
+    }
+
     fn make_chat_from_simulator_packet(sender: &str, message: &str) -> Vec<u8> {
         let mut payload = make_low_frequency_packet(LLUDP_CHAT_FROM_SIMULATOR_LOW_ID);
         let mut sender_bytes = sender.as_bytes().to_vec();
@@ -9644,6 +9488,134 @@ mod tests {
             .expect("texture fetch should fall back");
 
         assert_eq!(bytes, b"fallback");
+    }
+
+    #[tokio::test]
+    async fn fetch_mesh_asset_bytes_requires_candidate_urls() {
+        let err = fetch_mesh_asset_bytes(&[], Duration::from_secs(1))
+            .await
+            .expect_err("mesh fetch should fail without urls");
+        assert!(matches!(
+            err,
+            ConnectionError::MissingCapability(ref cap) if cap == "ViewerAsset(mesh_id)"
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_mesh_asset_bytes_reuses_set_cookie_between_probe_and_followup() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cap/"))
+            .and(query_param("mesh_id", "test-mesh"))
+            .and(header("accept", MESH_FETCH_ACCEPT_HEADER))
+            .and(header("range", MESH_FETCH_RANGE_HEADER_FIRESTORM))
+            .and(header("user-agent", FIRESTORM_USER_AGENT_HEADER))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("set-cookie", "MeshAuth=abc123; Path=/")
+                    .set_body_bytes(b"partial".to_vec()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cap/"))
+            .and(query_param("mesh_id", "test-mesh"))
+            .and(header("cookie", "MeshAuth=abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"mesh-full".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let urls = viewer_grid::AssetCapabilityPolicy::mesh_url_candidates(
+            &BTreeMap::from([(String::from("ViewerAsset"), format!("{}/cap", server.uri()))]),
+            "test-mesh",
+        );
+        let bytes = fetch_mesh_asset_bytes(&urls, Duration::from_secs(1))
+            .await
+            .expect("mesh fetch should reuse mesh auth cookie");
+
+        assert_eq!(bytes, b"mesh-full");
+    }
+
+    #[tokio::test]
+    async fn fetch_mesh_asset_bytes_falls_through_to_later_mesh_caps_after_403() {
+        let viewer_asset = MockServer::start().await;
+        let get_mesh2 = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/viewerasset/"))
+            .and(query_param("mesh_id", "test-mesh"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("content-type", "application/xml")
+                    .set_body_string("<Error><Code>AccessDenied</Code></Error>"),
+            )
+            .mount(&viewer_asset)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/getmesh2/"))
+            .and(query_param("mesh_id", "test-mesh"))
+            .and(header("range", MESH_FETCH_RANGE_HEADER_FIRESTORM))
+            .respond_with(ResponseTemplate::new(206).set_body_bytes(b"partial".to_vec()))
+            .expect(1)
+            .mount(&get_mesh2)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/getmesh2/"))
+            .and(query_param("mesh_id", "test-mesh"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"mesh-full".to_vec()))
+            .expect(1)
+            .mount(&get_mesh2)
+            .await;
+
+        let urls = viewer_grid::AssetCapabilityPolicy::mesh_url_candidates(
+            &BTreeMap::from([
+                (
+                    String::from("ViewerAsset"),
+                    format!("{}/viewerasset", viewer_asset.uri()),
+                ),
+                (
+                    String::from("GetMesh2"),
+                    format!("{}/getmesh2", get_mesh2.uri()),
+                ),
+            ]),
+            "test-mesh",
+        );
+        let (result, attempts) =
+            fetch_mesh_asset_bytes_with_attempts(&urls, Duration::from_secs(1)).await;
+        let bytes = result.expect("mesh fetch should fall through to GetMesh2");
+
+        assert_eq!(bytes, b"mesh-full");
+        assert!(attempts.iter().any(|attempt| {
+            attempt.status == Some(403)
+                && attempt
+                    .response_body
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("AccessDenied")
+        }));
+        assert!(
+            attempts
+                .iter()
+                .any(|attempt| attempt.status == Some(206) && attempt.url.contains("/getmesh2/"))
+        );
+        assert!(
+            attempts
+                .iter()
+                .any(|attempt| attempt.status == Some(200) && attempt.url.contains("/getmesh2/"))
+        );
+    }
+
+    #[test]
+    fn merge_cookie_header_prefers_new_values_and_preserves_existing() {
+        let merged = merge_cookie_header(
+            Some("MeshAuth=abc123; Session=old"),
+            Some("Session=new; Scope=mesh"),
+        )
+        .expect("merged cookie header should exist");
+        assert_eq!(merged, "MeshAuth=abc123; Scope=mesh; Session=new");
     }
 
     #[tokio::test]
@@ -10478,6 +10450,9 @@ mod tests {
             .and(body_string_contains("<string>InterestList</string>"))
             .and(body_string_contains("<string>RegionObjects</string>"))
             .and(body_string_contains("<string>AgentProfile</string>"))
+            .and(body_string_contains("<string>GetMesh2</string>"))
+            .and(body_string_contains("<string>ReadOfflineMsgs</string>"))
+            .and(body_string_contains("<string>ViewerStats</string>"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "application/llsd+xml")
@@ -10874,6 +10849,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_untrusted_simulator_message_once_falls_back_to_post_after_405() {
+        let server = MockServer::start().await;
+        let untrusted_ok = r#"<llsd><map>
+            <key>ok</key><boolean>true</boolean>
+            <key>status</key><string>accepted</string>
+        </map></llsd>"#;
+
+        Mock::given(method("GET"))
+            .and(path("/untrusted"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(ResponseTemplate::new(405).set_body_string("Method Not Allowed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/untrusted"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .and(header("content-type", LLSD_XML_CONTENT_TYPE))
+            .and(body_string_contains(
+                "<key>message</key><string>AgentDataUpdateRequest</string>",
+            ))
+            .and(body_string_contains("<key>AgentID</key><uuid>"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/llsd+xml")
+                    .set_body_string(untrusted_ok),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+        connection.first_simulator_handshake_prerequisites =
+            Some(FirstSimulatorHandshakePrerequisites {
+                agent_id: String::from("11111111-1111-1111-1111-111111111111"),
+                session_id: String::from("22222222-2222-2222-2222-222222222222"),
+                circuit_code: 7,
+                target: FirstSimulatorTarget {
+                    sim_ip: String::from("127.0.0.1"),
+                    sim_port: 13001,
+                    region_x: 0,
+                    region_y: 0,
+                    seed_capability: format!("{}/seed", server.uri()),
+                },
+            });
+
+        let inspection = connection
+            .fetch_untrusted_simulator_message_once(&format!("{}/untrusted", server.uri()))
+            .await
+            .expect("untrusted probe should succeed via POST fallback");
+        assert_eq!(
+            inspection.scalar_values.get("status").map(String::as_str),
+            Some("accepted")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_untrusted_simulator_message_once_treats_non_llsd_success_as_transport_ok() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/untrusted-plain"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(ResponseTemplate::new(405).set_body_string("Method Not Allowed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/untrusted-plain"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .and(header("content-type", LLSD_XML_CONTENT_TYPE))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string("ok"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let inspection = connection
+            .fetch_untrusted_simulator_message_once(&format!("{}/untrusted-plain", server.uri()))
+            .await
+            .expect("untrusted probe should surface transport-ok inspection");
+        assert_eq!(
+            inspection
+                .scalar_values
+                .get("probe_transport_status")
+                .map(String::as_str),
+            Some("200")
+        );
+        assert_eq!(
+            inspection
+                .scalar_values
+                .get("probe_decode")
+                .map(String::as_str),
+            Some("unparsed_body")
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_capability_transport_once_reports_status_content_type_and_body_size() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/transport-probe"))
+            .and(header("accept", LLSD_XML_CONTENT_TYPE))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string("missing"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let probe = connection
+            .probe_capability_transport_once(&format!("{}/transport-probe", server.uri()))
+            .await
+            .expect("transport probe should return bounded metadata");
+        assert_eq!(probe.status, 404);
+        assert_eq!(probe.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(probe.body_bytes, 7);
+        assert_eq!(probe.method, "GET");
+        assert_eq!(probe.decode, "plain_text");
+        assert_eq!(probe.response_class, "client_error");
+        assert!(probe.body_preview.is_some());
+        assert!(probe.selected_url.is_some());
+    }
+
+    #[tokio::test]
+    async fn execute_capability_probe_once_supports_post_with_body_and_classifies_json() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/shape-probe"))
+            .and(header("content-type", "application/llsd+xml"))
+            .and(body_string_contains("<key>mode</key>"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"ok": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection.state = ConnectionState::LoggedIn;
+
+        let probe = connection
+            .execute_capability_probe_once(&CapabilityProbeRequest {
+                method: String::from("POST"),
+                url_candidates: vec![format!("{}/shape-probe", server.uri())],
+                content_type: Some(String::from("application/llsd+xml")),
+                body: Some(String::from(
+                    "<llsd><map><key>mode</key><string>default</string></map></llsd>",
+                )),
+                ..Default::default()
+            })
+            .await
+            .expect("probe should succeed");
+
+        assert_eq!(probe.status, 200);
+        assert_eq!(probe.method, "POST");
+        assert_eq!(probe.decode, "json_obj");
+        assert_eq!(probe.response_class, "success");
+    }
+
+    #[tokio::test]
     async fn fetch_region_objects_once_reports_array_shape_and_first_item_keys() {
         let server = MockServer::start().await;
 
@@ -11090,6 +11263,32 @@ mod tests {
         assert_eq!(typed.walkability_coefficients, Some([100, 90, 80, 70]));
         assert_eq!(typed.landimpact, Some(2));
         assert_eq!(inspection.tuple_description_analysis, None);
+    }
+
+    #[test]
+    fn region_objects_mesh_candidate_extraction_filters_by_key_hint_and_uuid() {
+        let mut inspection = RegionObjectsInspection::default();
+        maybe_record_region_objects_mesh_candidate(
+            &mut inspection,
+            "mesh_id",
+            "947d4505-eb76-2ef5-c049-e7882881d689",
+        );
+        maybe_record_region_objects_mesh_candidate(
+            &mut inspection,
+            "owner",
+            "11111111-1111-1111-1111-111111111111",
+        );
+        maybe_record_region_objects_mesh_candidate(&mut inspection, "mesh_asset", "not-a-uuid");
+        maybe_record_region_objects_mesh_candidate(
+            &mut inspection,
+            "sculpt_id",
+            "947D4505-EB76-2EF5-C049-E7882881D689",
+        );
+
+        assert_eq!(
+            inspection.candidate_mesh_asset_ids,
+            vec![String::from("947d4505-eb76-2ef5-c049-e7882881d689")]
+        );
     }
 
     #[test]
@@ -12091,6 +12290,14 @@ mod tests {
     }
 
     #[test]
+    fn first_simulator_message_label_maps_use_circuit_code() {
+        let label = first_simulator_message_label(lludp_low_frequency_message_number(
+            LLUDP_USE_CIRCUIT_CODE_LOW_ID,
+        ));
+        assert_eq!(label, "UseCircuitCode(0xffff0003)");
+    }
+
+    #[test]
     fn decode_first_simulator_packet_header_strips_ack_trailer_from_body() {
         let payload = append_lludp_ack_trailer(
             &mark_packet_reliable(make_low_frequency_packet_with_body(138, &[1, 2, 3, 4])),
@@ -12178,16 +12385,25 @@ mod tests {
         body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
         body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
         body.push(2); // object count
-        for id in [42u32, 99u32] {
-            body.push(4); // Data len (var 1)
+        for (id, pos_x) in [(42u32, 12.0f32), (99u32, 18.0f32)] {
+            body.push(18); // Data len (var 1): local + state/attach + avatar flag + position
             body.extend_from_slice(&id.to_le_bytes());
+            body.push(0); // state/attachment
+            body.push(0); // avatar flag
+            body.extend_from_slice(&pos_x.to_le_bytes()); // position x
+            body.extend_from_slice(&8.0f32.to_le_bytes()); // position y
+            body.extend_from_slice(&2.0f32.to_le_bytes()); // position z
             body.extend_from_slice(&0u16.to_le_bytes()); // TextureEntry len (var 2)
         }
         let payload =
             make_high_frequency_packet_with_body(LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID, &body);
-        let ids =
-            decode_improved_terse_object_update_local_ids(&payload).expect("terse should decode");
-        assert_eq!(ids, vec![42, 99]);
+        let objects =
+            decode_improved_terse_object_update_objects(&payload).expect("terse should decode");
+        assert_eq!(
+            objects.iter().map(|obj| obj.local_id).collect::<Vec<_>>(),
+            vec![42, 99]
+        );
+        assert_eq!(objects[0].position_centi, Some([1200, 800, 200]));
     }
 
     #[test]
@@ -12209,6 +12425,28 @@ mod tests {
     }
 
     #[test]
+    fn observe_object_update_cached_queues_cache_miss_ids() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(1); // object count
+        body.extend_from_slice(&0x11223344u32.to_le_bytes()); // ID
+        body.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID, &body);
+
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("cached update should be observed");
+
+        assert_eq!(connection.pending_object_cache_miss_ids, vec![0x11223344]);
+        assert!(connection.object_feed_objects.contains_key(&0x11223344));
+    }
+
+    #[test]
     fn decode_object_update_compressed_extracts_local_ids() {
         let mut body = Vec::new();
         body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
@@ -12218,14 +12456,137 @@ mod tests {
         let mut data = vec![0u8; 16]; // UUID
         data.extend_from_slice(&55u32.to_le_bytes()); // LocalID
         data.push(9); // PCode
+        data.push(0); // State
+        data.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        data.push(0); // Material
+        data.push(0); // ClickAction
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale X = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Y = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Z = 1.0
+        data.extend_from_slice(&[0, 0, 0, 65]); // Pos X = 8.0
+        data.extend_from_slice(&[0, 0, 128, 65]); // Pos Y = 16.0
+        data.extend_from_slice(&[0, 0, 192, 64]); // Pos Z = 6.0
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot X
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot Y
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot Z
+        data.extend_from_slice(&0u32.to_le_bytes()); // CompressedFlags
+        data.extend_from_slice(&[0u8; 16]); // OwnerID
+        data.push(0); // ExtraParams count
         let data_len = u16::try_from(data.len()).expect("len fits u16");
         body.extend_from_slice(&data_len.to_le_bytes());
         body.extend_from_slice(&data);
         let payload =
             make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID, &body);
-        let ids = decode_object_update_compressed_local_ids(&payload)
+        let objects = decode_object_update_compressed_objects(&payload)
             .expect("compressed update should decode");
-        assert_eq!(ids, vec![55]);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].local_id, 55);
+        assert_eq!(objects[0].position_centi, Some([800, 1600, 600]));
+        assert_eq!(objects[0].mesh_id_bytes, None);
+    }
+
+    #[test]
+    fn decode_object_update_compressed_extracts_mesh_id_from_extra_params() {
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(1); // object count
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        let mut data = vec![0u8; 16]; // UUID
+        data.extend_from_slice(&55u32.to_le_bytes()); // LocalID
+        data.push(9); // PCode
+        data.push(0); // State
+        data.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        data.push(0); // Material
+        data.push(0); // ClickAction
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale X = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Y = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Z = 1.0
+        data.extend_from_slice(&[0, 0, 0, 65]); // Pos X = 8.0
+        data.extend_from_slice(&[0, 0, 128, 65]); // Pos Y = 16.0
+        data.extend_from_slice(&[0, 0, 192, 64]); // Pos Z = 6.0
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot X
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot Y
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot Z
+        data.extend_from_slice(&0u32.to_le_bytes()); // CompressedFlags
+        data.extend_from_slice(&[0u8; 16]); // OwnerID
+
+        // ExtraParams: one sculpt entry carrying a mesh sculpt UUID.
+        data.push(1); // count
+        data.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes());
+        data.extend_from_slice(&17u32.to_le_bytes());
+        data.extend_from_slice(&mesh_id);
+        data.push(SCULPT_TYPE_MESH);
+
+        let data_len = u16::try_from(data.len()).expect("len fits u16");
+        body.extend_from_slice(&data_len.to_le_bytes());
+        body.extend_from_slice(&data);
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID, &body);
+        let objects = decode_object_update_compressed_objects(&payload)
+            .expect("compressed update should decode");
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].mesh_id_bytes, Some(mesh_id));
+    }
+
+    #[test]
+    fn decode_object_extra_params_extracts_mesh_id_updates() {
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let local_id = 77u32;
+
+        let mut payload = make_low_frequency_packet(LLUDP_OBJECT_EXTRA_PARAMS_LOW_ID);
+        payload.extend_from_slice(&[0u8; 16]); // AgentID
+        payload.extend_from_slice(&[0u8; 16]); // SessionID
+        payload.push(1); // ObjectData count
+        payload.extend_from_slice(&local_id.to_le_bytes());
+        payload.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes());
+        payload.push(1); // ParamInUse
+        payload.extend_from_slice(&17u32.to_le_bytes()); // ParamSize
+        payload.push(17); // ParamData len
+        payload.extend_from_slice(&mesh_id);
+        payload.push(SCULPT_TYPE_MESH);
+
+        let decoded = decode_object_extra_params_mesh_updates(&payload)
+            .expect("object extra params should decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].local_id, local_id);
+        assert_eq!(decoded[0].mesh_id_bytes, Some(mesh_id));
+    }
+
+    #[test]
+    fn observe_object_extra_params_updates_object_feed_mesh_id() {
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let local_id = 77u32;
+
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+
+        let mut payload = make_low_frequency_packet(LLUDP_OBJECT_EXTRA_PARAMS_LOW_ID);
+        payload.extend_from_slice(&[0u8; 16]); // AgentID
+        payload.extend_from_slice(&[0u8; 16]); // SessionID
+        payload.push(1); // ObjectData count
+        payload.extend_from_slice(&local_id.to_le_bytes());
+        payload.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes());
+        payload.push(1); // ParamInUse
+        payload.extend_from_slice(&17u32.to_le_bytes()); // ParamSize
+        payload.push(17); // ParamData len
+        payload.extend_from_slice(&mesh_id);
+        payload.push(SCULPT_TYPE_MESH);
+
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("object extra params should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.object_feed_total_objects, 1);
+        assert_eq!(summary.object_feed_update_messages, 1);
+        assert_eq!(summary.object_feed_objects[0].local_id, local_id);
+        assert_eq!(
+            summary.object_feed_objects[0].mesh_id.as_deref(),
+            Some("10930d3b-1821-c584-a0c7-28a34999800d")
+        );
     }
 
     #[test]
@@ -12238,6 +12599,398 @@ mod tests {
         let decoded = decode_object_update_ids_and_scales(&payload)
             .expect("object update should decode with empty list");
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn object_feed_export_includes_object_id_when_known() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let object_id_bytes =
+            parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        connection.object_feed_upsert(
+            77,
+            Some([100, 120, 80]),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some(object_id_bytes),
+        );
+        connection.refresh_object_feed_summary_export();
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.object_feed_total_objects, 1);
+        assert_eq!(summary.object_feed_objects.len(), 1);
+        assert_eq!(
+            summary.object_feed_objects[0].object_id.as_deref(),
+            Some("10930d3b-1821-c584-a0c7-28a34999800d")
+        );
+    }
+
+    #[test]
+    fn decode_mesh_asset_id_from_extra_params_extracts_sculpt_mesh_uuid() {
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let mut extra = Vec::new();
+        extra.push(1); // count
+        extra.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes());
+        extra.extend_from_slice(&17u32.to_le_bytes());
+        extra.extend_from_slice(&mesh_id);
+        extra.push(SCULPT_TYPE_MESH);
+
+        let decoded =
+            decode_mesh_asset_id_from_extra_params(&extra).expect("mesh id should decode");
+        assert_eq!(decoded, mesh_id);
+    }
+
+    #[test]
+    fn decode_mesh_asset_id_from_extra_params_tolerates_trailing_bytes() {
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let mut extra = Vec::new();
+        extra.push(1); // count
+        extra.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes());
+        extra.extend_from_slice(&17u32.to_le_bytes());
+        extra.extend_from_slice(&mesh_id);
+        extra.push(SCULPT_TYPE_MESH);
+        extra.extend_from_slice(&[0xaa, 0xbb]); // trailing garbage should not invalidate decode
+
+        let decoded = decode_mesh_asset_id_from_extra_params(&extra)
+            .expect("mesh id should decode with trailing bytes");
+        assert_eq!(decoded, mesh_id);
+    }
+
+    #[test]
+    fn decode_object_update_compressed_tolerates_mixed_valid_and_malformed_blocks() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(2); // object count
+
+        // Block 1: valid compressed object with mesh extra params.
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let mut valid = vec![0u8; 16]; // FullID
+        valid.extend_from_slice(&55u32.to_le_bytes()); // LocalID
+        valid.push(9); // PCode
+        valid.push(0); // State
+        valid.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        valid.push(0); // Material
+        valid.push(0); // ClickAction
+        valid.extend_from_slice(&[0, 0, 128, 63]); // Scale X
+        valid.extend_from_slice(&[0, 0, 128, 63]); // Scale Y
+        valid.extend_from_slice(&[0, 0, 128, 63]); // Scale Z
+        valid.extend_from_slice(&[0, 0, 0, 65]); // Pos X
+        valid.extend_from_slice(&[0, 0, 128, 65]); // Pos Y
+        valid.extend_from_slice(&[0, 0, 192, 64]); // Pos Z
+        valid.extend_from_slice(&[0, 0, 0, 0]); // Rot X
+        valid.extend_from_slice(&[0, 0, 0, 0]); // Rot Y
+        valid.extend_from_slice(&[0, 0, 0, 0]); // Rot Z
+        valid.extend_from_slice(&0u32.to_le_bytes()); // CompressedFlags
+        valid.extend_from_slice(&[0u8; 16]); // OwnerID
+        valid.push(1); // ExtraParams count
+        valid.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes());
+        valid.extend_from_slice(&17u32.to_le_bytes());
+        valid.extend_from_slice(&mesh_id);
+        valid.push(SCULPT_TYPE_MESH);
+        let valid_len = u16::try_from(valid.len()).expect("valid block len fits u16");
+        body.extend_from_slice(&valid_len.to_le_bytes());
+        body.extend_from_slice(&valid);
+
+        // Block 2: malformed declared length that truncates at body end.
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        body.extend_from_slice(&500u16.to_le_bytes()); // impossible data len for remaining body
+        body.extend_from_slice(&[0u8; 8]); // short payload
+
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID, &body);
+        let objects = decode_object_update_compressed_objects(&payload)
+            .expect("decoder should preserve valid blocks");
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].local_id, 55);
+        assert_eq!(objects[0].mesh_id_bytes, Some(mesh_id));
+    }
+
+    #[test]
+    fn decode_object_extra_params_tolerates_invalid_entry_and_keeps_valid_following_entry() {
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let mut payload = make_low_frequency_packet(LLUDP_OBJECT_EXTRA_PARAMS_LOW_ID);
+        payload.extend_from_slice(&[0u8; 16]); // AgentID
+        payload.extend_from_slice(&[0u8; 16]); // SessionID
+        payload.push(2); // ObjectData count
+
+        // Entry 1: invalid param_size larger than param_data_len.
+        payload.extend_from_slice(&10u32.to_le_bytes()); // LocalID
+        payload.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes()); // ParamType
+        payload.push(1); // ParamInUse
+        payload.extend_from_slice(&64u32.to_le_bytes()); // ParamSize (invalid)
+        payload.push(17); // ParamData len
+        payload.extend_from_slice(&[0u8; 17]);
+
+        // Entry 2: valid mesh sculpt data.
+        payload.extend_from_slice(&11u32.to_le_bytes()); // LocalID
+        payload.extend_from_slice(&EXTRA_PARAM_SCULPT_EP.to_le_bytes()); // ParamType
+        payload.push(1); // ParamInUse
+        payload.extend_from_slice(&17u32.to_le_bytes()); // ParamSize
+        payload.push(17); // ParamData len
+        payload.extend_from_slice(&mesh_id);
+        payload.push(SCULPT_TYPE_MESH);
+
+        let decoded = decode_object_extra_params_mesh_updates(&payload)
+            .expect("decoder should keep valid entries");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].local_id, 11);
+        assert_eq!(decoded[0].mesh_id_bytes, Some(mesh_id));
+    }
+
+    #[test]
+    fn object_feed_export_includes_mesh_id_when_known() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        connection.object_feed_upsert(
+            77,
+            Some([100, 120, 80]),
+            None,
+            Some(mesh_id),
+            None,
+            None,
+            &[],
+            None,
+        );
+        connection.refresh_object_feed_summary_export();
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.object_feed_total_objects, 1);
+        assert_eq!(summary.object_feed_objects.len(), 1);
+        assert_eq!(
+            summary.object_feed_objects[0].mesh_id.as_deref(),
+            Some("10930d3b-1821-c584-a0c7-28a34999800d")
+        );
+    }
+
+    #[test]
+    fn decode_default_texture_id_from_texture_entry_reads_first_uuid() {
+        let expected =
+            parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let mut texture_entry = Vec::new();
+        texture_entry.extend_from_slice(&expected);
+        texture_entry.extend_from_slice(&[0u8; 12]);
+        let decoded =
+            decode_default_texture_id_from_texture_entry(&texture_entry).expect("texture id");
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn decode_texture_entry_material_data_parses_default_and_face_overrides() {
+        let default_texture =
+            parse_uuid_bytes("947d4505-eb76-2ef5-c049-e7882881d689").expect("uuid bytes");
+        let face_texture =
+            parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let material_id =
+            parse_uuid_bytes("ac27119d-c8fd-2edc-6c28-049f70ec462c").expect("uuid bytes");
+        let mut te = Vec::new();
+        te.extend_from_slice(&default_texture);
+        te.push(2); // face bitfield: face 1
+        te.extend_from_slice(&face_texture);
+        te.push(0); // texture overrides terminator
+        te.extend_from_slice(&[255, 255, 255, 255]); // default rgba
+        te.push(0); // rgba overrides terminator
+        for _ in 0..5 {
+            te.extend_from_slice(&10_000i16.to_le_bytes()); // default scale/offset/rot
+            te.push(0); // no overrides
+        }
+        te.push(0); // default material byte
+        te.push(0); // no material overrides
+        te.push(0); // default media
+        te.push(0); // no media overrides
+        te.push(0); // default glow
+        te.push(0); // no glow overrides
+        te.extend_from_slice(&material_id); // default material id
+        te.push(0); // no material-id overrides
+
+        let decoded = decode_texture_entry_material_data(&te).expect("texture entry should decode");
+        let default = decoded
+            .default_face_material
+            .as_ref()
+            .expect("default face should exist");
+        assert_eq!(default.texture_id_bytes, Some(default_texture));
+        assert_eq!(default.material_id_bytes, Some(material_id));
+        assert_eq!(decoded.face_material_overrides.len(), 1);
+        assert_eq!(decoded.face_material_overrides[0].0, 1);
+        assert_eq!(
+            decoded.face_material_overrides[0].1.texture_id_bytes,
+            Some(face_texture)
+        );
+    }
+
+    #[test]
+    fn decode_texture_entry_material_data_is_fail_soft_for_truncated_payload() {
+        let default_texture =
+            parse_uuid_bytes("947d4505-eb76-2ef5-c049-e7882881d689").expect("uuid bytes");
+        let mut te = Vec::new();
+        te.extend_from_slice(&default_texture);
+        te.push(0); // texture overrides terminator
+        te.extend_from_slice(&[255, 255, 255, 255]); // default rgba
+        // truncated before the rest of the blocks
+
+        let decoded = decode_texture_entry_material_data(&te)
+            .expect("decoder should keep default on truncated payload");
+        assert_eq!(
+            decoded
+                .default_face_material
+                .as_ref()
+                .and_then(|m| m.texture_id_bytes),
+            Some(default_texture)
+        );
+    }
+
+    #[test]
+    fn object_feed_export_includes_texture_id_when_known() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let texture_id =
+            parse_uuid_bytes("947d4505-eb76-2ef5-c049-e7882881d689").expect("uuid bytes");
+        connection.object_feed_upsert(
+            77,
+            Some([100, 120, 80]),
+            None,
+            None,
+            Some(texture_id),
+            None,
+            &[],
+            None,
+        );
+        connection.refresh_object_feed_summary_export();
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.object_feed_total_objects, 1);
+        assert_eq!(summary.object_feed_objects.len(), 1);
+        assert_eq!(
+            summary.object_feed_objects[0].texture_id.as_deref(),
+            Some("947d4505-eb76-2ef5-c049-e7882881d689")
+        );
+    }
+
+    #[test]
+    fn decode_real_firestorm_object_update_extracts_mesh_id_from_extra_params() {
+        let payload = decode_test_hex(
+            "c0000000b8000c0001260400020f04000190ff0272c9653f00018133fece8e4a40ddbddee12178827bb0e900032f0400016666e63e9a99193f83bcca3f4cd6ce8d3c347740bca8f17f3f79b1ba4151af4b4247b88f429a61c14100201ac23c3f00098e723500043d090210100100046464000f8c0001c228d1cf4b5d4ba884f4899a0796aa979fffff9fe17f0010c09200013a367d1cbef16d437595e88c1e3aadb3880001499bfe35b7b1f7b0787faa2b2bd685ab8400017e4bb9a788167623eb3eb239d71cf30d0008803f0003803f0021770001446973706c61794e616d6520535452494e472052572044532053617368610a46697273744e616d6520535452494e47205257204453204b616c61636830370a4c6173744e616d6520535452494e47205257204453205265736964656e740a5469746c6520535452494e4720525720445320c4b9e28886000a01004373c9653f200c8eb5941bebef44f071438c1ef74426cf190002090300019e21803e9ea7943e9e21803e3c003c72c9653f7c010001101000056464000f770001861c019c3d20ff803c68198535269aa6023ed56050c54284e510b591e18b0f030600011728320001024e50510004803f0003803f001064a6c43aec38dd168df1b83a3081935f021cf09f1c76a4446d308b2c0738c3a6c9018894b993b8fc6cd710a74165656142c300013f00014174746163684974656d494420535452494e472052572044532038366664373434372d326233622d333062312d623931382d663230663065343634666464000a1801600001110003ac27119dc8fd2edc6c28049f70ec462c050042",
+        );
+
+        let objects = decode_object_update_ids_and_scales(&payload)
+            .expect("real object update should decode");
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].local_id, 1063635314);
+        assert_eq!(objects[0].mesh_id_bytes, None);
+        assert_eq!(objects[1].local_id, 1063635315);
+        assert_eq!(
+            objects[1].mesh_id_bytes,
+            Some(
+                parse_uuid_bytes("ac27119d-c8fd-2edc-6c28-049f70ec462c")
+                    .expect("mesh uuid should parse")
+            )
+        );
+    }
+
+    #[test]
+    fn object_feed_replay_preserves_real_firestorm_mesh_id_across_cached_and_terse_updates() {
+        let object_update = decode_test_hex(
+            "c0000000b8000c0001260400020f04000190ff0272c9653f00018133fece8e4a40ddbddee12178827bb0e900032f0400016666e63e9a99193f83bcca3f4cd6ce8d3c347740bca8f17f3f79b1ba4151af4b4247b88f429a61c14100201ac23c3f00098e723500043d090210100100046464000f8c0001c228d1cf4b5d4ba884f4899a0796aa979fffff9fe17f0010c09200013a367d1cbef16d437595e88c1e3aadb3880001499bfe35b7b1f7b0787faa2b2bd685ab8400017e4bb9a788167623eb3eb239d71cf30d0008803f0003803f0021770001446973706c61794e616d6520535452494e472052572044532053617368610a46697273744e616d6520535452494e47205257204453204b616c61636830370a4c6173744e616d6520535452494e47205257204453205265736964656e740a5469746c6520535452494e4720525720445320c4b9e28886000a01004373c9653f200c8eb5941bebef44f071438c1ef74426cf190002090300019e21803e9ea7943e9e21803e3c003c72c9653f7c010001101000056464000f770001861c019c3d20ff803c68198535269aa6023ed56050c54284e510b591e18b0f030600011728320001024e50510004803f0003803f001064a6c43aec38dd168df1b83a3081935f021cf09f1c76a4446d308b2c0738c3a6c9018894b993b8fc6cd710a74165656142c300013f00014174746163684974656d494420535452494e472052572044532038366664373434372d326233622d333062312d623931382d663230663065343634666464000a1801600001110003ac27119dc8fd2edc6c28049f70ec462c050042",
+        );
+        let local_id = 1063635315u32;
+
+        let mut cached_body = Vec::new();
+        cached_body.extend_from_slice(&1u64.to_le_bytes());
+        cached_body.extend_from_slice(&0u16.to_le_bytes());
+        cached_body.push(1);
+        cached_body.extend_from_slice(&local_id.to_le_bytes());
+        cached_body.extend_from_slice(&0u32.to_le_bytes());
+        cached_body.extend_from_slice(&0u32.to_le_bytes());
+        let cached_update =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_CACHED_HIGH_ID, &cached_body);
+
+        let mut terse_body = Vec::new();
+        terse_body.extend_from_slice(&1u64.to_le_bytes());
+        terse_body.extend_from_slice(&0u16.to_le_bytes());
+        terse_body.push(1);
+        terse_body.push(18);
+        terse_body.extend_from_slice(&local_id.to_le_bytes());
+        terse_body.push(0);
+        terse_body.push(0);
+        terse_body.extend_from_slice(&12.0f32.to_le_bytes());
+        terse_body.extend_from_slice(&8.0f32.to_le_bytes());
+        terse_body.extend_from_slice(&2.0f32.to_le_bytes());
+        terse_body.extend_from_slice(&0u16.to_le_bytes());
+        let terse_update = make_high_frequency_packet_with_body(
+            LLUDP_IMPROVED_TERSE_OBJECT_UPDATE_HIGH_ID,
+            &terse_body,
+        );
+
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.state = ConnectionState::LoggedIn;
+        connection
+            .observe_first_simulator_inbound_payload(&object_update)
+            .expect("real object update should be observed");
+        connection
+            .observe_first_simulator_inbound_payload(&cached_update)
+            .expect("cached update should be observed");
+        connection
+            .observe_first_simulator_inbound_payload(&terse_update)
+            .expect("terse update should be observed");
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.object_feed_total_objects, 2);
+        assert_eq!(summary.object_feed_state_mesh_objects, 1);
+        assert_eq!(summary.object_feed_export_objects, 2);
+        assert_eq!(summary.object_feed_export_mesh_objects, 1);
+        assert_eq!(summary.object_feed_object_update_mesh_hits, 1);
+        let retained = summary
+            .object_feed_objects
+            .iter()
+            .find(|obj| obj.local_id == local_id)
+            .expect("mesh-bearing object should remain exported");
+        assert_eq!(
+            retained.mesh_id.as_deref(),
+            Some("ac27119d-c8fd-2edc-6c28-049f70ec462c")
+        );
+        assert_eq!(retained.position_centi, Some([1200, 800, 200]));
+    }
+
+    #[test]
+    fn object_feed_export_prioritizes_mesh_objects_when_truncated() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
+        let mesh_local_id = 1u32;
+        connection.object_feed_upsert(
+            mesh_local_id,
+            None,
+            None,
+            Some(mesh_id),
+            None,
+            None,
+            &[],
+            None,
+        );
+        for local_id in 2..=129 {
+            connection.object_feed_upsert(local_id, None, None, None, None, None, &[], None);
+        }
+        connection.refresh_object_feed_summary_export();
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert_eq!(summary.object_feed_total_objects, 129);
+        assert_eq!(summary.object_feed_state_mesh_objects, 1);
+        assert_eq!(summary.object_feed_export_objects, 128);
+        assert_eq!(summary.object_feed_export_mesh_objects, 1);
+        assert!(summary.object_feed_export_truncated);
+        assert_eq!(
+            summary.object_feed_objects.first().map(|obj| obj.local_id),
+            Some(mesh_local_id)
+        );
+        assert!(
+            summary
+                .object_feed_objects
+                .iter()
+                .any(|obj| obj.local_id == mesh_local_id && obj.mesh_id.is_some()),
+            "mesh-bearing object should survive truncation"
+        );
     }
 
     #[test]
@@ -13089,6 +13842,102 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn send_complete_agent_movement_on_circuit_to_port_sends_to_explicit_target() {
+        let primary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("primary listener bind should succeed");
+        let primary_addr = primary_listener
+            .local_addr()
+            .expect("primary listener address should exist");
+        let secondary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("secondary listener bind should succeed");
+        let secondary_addr = secondary_listener
+            .local_addr()
+            .expect("secondary listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": primary_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let primary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("use circuit should arrive");
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("complete movement should arrive");
+        });
+
+        let secondary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (len, sender) = secondary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("explicit complete movement should arrive");
+            (len, sender, buf)
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        primary_task.await.expect("primary task should complete");
+
+        connection
+            .send_complete_agent_movement_on_circuit_to_port(&circuit, secondary_addr.port())
+            .await
+            .expect("explicit complete movement should send");
+
+        let (len, sender, buf) = secondary_task
+            .await
+            .expect("secondary task should complete");
+        assert_eq!(
+            sender,
+            circuit
+                .socket
+                .local_addr()
+                .expect("social socket local address should exist")
+        );
+        let header =
+            decode_first_simulator_packet_header(&buf[..len]).expect("packet header should decode");
+        assert_eq!(
+            header.message_number,
+            lludp_low_frequency_message_number(LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID)
+        );
+    }
+
     #[test]
     fn decode_region_handshake_handles_zero_coded_body() {
         let body = vec![0, 4, 1, 7, b'T', b'e', b's', b't', b'S', b'i', b'm'];
@@ -13193,8 +14042,308 @@ mod tests {
                 .try_into()
                 .expect("RegionHandshakeReply flags should be present"),
         );
-        assert_eq!(flags, 0x12345678);
+        assert_eq!(flags, viewer_region_handshake_reply_flags());
         assert!(!saw_extra_datagram);
+    }
+
+    #[tokio::test]
+    async fn send_pending_region_handshake_reply_requires_observed_handshake_flags() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
+                .await
+                .is_ok()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+
+        assert!(
+            !connection
+                .send_pending_region_handshake_reply(&circuit)
+                .await
+                .expect("reply should be skipped when no RegionHandshake observed")
+        );
+
+        let saw_reply = listener_task.await.expect("listener should complete");
+        assert!(!saw_reply);
+    }
+
+    #[tokio::test]
+    async fn send_pending_region_handshake_reply_prefers_observed_bootstrap_sender_endpoint() {
+        let primary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("primary listener bind should succeed");
+        let primary_addr = primary_listener
+            .local_addr()
+            .expect("primary listener address should exist");
+        let secondary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("secondary listener bind should succeed");
+        let secondary_addr = secondary_listener
+            .local_addr()
+            .expect("secondary listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": primary_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let primary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive on primary");
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive on primary");
+            timeout(
+                Duration::from_millis(300),
+                primary_listener.recv_from(&mut buf),
+            )
+            .await
+            .is_ok()
+        });
+
+        let secondary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let (len, _) = secondary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("RegionHandshakeReply should arrive on secondary");
+            buf[..len].to_vec()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection.pending_region_handshake_reply_flags = Some(0x12345678);
+        connection.last_bootstrap_sender_endpoint = Some(secondary_addr);
+
+        assert!(
+            connection
+                .send_pending_region_handshake_reply(&circuit)
+                .await
+                .expect("reply send should succeed")
+        );
+
+        let saw_unexpected_primary = primary_task.await.expect("primary task should complete");
+        assert!(!saw_unexpected_primary);
+
+        let reply = secondary_task
+            .await
+            .expect("secondary task should complete");
+        let header =
+            decode_first_simulator_packet_header(&reply).expect("reply header should decode");
+        assert_eq!(
+            header.message_number,
+            lludp_low_frequency_message_number(LLUDP_REGION_HANDSHAKE_REPLY_LOW_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn send_handshake_reprime_bundle_sends_to_observed_and_primary_endpoints() {
+        let primary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("primary listener bind should succeed");
+        let primary_addr = primary_listener
+            .local_addr()
+            .expect("primary listener address should exist");
+        let secondary_listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("secondary listener bind should succeed");
+        let secondary_addr = secondary_listener
+            .local_addr()
+            .expect("secondary listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": primary_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let primary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive on primary");
+            let _ = primary_listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive on primary");
+            let mut saw_use_circuit = false;
+            let mut saw_complete_movement = false;
+            for _ in 0..2 {
+                let (len, _) = primary_listener
+                    .recv_from(&mut buf)
+                    .await
+                    .expect("reprime datagram should arrive on primary");
+                let header = decode_first_simulator_packet_header(&buf[..len])
+                    .expect("header should decode on primary");
+                if header.message_number
+                    == lludp_low_frequency_message_number(LLUDP_USE_CIRCUIT_CODE_LOW_ID)
+                {
+                    saw_use_circuit = true;
+                }
+                if header.message_number
+                    == lludp_low_frequency_message_number(LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID)
+                {
+                    saw_complete_movement = true;
+                }
+            }
+            (saw_use_circuit, saw_complete_movement)
+        });
+
+        let secondary_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let mut saw_use_circuit = false;
+            let mut saw_complete_movement = false;
+            for _ in 0..2 {
+                let (len, _) = secondary_listener
+                    .recv_from(&mut buf)
+                    .await
+                    .expect("reprime datagram should arrive on secondary");
+                let header = decode_first_simulator_packet_header(&buf[..len])
+                    .expect("header should decode on secondary");
+                if header.message_number
+                    == lludp_low_frequency_message_number(LLUDP_USE_CIRCUIT_CODE_LOW_ID)
+                {
+                    saw_use_circuit = true;
+                }
+                if header.message_number
+                    == lludp_low_frequency_message_number(LLUDP_COMPLETE_AGENT_MOVEMENT_LOW_ID)
+                {
+                    saw_complete_movement = true;
+                }
+            }
+            (saw_use_circuit, saw_complete_movement)
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+        connection.last_bootstrap_sender_endpoint = Some(secondary_addr);
+
+        let datagrams_sent = connection
+            .send_handshake_reprime_bundle(&circuit)
+            .await
+            .expect("handshake reprime bundle should send");
+        assert_eq!(datagrams_sent, 4);
+
+        let (primary_saw_use, primary_saw_complete) =
+            primary_task.await.expect("primary task should complete");
+        assert!(primary_saw_use);
+        assert!(primary_saw_complete);
+
+        let (secondary_saw_use, secondary_saw_complete) = secondary_task
+            .await
+            .expect("secondary task should complete");
+        assert!(secondary_saw_use);
+        assert!(secondary_saw_complete);
     }
 
     #[tokio::test]
@@ -13747,6 +14896,91 @@ mod tests {
         assert!(connection.pending_first_simulator_ack_ids.is_empty());
     }
 
+    #[tokio::test]
+    async fn flush_pending_object_cache_miss_ids_sends_request_multiple_objects_and_drains_queue() {
+        let listener = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind should succeed");
+        let listener_addr = listener
+            .local_addr()
+            .expect("listener address should exist");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": listener_addr.port(),
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })))
+            .mount(&server)
+            .await;
+
+        let listener_task = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("UseCircuitCode should arrive");
+            let _ = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("CompleteAgentMovement should arrive");
+            let (len, _) = listener
+                .recv_from(&mut buf)
+                .await
+                .expect("RequestMultipleObjects should arrive");
+            buf[..len].to_vec()
+        });
+
+        let mut connection = Connection::new(ConnectionConfig {
+            endpoint: format!("{}/login", server.uri()),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        });
+        connection.connect().await.expect("connect should succeed");
+        let adapter = SecondLifeAdapter;
+        connection
+            .login_with_adapter(&adapter, make_intent(true))
+            .await
+            .expect("login should succeed");
+        let circuit = connection
+            .open_social_circuit("127.0.0.1:0")
+            .await
+            .expect("social circuit should open");
+
+        connection.pending_object_cache_miss_ids = vec![1001, 1002];
+        let flushed = connection
+            .flush_pending_object_cache_miss_ids_on_circuit(&circuit)
+            .await
+            .expect("cache miss flush should succeed");
+
+        let packet = listener_task.await.expect("listener should complete");
+        let header = decode_first_simulator_packet_header(&packet)
+            .expect("request-multiple packet should decode");
+        let body = header.body(&packet).expect("request body should decode");
+
+        assert_eq!(
+            header.message_number,
+            lludp_medium_frequency_message_number(LLUDP_REQUEST_MULTIPLE_OBJECTS_MEDIUM_ID)
+        );
+        assert_eq!(body[32], 2);
+        assert_eq!(body[33], LLUDP_CACHE_MISS_TYPE_TOTAL);
+        assert_eq!(u32::from_le_bytes(body[34..38].try_into().unwrap()), 1001);
+        assert_eq!(body[38], LLUDP_CACHE_MISS_TYPE_TOTAL);
+        assert_eq!(u32::from_le_bytes(body[39..43].try_into().unwrap()), 1002);
+        assert_eq!(flushed, 2);
+        assert!(connection.pending_object_cache_miss_ids.is_empty());
+    }
+
     #[test]
     fn summarize_first_simulator_ack_forensics_reports_pending_and_appended_ack_state() {
         let mut connection = Connection::new(ConnectionConfig::default());
@@ -13792,6 +15026,105 @@ mod tests {
         assert_eq!(summary.outbound_appended_ack_ids_last, vec![0x0A0B0C0D]);
         assert_eq!(summary.explicit_packet_ack_receives, 1);
         assert_eq!(summary.first_packet_ack_receive_index, Some(3));
+    }
+
+    #[test]
+    fn summarize_first_simulator_startup_interest_gate_reports_pass_with_required_messages() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.first_simulator_handshake_send_diagnostics.push(
+            FirstSimulatorHandshakeSendDiagnostic {
+                action: FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                target: String::from("127.0.0.1:13001"),
+                packet_id: 11,
+                packet_message_number: Some(lludp_low_frequency_message_number(
+                    LLUDP_AGENT_THROTTLE_LOW_ID,
+                )),
+                appended_ack_ids: Vec::new(),
+                payload_len: 20,
+                elapsed_ms: 1,
+                success: true,
+                error: None,
+            },
+        );
+        connection.first_simulator_handshake_send_diagnostics.push(
+            FirstSimulatorHandshakeSendDiagnostic {
+                action: FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                target: String::from("127.0.0.1:13001"),
+                packet_id: 12,
+                packet_message_number: Some(lludp_low_frequency_message_number(
+                    LLUDP_AGENT_HEIGHT_WIDTH_LOW_ID,
+                )),
+                appended_ack_ids: Vec::new(),
+                payload_len: 20,
+                elapsed_ms: 1,
+                success: true,
+                error: None,
+            },
+        );
+        connection.first_simulator_handshake_send_diagnostics.push(
+            FirstSimulatorHandshakeSendDiagnostic {
+                action: FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                target: String::from("127.0.0.1:13001"),
+                packet_id: 13,
+                packet_message_number: Some(u32::from(LLUDP_AGENT_UPDATE_HIGH_ID)),
+                appended_ack_ids: Vec::new(),
+                payload_len: 20,
+                elapsed_ms: 1,
+                success: true,
+                error: None,
+            },
+        );
+
+        let gate = connection.summarize_first_simulator_startup_interest_gate();
+        assert!(gate.passed);
+        assert!(gate.missing.is_empty());
+        assert_eq!(gate.required.len(), 3);
+        assert!(
+            gate.required
+                .iter()
+                .any(|entry| entry.message == "AgentThrottle")
+        );
+        assert!(
+            gate.required
+                .iter()
+                .any(|entry| entry.message == "AgentHeightWidth")
+        );
+        assert!(
+            gate.required
+                .iter()
+                .any(|entry| entry.message == "AgentUpdate")
+        );
+    }
+
+    #[test]
+    fn summarize_first_simulator_startup_interest_gate_reports_missing_messages() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        connection.first_simulator_handshake_send_diagnostics.push(
+            FirstSimulatorHandshakeSendDiagnostic {
+                action: FirstSimulatorHandshakeAction::CompleteAgentMovement,
+                target: String::from("127.0.0.1:13001"),
+                packet_id: 21,
+                packet_message_number: Some(lludp_low_frequency_message_number(
+                    LLUDP_AGENT_THROTTLE_LOW_ID,
+                )),
+                appended_ack_ids: Vec::new(),
+                payload_len: 20,
+                elapsed_ms: 1,
+                success: true,
+                error: None,
+            },
+        );
+
+        let gate = connection.summarize_first_simulator_startup_interest_gate();
+        assert!(!gate.passed);
+        assert_eq!(gate.required.len(), 1);
+        assert_eq!(
+            gate.missing,
+            vec![
+                String::from("AgentUpdate"),
+                String::from("AgentHeightWidth"),
+            ]
+        );
     }
 
     #[test]
@@ -14690,6 +16023,87 @@ mod tests {
     }
 
     #[test]
+    fn parse_event_queue_poll_from_llsd_xml_preserves_binary_ip_field() {
+        let body = br#"<llsd><map>
+            <key>id</key><integer>8</integer>
+            <key>events</key><array>
+                <map>
+                    <key>message</key><string>EnableSimulator</string>
+                    <key>body</key><map>
+                        <key>SimulatorInfo</key><array><map>
+                            <key>IP</key><binary>EJAngg==</binary>
+                            <key>Port</key><integer>13001</integer>
+                        </map></array>
+                    </map>
+                </map>
+            </array>
+        </map></llsd>"#;
+
+        let poll = parse_event_queue_poll_from_llsd_xml(body).expect("poll parsing should succeed");
+        assert_eq!(poll.id, Some(8));
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("SimulatorInfo[0].IP")
+                .map(String::as_str),
+            Some("EJAngg==")
+        );
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("SimulatorInfo[0].Port")
+                .map(String::as_str),
+            Some("13001")
+        );
+    }
+
+    #[test]
+    fn parse_event_queue_poll_from_llsd_xml_accepts_undef_root() {
+        let body = br#"<llsd><undef /></llsd>"#;
+        let poll = parse_event_queue_poll_from_llsd_xml(body).expect("poll parsing should succeed");
+        assert_eq!(poll.id, None);
+        assert!(poll.events.is_empty());
+    }
+
+    #[test]
+    fn parse_event_queue_from_llsd_xml_accepts_undef_root() {
+        let body = br#"<llsd><undef /></llsd>"#;
+        let inspection =
+            parse_event_queue_from_llsd_xml(body).expect("inspection parsing should succeed");
+        assert!(!inspection.has_id);
+        assert!(!inspection.has_events_array);
+        assert_eq!(inspection.event_count, 0);
+        assert!(inspection.top_level_keys.is_empty());
+        assert!(inspection.event_names.is_empty());
+    }
+
+    #[test]
+    fn parse_event_queue_poll_from_llsd_xml_accepts_root_array_with_map() {
+        let body = br#"<llsd><array>
+            <map>
+                <key>id</key><integer>9</integer>
+                <key>events</key><array>
+                    <map>
+                        <key>message</key><string>AgentStateUpdate</string>
+                        <key>body</key><map><key>can_modify_navmesh</key><boolean>1</boolean></map>
+                    </map>
+                </array>
+            </map>
+        </array></llsd>"#;
+        let poll = parse_event_queue_poll_from_llsd_xml(body).expect("poll parsing should succeed");
+        assert_eq!(poll.id, Some(9));
+        assert_eq!(poll.events.len(), 1);
+        assert_eq!(poll.events[0].message, "AgentStateUpdate");
+        assert_eq!(
+            poll.events[0]
+                .fields
+                .get("can_modify_navmesh")
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
     fn extract_event_queue_simulator_targets_and_parcel_summaries() {
         let connection = Connection::new(ConnectionConfig::default());
         let poll = EventQueuePollResult {
@@ -14735,6 +16149,12 @@ mod tests {
         assert_eq!(targets[0].handle.as_deref(), Some("123"));
         assert_eq!(targets[0].ip.as_deref(), Some("16.144.39.130"));
         assert_eq!(targets[0].port.as_deref(), Some("13001"));
+        assert_eq!(targets[0].endpoint_ip.as_deref(), Some("16.144.39.130"));
+        assert_eq!(targets[0].endpoint_port, Some(13001));
+        assert_eq!(
+            targets[0].endpoint_source.as_deref(),
+            Some("ip_port_fields")
+        );
         assert_eq!(
             targets[1].seed_capability.as_deref(),
             Some("https://seed.example/cap")
@@ -14742,6 +16162,12 @@ mod tests {
         assert_eq!(
             targets[1].sim_ip_and_port.as_deref(),
             Some("16.144.39.130:13001")
+        );
+        assert_eq!(targets[1].endpoint_ip.as_deref(), Some("16.144.39.130"));
+        assert_eq!(targets[1].endpoint_port, Some(13001));
+        assert_eq!(
+            targets[1].endpoint_source.as_deref(),
+            Some("sim_ip_and_port")
         );
 
         let parcels = connection.extract_event_queue_parcel_summaries(&poll);
@@ -14753,6 +16179,30 @@ mod tests {
         assert_eq!(
             connection.summarize_event_queue_event_fields(&poll.events[2], 2),
             "area=4096;local_id=55"
+        );
+    }
+
+    #[test]
+    fn extract_event_queue_simulator_targets_decodes_binary_ip_endpoint() {
+        let connection = Connection::new(ConnectionConfig::default());
+        let poll = EventQueuePollResult {
+            id: Some(3),
+            events: vec![EventQueueMessage {
+                message: String::from("EnableSimulator"),
+                fields: BTreeMap::from([
+                    (String::from("SimulatorInfo.IP"), String::from("EJAngg==")),
+                    (String::from("SimulatorInfo.Port"), String::from("13001")),
+                ]),
+            }],
+        };
+        let targets = connection.extract_event_queue_simulator_targets(&poll);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].ip.as_deref(), Some("EJAngg=="));
+        assert_eq!(targets[0].endpoint_ip.as_deref(), Some("16.144.39.130"));
+        assert_eq!(targets[0].endpoint_port, Some(13001));
+        assert_eq!(
+            targets[0].endpoint_source.as_deref(),
+            Some("simulatorinfo_binary_ip_port")
         );
     }
 
