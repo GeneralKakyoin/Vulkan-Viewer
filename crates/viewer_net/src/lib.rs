@@ -876,6 +876,7 @@ pub struct DecodedObjectFeedObject {
     pub local_id: u32,
     pub scale_centi: Option<[u16; 3]>,
     pub position_centi: Option<[i32; 3]>,
+    pub rotation_quat_i16: Option<[i16; 4]>,
     pub mesh_id: Option<String>,
     pub texture_id: Option<String>,
     pub default_face_material: Option<DecodedObjectFaceMaterial>,
@@ -1450,6 +1451,7 @@ struct ObjectFeedObjectState {
     last_seen_tick: u64,
     scale_centi: Option<[u16; 3]>,
     position_centi: Option<[i32; 3]>,
+    rotation_quat_i16: Option<[i16; 4]>,
     mesh_id_bytes: Option<[u8; 16]>,
     texture_id_bytes: Option<[u8; 16]>,
     default_face_material: Option<ObjectFaceMaterialState>,
@@ -1462,6 +1464,7 @@ struct DecodedObjectFeedIngressObject {
     local_id: u32,
     scale_centi: Option<[u16; 3]>,
     position_centi: Option<[i32; 3]>,
+    rotation_quat_i16: Option<[i16; 4]>,
     mesh_id_bytes: Option<[u8; 16]>,
     texture_id_bytes: Option<[u8; 16]>,
     default_face_material: Option<ObjectFaceMaterialState>,
@@ -1939,6 +1942,7 @@ impl Connection {
         local_id: u32,
         scale_centi: Option<[u16; 3]>,
         position_centi: Option<[i32; 3]>,
+        rotation_quat_i16: Option<[i16; 4]>,
         mesh_id_bytes: Option<[u8; 16]>,
         texture_id_bytes: Option<[u8; 16]>,
         default_face_material: Option<ObjectFaceMaterialState>,
@@ -1956,6 +1960,9 @@ impl Connection {
         }
         if let Some(pos) = position_centi {
             entry.position_centi = Some(pos);
+        }
+        if let Some(rotation) = rotation_quat_i16 {
+            entry.rotation_quat_i16 = Some(rotation);
         }
         if let Some(mesh) = mesh_id_bytes {
             entry.mesh_id_bytes = Some(mesh);
@@ -2044,6 +2051,7 @@ impl Connection {
                 local_id,
                 scale_centi: state.scale_centi,
                 position_centi: state.position_centi,
+                rotation_quat_i16: state.rotation_quat_i16,
                 mesh_id: state
                     .mesh_id_bytes
                     .map(format_uuid_bytes)
@@ -2661,6 +2669,7 @@ impl Connection {
                                 obj.local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
+                                obj.rotation_quat_i16,
                                 obj.mesh_id_bytes,
                                 obj.texture_id_bytes,
                                 obj.default_face_material.clone(),
@@ -2690,6 +2699,7 @@ impl Connection {
                                 obj.local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
+                                obj.rotation_quat_i16,
                                 obj.mesh_id_bytes,
                                 obj.texture_id_bytes,
                                 obj.default_face_material.clone(),
@@ -2717,6 +2727,7 @@ impl Connection {
                                 None,
                                 None,
                                 None,
+                                None,
                                 &[],
                                 None,
                             );
@@ -2739,6 +2750,7 @@ impl Connection {
                                 obj.local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
+                                obj.rotation_quat_i16,
                                 obj.mesh_id_bytes,
                                 obj.texture_id_bytes,
                                 obj.default_face_material.clone(),
@@ -2768,6 +2780,7 @@ impl Connection {
                                 obj.local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
+                                obj.rotation_quat_i16,
                                 obj.mesh_id_bytes,
                                 obj.texture_id_bytes,
                                 obj.default_face_material.clone(),
@@ -3389,6 +3402,14 @@ impl Connection {
             .ok_or(ConnectionError::MissingSeedCapability)?;
 
         self.fetch_seed_capabilities_from_url(seed_url).await
+    }
+
+    pub fn set_session_seed_capability_url(&mut self, seed_url: &str) -> bool {
+        let Some(session) = self.session.as_mut() else {
+            return false;
+        };
+        session.seed_capability = Some(seed_url.to_string());
+        true
     }
 
     pub async fn fetch_seed_capabilities_from_url(
@@ -10496,6 +10517,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn set_session_seed_capability_url_updates_logged_in_session() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        assert!(!connection.set_session_seed_capability_url("https://seed.example.invalid/a"));
+
+        connection.state = ConnectionState::LoggedIn;
+        connection.session = Some(Session {
+            account_name: String::from("tester"),
+            session_token: String::from("token"),
+            seed_capability: Some(String::from("https://seed.example.invalid/old")),
+        });
+        assert!(connection.set_session_seed_capability_url("https://seed.example.invalid/new"));
+        assert_eq!(
+            connection
+                .session
+                .as_ref()
+                .and_then(|session| session.seed_capability.as_deref()),
+            Some("https://seed.example.invalid/new")
+        );
+    }
+
     #[tokio::test]
     async fn fetch_event_queue_once_reports_event_names() {
         let server = MockServer::start().await;
@@ -12482,7 +12524,50 @@ mod tests {
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].local_id, 55);
         assert_eq!(objects[0].position_centi, Some([800, 1600, 600]));
+        assert_eq!(objects[0].rotation_quat_i16, Some([0, 0, 0, 32_767]));
         assert_eq!(objects[0].mesh_id_bytes, None);
+    }
+
+    #[test]
+    fn decode_object_update_compressed_extracts_nonzero_rotation_quaternion() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(1); // object count
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        let mut data = vec![0u8; 16]; // UUID
+        data.extend_from_slice(&99u32.to_le_bytes()); // LocalID
+        data.push(9); // PCode
+        data.push(0); // State
+        data.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        data.push(0); // Material
+        data.push(0); // ClickAction
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale X = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Y = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Z = 1.0
+        data.extend_from_slice(&[0, 0, 0, 65]); // Pos X = 8.0
+        data.extend_from_slice(&[0, 0, 128, 65]); // Pos Y = 16.0
+        data.extend_from_slice(&[0, 0, 192, 64]); // Pos Z = 6.0
+        data.extend_from_slice(&0.5f32.to_le_bytes()); // Rot X
+        data.extend_from_slice(&0.0f32.to_le_bytes()); // Rot Y
+        data.extend_from_slice(&0.0f32.to_le_bytes()); // Rot Z
+        data.extend_from_slice(&0u32.to_le_bytes()); // CompressedFlags
+        data.extend_from_slice(&[0u8; 16]); // OwnerID
+        data.push(0); // ExtraParams count
+        let data_len = u16::try_from(data.len()).expect("len fits u16");
+        body.extend_from_slice(&data_len.to_le_bytes());
+        body.extend_from_slice(&data);
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID, &body);
+        let objects = decode_object_update_compressed_objects(&payload)
+            .expect("compressed update should decode");
+        let rotation = objects[0]
+            .rotation_quat_i16
+            .expect("rotation quaternion should decode");
+        assert_eq!(rotation[0], 16_384);
+        assert_eq!(rotation[1], 0);
+        assert_eq!(rotation[2], 0);
+        assert!((rotation[3] - 28_377).abs() <= 2);
     }
 
     #[test]
@@ -12609,6 +12694,7 @@ mod tests {
         connection.object_feed_upsert(
             77,
             Some([100, 120, 80]),
+            None,
             None,
             None,
             None,
@@ -12749,6 +12835,7 @@ mod tests {
             77,
             Some([100, 120, 80]),
             None,
+            None,
             Some(mesh_id),
             None,
             None,
@@ -12850,6 +12937,7 @@ mod tests {
         connection.object_feed_upsert(
             77,
             Some([100, 120, 80]),
+            None,
             None,
             None,
             Some(texture_id),
@@ -12963,6 +13051,7 @@ mod tests {
             mesh_local_id,
             None,
             None,
+            None,
             Some(mesh_id),
             None,
             None,
@@ -12970,7 +13059,7 @@ mod tests {
             None,
         );
         for local_id in 2..=129 {
-            connection.object_feed_upsert(local_id, None, None, None, None, None, &[], None);
+            connection.object_feed_upsert(local_id, None, None, None, None, None, None, &[], None);
         }
         connection.refresh_object_feed_summary_export();
 

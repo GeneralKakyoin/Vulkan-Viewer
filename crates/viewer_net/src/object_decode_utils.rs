@@ -139,6 +139,32 @@ pub(super) fn quantize_vector3_signed_centi(vec: [f32; 3]) -> Option<[i32; 3]> {
     Some(out)
 }
 
+pub(super) fn quantize_quat_i16(quat: [f32; 4]) -> Option<[i16; 4]> {
+    let mut out = [0i16; 4];
+    for (idx, component) in quat.iter().copied().enumerate() {
+        if !component.is_finite() {
+            return None;
+        }
+        let clamped = component.clamp(-1.0, 1.0);
+        let scaled = (clamped * 32_767.0).round();
+        out[idx] = i16::try_from(scaled as i32).ok()?;
+    }
+    Some(out)
+}
+
+pub(super) fn decode_packed_unit_quaternion_xyz(xyz: [f32; 3]) -> Option<[f32; 4]> {
+    if !xyz.iter().all(|component| component.is_finite()) {
+        return None;
+    }
+    let norm_sq = xyz[0] * xyz[0] + xyz[1] * xyz[1] + xyz[2] * xyz[2];
+    if norm_sq > 4.0 {
+        return None;
+    }
+    let w_sq = (1.0 - norm_sq).max(0.0);
+    let w = w_sq.sqrt();
+    Some([xyz[0], xyz[1], xyz[2], w])
+}
+
 pub(super) fn read_u8(body: &[u8], offset: &mut usize) -> Option<u8> {
     let v = *body.get(*offset)?;
     *offset += 1;
@@ -293,6 +319,7 @@ pub(super) fn decode_object_update_ids_and_scales(
             local_id,
             scale_centi,
             position_centi,
+            rotation_quat_i16: None,
             mesh_id_bytes,
             texture_id_bytes,
             default_face_material: decoded_texture_material
@@ -948,7 +975,9 @@ pub(super) fn parse_compressed_object_update_data(
     offset += 1; // ClickAction
     let scale = read_vector3f(data, &mut offset)?;
     let position = read_vector3f(data, &mut offset)?;
-    offset += 12; // Rotation (norm quat x/y/z packed as 3 f32)
+    let rotation_xyz = read_vector3f(data, &mut offset)?;
+    let rotation_quat_i16 =
+        decode_packed_unit_quaternion_xyz(rotation_xyz).and_then(quantize_quat_i16);
     let compressed_flags = read_u32_le(data, &mut offset)?;
     offset += 16; // OwnerID (present; may be zeroed)
     if compressed_flags & COMPRESSED_FLAG_HAS_ANGULAR_VELOCITY != 0 {
@@ -974,6 +1003,7 @@ pub(super) fn parse_compressed_object_update_data(
         local_id,
         scale_centi: quantize_vector3_centi(scale),
         position_centi: quantize_vector3_signed_centi(position),
+        rotation_quat_i16,
         mesh_id_bytes,
         texture_id_bytes: None,
         object_id_bytes: if full_id == [0u8; 16] {
@@ -1050,6 +1080,7 @@ pub(super) fn parse_terse_object_update_data(
         local_id,
         position_centi: quantize_vector3_signed_centi(position),
         mesh_id_bytes: None,
+        rotation_quat_i16: None,
         ..DecodedObjectFeedIngressObject::default()
     })
 }

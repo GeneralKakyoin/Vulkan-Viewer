@@ -3,6 +3,93 @@
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (Object Rotation Ingestion + EventQueue Live Verify Pass) (2026-04-09)
+- Closed a render-correctness gap where world object-feed proxies ignored decoded object rotation:
+  - `viewer_net` now decodes compressed object-update packed quaternion xyz, reconstructs a bounded quaternion, and exports it as optional quantized rotation payload.
+  - `viewer_app` now maps this rotation payload into `viewer_core` decoded object-feed snapshot objects.
+  - `viewer_core` now applies decoded object rotation in `world_object_feed_proxy_transform(...)` with scene-axis mapping and identity fallback when unavailable.
+- Added/updated regression coverage:
+  - `viewer_net`: `decode_object_update_compressed_extracts_local_ids` now asserts decoded rotation payload.
+  - `viewer_net`: `decode_object_update_compressed_extracts_nonzero_rotation_quaternion`.
+  - `viewer_core`: `scene_world_object_feed_maps_decoded_rotation_quaternion_to_scene_axes`.
+- Ran bounded live EventQueue verification after seed-session hardening:
+  - artifact: `artifacts/logs/network_debug_event_queue_rotation_gap_closure_2026-04-09.jsonl`
+  - EventQueue startup path reached `EventQueueGet:ok`; cap-rotation `404` was not reproduced during this bounded window.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app -p viewer_core`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_core`
+  - timeout-bounded `cargo run -p viewer_app` with EventQueue repro env knobs + artifact inspection.
+
+## Latest Notable Changes (Seed Session Refresh + Quaternion Normalization Hardening) (2026-04-09)
+- EventQueue seed follow-up and cap re-prime fallback paths now promote successful alternate seed URLs into the active `viewer_net::Connection` session seed capability.
+- This prevents the connection from repeatedly retrying a known-stale session seed URL after a successful alternate seed fetch.
+- `viewer_core::quat_to_mat4(...)` now normalizes input quaternions before conversion, preventing unintended transform skew when non-unit quaternions are supplied.
+- Added regression coverage:
+  - `viewer_net`: `set_session_seed_capability_url_updates_logged_in_session`
+  - `viewer_core`: `quat_to_mat4_normalizes_non_unit_identity_quaternion`
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app -p viewer_core`
+  - `cargo test -p viewer_net set_session_seed_capability_url_updates_logged_in_session -- --nocapture`
+  - `cargo test -p viewer_core quat_to_mat4_normalizes_non_unit_identity_quaternion -- --nocapture`
+  - `cargo test -p viewer_app remember_recent_seed_capability_url_is_bounded_and_promotes_duplicates -- --nocapture`
+
+## Latest Notable Changes (EventQueue Re-prime Persistent Seed Fallback Across Reconnects) (2026-04-09)
+- Extended EventQueue re-prime fallback behavior to persist recent seed-capability URLs across reconnect cycles (not only current session).
+- Re-prime failure telemetry now reports non-empty fallback candidates when available; latest bounded live capture shows:
+  - `fallback_urls=simhost:12043@simhost-04e9ed31fc4a65585.agni.secondlife.io:12043`
+  - (previously this was `fallback_urls=none` in no-seed-observed windows).
+- Added bootstrap seed-capability promotion into the persistent recent-seed cache.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_app`
+  - `cargo test -p viewer_app remember_recent_seed_capability_url_is_bounded_and_promotes_duplicates -- --nocapture`
+- Bounded live capture:
+  - `artifacts/logs/network_debug_event_queue_cap_rotation_persist_seed_fix_2026-04-09.jsonl`
+  - cap re-prime still failed in this run due seed URL invalidation (`404`), but fallback candidate tracking is now populated and explicit.
+
+## Latest Notable Changes (EventQueue Re-prime Fallback Seed URL Path) (2026-04-09)
+- Extended EventQueue cap re-prime logic in `viewer_app` to attempt fallback seed-capability URLs observed from EventQueue simulator targets before reconnecting.
+- Added bounded recent seed-capability URL cache (`max=8`) and dedupe/promotion behavior.
+- Added fallback diagnostics:
+  - `fallback_urls=...` in cap re-prime error telemetry
+  - re-prime success source tag (`session_seed` or `recent_seed:<classified_url>`) in protocol/relay lines.
+- Added targeted tests in `viewer_app` for:
+  - recent seed-cap URL cache bounding + duplicate promotion
+  - empty recent-seed summary behavior
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_app`
+  - targeted tests:
+    - `cargo test -p viewer_app map_capability_reprime_from_seed_caps_extracts_event_queue_and_probe_urls -- --nocapture`
+    - `cargo test -p viewer_app remember_recent_seed_capability_url_is_bounded_and_promotes_duplicates -- --nocapture`
+    - `cargo test -p viewer_app summarize_recent_seed_capability_urls_reports_none_for_empty -- --nocapture`
+- Bounded live capture:
+  - `artifacts/logs/network_debug_event_queue_cap_rotation_fallback_seed_fix_2026-04-09.jsonl`
+  - cap re-prime still failed in this run because no recent seed-capability URLs were present at failure time (`fallback_urls=none`), then reconnect fallback executed.
+
+## Latest Notable Changes (EventQueue Cap Re-prime + Object Render Correctness Checks) (2026-04-09)
+- Added bounded EventQueue cap-not-found re-prime handling in `viewer_app`:
+  - On `VIEWER_APP_EVENT_QUEUE_CAP_NOT_FOUND_BEFORE_RECONNECT` threshold hit, the worker now attempts seed capability refresh and EventQueue URL rebind before reconnect fallback.
+  - Re-prime success path refreshes EventQueue + probe URLs, capability readiness/inventory summaries, and resets EventQueue ack/failure counters.
+  - Re-prime failure path emits explicit protocol/relay diagnostics and reconnect reason.
+- Added unit coverage for cap re-prime capability mapping extraction in `viewer_app`.
+- Added `viewer_core::math_utils` regression tests to lock transform matrix correctness for identity-rotation baseline and scale/translation mapping.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check --workspace`
+  - `cargo test -p viewer_net`
+  - `cargo test -p viewer_core`
+  - `cargo test -p viewer_render`
+- Bounded live capture:
+  - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_event_queue_cap_rotation_and_render_correctness_2026-04-09.jsonl cargo run -p viewer_app` (timeout-bounded)
+  - observed:
+    - EventQueue gate open and regular `EventQueueGet:ok` progression
+    - new re-prime branch activation on late-session cap-not-found threshold (`cap_reprime:start`)
+    - same run: re-prime fetch returned `404 cap not found`, reconnect fallback executed with explicit telemetry
+
 ## Latest Notable Changes (EventQueue LLSD Root Hardening Live Verify) (2026-04-09)
 - Ran a bounded live verification capture using:
   - `VIEWER_APP_LIVE_STARTUP=on`

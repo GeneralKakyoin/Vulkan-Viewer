@@ -12,7 +12,7 @@ use object_feed_diagnostics_utils::*;
 use runtime_relay_utils::*;
 use social_cache::{SocialCache, SocialCacheConfig};
 use start_location_utils::*;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1258,6 +1258,7 @@ async fn run_in_process_live_feed(
     let adapter = SecondLifeAdapter;
     let mut reconnect_attempt: u32 = 0;
     let mut auto_teleport_fired = false;
+    let mut recent_seed_capability_urls = VecDeque::new();
 
     let _ = tx.send(LiveFeedUpdate::Status(LiveStartupStatus::Starting));
     let _ = tx.send(LiveFeedUpdate::ChatConnection(
@@ -1375,6 +1376,10 @@ async fn run_in_process_live_feed(
         let mut startup_sim_name: Option<String> = None;
         if let GridLoginResult::Success(bootstrap) = &result {
             local_agent_id = bootstrap.agent_id.clone();
+            remember_recent_seed_capability_url(
+                &mut recent_seed_capability_urls,
+                &bootstrap.seed_capability,
+            );
             startup_sim_name = bootstrap
                 .start_location
                 .as_deref()
@@ -1468,7 +1473,7 @@ async fn run_in_process_live_feed(
             }
         }
         let mut capability_readiness = init_capability_readiness(capabilities.as_ref());
-        let event_queue_url = capabilities
+        let mut event_queue_url = capabilities
             .as_ref()
             .and_then(|caps| caps.entries.get("EventQueueGet"))
             .cloned();
@@ -2977,9 +2982,10 @@ async fn run_in_process_live_feed(
                                 .await;
                                 follow_region_seed_capabilities(
                                     &tx,
-                                    &connection,
+                                    &mut connection,
                                     &poll,
                                     &mut followed_seed_capability_urls,
+                                    &mut recent_seed_capability_urls,
                                 )
                                 .await;
                             }
@@ -3037,11 +3043,107 @@ async fn run_in_process_live_feed(
                                     RuntimeRelayLevel::Warn,
                                     "event_queue",
                                     &format!(
-                                        "event queue cap-not-found threshold reached ({}) ; reconnecting",
+                                        "event queue cap-not-found threshold reached ({}); attempting cap re-prime",
                                         config.event_queue_cap_not_found_before_reconnect
                                     ),
                                 );
-                                should_reconnect = true;
+                                push_protocol_event(
+                                    &mut protocol_events,
+                                    format!(
+                                        "EventQueueGet:cap_reprime:start failures={} threshold={}",
+                                        event_queue_cap_not_found_failures,
+                                        config.event_queue_cap_not_found_before_reconnect
+                                    ),
+                                );
+                                match reprime_event_queue_capabilities_with_fallback(
+                                    &mut connection,
+                                    &recent_seed_capability_urls,
+                                )
+                                .await
+                                {
+                                    Ok((reprime, reprime_source)) => {
+                                        if let Some(refreshed_url) = reprime.event_queue_url {
+                                            let previous_url = event_queue_url.take();
+                                            event_queue_url = Some(refreshed_url.clone());
+                                            pending_interest_list_probe_url =
+                                                reprime.pending_interest_list_probe_url;
+                                            pending_untrusted_simulator_message_probe_url = reprime
+                                                .pending_untrusted_simulator_message_probe_url;
+                                            capability_inventory_summary =
+                                                reprime.capability_inventory_summary;
+                                            capability_readiness = reprime.capability_readiness;
+                                            event_queue_cap_not_found_failures = 0;
+                                            event_queue_consecutive_failures = 0;
+                                            event_ack = 0;
+                                            let previous_url_text = previous_url
+                                                .as_deref()
+                                                .map(format_classified_url)
+                                                .unwrap_or_else(|| String::from("none"));
+                                            let refreshed_url_text =
+                                                format_classified_url(&refreshed_url);
+                                            push_protocol_event(
+                                                &mut protocol_events,
+                                                format!(
+                                                    "EventQueueGet:cap_reprime:ok source={} ack_reset=0 prev={} next={} non_baseline={}",
+                                                    reprime_source,
+                                                    previous_url_text,
+                                                    refreshed_url_text,
+                                                    reprime.non_baseline_caps_by_host
+                                                ),
+                                            );
+                                            emit_relay(
+                                                &tx,
+                                                RuntimeRelayLevel::Info,
+                                                "event_queue",
+                                                &format!(
+                                                    "event queue cap re-prime succeeded (source={}): prev={} next={}",
+                                                    reprime_source,
+                                                    previous_url_text,
+                                                    refreshed_url_text
+                                                ),
+                                            );
+                                        } else {
+                                            push_protocol_event(
+                                                &mut protocol_events,
+                                                String::from(
+                                                    "EventQueueGet:cap_reprime:err missing_event_queue_cap",
+                                                ),
+                                            );
+                                            emit_relay(
+                                                &tx,
+                                                RuntimeRelayLevel::Warn,
+                                                "event_queue",
+                                                "event queue cap re-prime returned no EventQueueGet capability; reconnecting",
+                                            );
+                                            reconnect_reason = Some(String::from(
+                                                "event queue cap re-prime missing EventQueueGet capability",
+                                            ));
+                                            should_reconnect = true;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        let fallback_urls = summarize_recent_seed_capability_urls(
+                                            &recent_seed_capability_urls,
+                                        );
+                                        push_protocol_event(
+                                            &mut protocol_events,
+                                            format!(
+                                                "EventQueueGet:cap_reprime:err {err} fallback_urls={fallback_urls}"
+                                            ),
+                                        );
+                                        emit_relay(
+                                            &tx,
+                                            RuntimeRelayLevel::Warn,
+                                            "event_queue",
+                                            &format!(
+                                                "event queue cap re-prime failed: {err}; fallback_urls={fallback_urls}; reconnecting"
+                                            ),
+                                        );
+                                        reconnect_reason =
+                                            Some(format!("event queue cap re-prime failed: {err}"));
+                                        should_reconnect = true;
+                                    }
+                                }
                             }
                             if config.event_queue_failures_before_reconnect > 0
                                 && event_queue_consecutive_failures
@@ -3657,6 +3759,7 @@ fn update_live_visual_from_connection(
             local_id: obj.local_id,
             scale_centi: obj.scale_centi,
             position_centi: obj.position_centi,
+            rotation_quat_i16: obj.rotation_quat_i16,
             mesh_id: obj.mesh_id.clone(),
             texture_id: obj
                 .texture_id
@@ -3697,6 +3800,110 @@ fn filter_object_feed_objects_by_focus(
         return;
     };
     objects.retain(|obj| obj.object_id.as_deref() == Some(focus_uuid));
+}
+
+struct EventQueueCapReprime {
+    event_queue_url: Option<String>,
+    pending_interest_list_probe_url: Option<String>,
+    pending_untrusted_simulator_message_probe_url: Option<String>,
+    capability_inventory_summary: String,
+    capability_readiness: BTreeMap<String, CapabilityReadinessEntry>,
+    non_baseline_caps_by_host: String,
+}
+
+const MAX_RECENT_SEED_CAPABILITY_URLS: usize = 8;
+
+fn remember_recent_seed_capability_url(recent_seed_urls: &mut VecDeque<String>, seed_url: &str) {
+    if seed_url.trim().is_empty() {
+        return;
+    }
+    if let Some(existing_idx) = recent_seed_urls.iter().position(|url| url == seed_url) {
+        recent_seed_urls.remove(existing_idx);
+    }
+    recent_seed_urls.push_front(seed_url.to_string());
+    while recent_seed_urls.len() > MAX_RECENT_SEED_CAPABILITY_URLS {
+        recent_seed_urls.pop_back();
+    }
+}
+
+fn summarize_recent_seed_capability_urls(recent_seed_urls: &VecDeque<String>) -> String {
+    if recent_seed_urls.is_empty() {
+        return String::from("none");
+    }
+    recent_seed_urls
+        .iter()
+        .map(|url| format_classified_url(url))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn map_capability_reprime_from_seed_caps(
+    caps: &viewer_net::SeedCapabilityMap,
+    inventory_entries: &[viewer_net::SeedCapabilityInventoryEntry],
+) -> EventQueueCapReprime {
+    EventQueueCapReprime {
+        event_queue_url: caps.entries.get("EventQueueGet").cloned(),
+        pending_interest_list_probe_url: caps.entries.get("InterestList").cloned(),
+        pending_untrusted_simulator_message_probe_url: caps
+            .entries
+            .get("UntrustedSimulatorMessage")
+            .cloned(),
+        capability_inventory_summary: summarize_seed_capability_inventory(inventory_entries),
+        capability_readiness: init_capability_readiness(Some(caps)),
+        non_baseline_caps_by_host: summarize_non_baseline_caps_by_host(&caps.entries, 16),
+    }
+}
+
+async fn reprime_event_queue_capabilities(
+    connection: &mut Connection,
+) -> Result<EventQueueCapReprime, String> {
+    let caps = connection
+        .fetch_seed_capabilities()
+        .await
+        .map_err(|err| err.to_string())?;
+    let inventory = connection.summarize_seed_capability_inventory(&caps);
+    Ok(map_capability_reprime_from_seed_caps(&caps, &inventory))
+}
+
+async fn reprime_event_queue_capabilities_with_fallback(
+    connection: &mut Connection,
+    recent_seed_urls: &VecDeque<String>,
+) -> Result<(EventQueueCapReprime, String), String> {
+    match reprime_event_queue_capabilities(connection).await {
+        Ok(reprime) => return Ok((reprime, String::from("session_seed"))),
+        Err(session_seed_err) => {
+            let mut tried = BTreeSet::<String>::new();
+            let mut fallback_errors = Vec::new();
+            for seed_url in recent_seed_urls {
+                if !tried.insert(seed_url.clone()) {
+                    continue;
+                }
+                match connection.fetch_seed_capabilities_from_url(seed_url).await {
+                    Ok(caps) => {
+                        let _ = connection.set_session_seed_capability_url(seed_url);
+                        let inventory = connection.summarize_seed_capability_inventory(&caps);
+                        let reprime = map_capability_reprime_from_seed_caps(&caps, &inventory);
+                        return Ok((
+                            reprime,
+                            format!("recent_seed:{}", format_classified_url(seed_url)),
+                        ));
+                    }
+                    Err(err) => fallback_errors
+                        .push(format!("{} => {err}", format_classified_url(seed_url))),
+                }
+            }
+
+            if fallback_errors.is_empty() {
+                return Err(format!(
+                    "session seed refresh failed: {session_seed_err}; no recent seed-capability URLs available"
+                ));
+            }
+            Err(format!(
+                "session seed refresh failed: {session_seed_err}; fallback attempts exhausted: {}",
+                fallback_errors.join(" | ")
+            ))
+        }
+    }
 }
 
 fn spawn_event_queue_poll_task(
@@ -3997,14 +4204,16 @@ fn extract_enable_simulator_endpoint(
 
 async fn follow_region_seed_capabilities(
     tx: &mpsc::Sender<LiveFeedUpdate>,
-    connection: &Connection,
+    connection: &mut Connection,
     poll: &viewer_net::EventQueuePollResult,
     followed_seed_urls: &mut BTreeSet<String>,
+    recent_seed_urls: &mut VecDeque<String>,
 ) {
     for target in connection.extract_event_queue_simulator_targets(poll) {
         let Some(seed_url) = target.seed_capability.as_deref() else {
             continue;
         };
+        remember_recent_seed_capability_url(recent_seed_urls, seed_url);
         let message_name = target.message.clone();
         if !followed_seed_urls.insert(seed_url.to_string()) {
             continue;
@@ -4012,6 +4221,7 @@ async fn follow_region_seed_capabilities(
 
         match connection.fetch_seed_capabilities_from_url(seed_url).await {
             Ok(caps) => {
+                let _ = connection.set_session_seed_capability_url(seed_url);
                 let inventory = connection.summarize_seed_capability_inventory(&caps);
                 let summary = summarize_seed_capability_inventory(&inventory);
                 let discovered_non_baseline =
@@ -7798,6 +8008,7 @@ mod tests {
                 local_id: 1,
                 scale_centi: Some([100, 100, 100]),
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
                 default_face_material: None,
@@ -7808,6 +8019,7 @@ mod tests {
                 local_id: 2,
                 scale_centi: Some([100, 100, 100]),
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
                 default_face_material: None,
@@ -7818,6 +8030,7 @@ mod tests {
                 local_id: 3,
                 scale_centi: Some([100, 100, 100]),
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
                 default_face_material: None,
@@ -7843,6 +8056,91 @@ mod tests {
         assert!(!is_event_queue_cap_not_found_error(
             "transport error: timeout waiting for response"
         ));
+    }
+
+    #[test]
+    fn map_capability_reprime_from_seed_caps_extracts_event_queue_and_probe_urls() {
+        let mut caps = viewer_net::SeedCapabilityMap::default();
+        caps.entries.insert(
+            String::from("EventQueueGet"),
+            String::from("https://sim.example.invalid/cap/event"),
+        );
+        caps.entries.insert(
+            String::from("InterestList"),
+            String::from("https://sim.example.invalid/cap/interest"),
+        );
+        caps.entries.insert(
+            String::from("UntrustedSimulatorMessage"),
+            String::from("https://sim.example.invalid/cap/untrusted"),
+        );
+        caps.entries.insert(
+            String::from("GetDisplayNames"),
+            String::from("https://display.example.invalid/cap/names"),
+        );
+        let inventory = vec![viewer_net::SeedCapabilityInventoryEntry {
+            name: String::from("EventQueueGet"),
+            classification: viewer_net::CapabilityUrlClassification {
+                family: viewer_net::CapabilityUrlFamily::SimulatorHost12043,
+                host: Some(String::from("sim.example.invalid")),
+                port: Some(12043),
+            },
+        }];
+
+        let reprime = map_capability_reprime_from_seed_caps(&caps, &inventory);
+
+        assert_eq!(
+            reprime.event_queue_url.as_deref(),
+            Some("https://sim.example.invalid/cap/event")
+        );
+        assert_eq!(
+            reprime.pending_interest_list_probe_url.as_deref(),
+            Some("https://sim.example.invalid/cap/interest")
+        );
+        assert_eq!(
+            reprime
+                .pending_untrusted_simulator_message_probe_url
+                .as_deref(),
+            Some("https://sim.example.invalid/cap/untrusted")
+        );
+        assert!(reprime.capability_inventory_summary.contains("families="));
+        assert!(
+            reprime
+                .non_baseline_caps_by_host
+                .contains("GetDisplayNames")
+        );
+    }
+
+    #[test]
+    fn remember_recent_seed_capability_url_is_bounded_and_promotes_duplicates() {
+        let mut recent = VecDeque::new();
+        for idx in 0..(MAX_RECENT_SEED_CAPABILITY_URLS + 2) {
+            remember_recent_seed_capability_url(
+                &mut recent,
+                &format!("https://seed{}.example.invalid/cap", idx),
+            );
+        }
+        assert_eq!(recent.len(), MAX_RECENT_SEED_CAPABILITY_URLS);
+        assert_eq!(
+            recent.front().map(String::as_str),
+            Some("https://seed9.example.invalid/cap")
+        );
+        assert_eq!(
+            recent.back().map(String::as_str),
+            Some("https://seed2.example.invalid/cap")
+        );
+
+        remember_recent_seed_capability_url(&mut recent, "https://seed5.example.invalid/cap");
+        assert_eq!(
+            recent.front().map(String::as_str),
+            Some("https://seed5.example.invalid/cap")
+        );
+        assert_eq!(recent.len(), MAX_RECENT_SEED_CAPABILITY_URLS);
+    }
+
+    #[test]
+    fn summarize_recent_seed_capability_urls_reports_none_for_empty() {
+        let recent = VecDeque::new();
+        assert_eq!(summarize_recent_seed_capability_urls(&recent), "none");
     }
 
     #[test]
@@ -7877,6 +8175,7 @@ mod tests {
                     local_id: 20,
                     scale_centi: None,
                     position_centi: None,
+                    rotation_quat_i16: None,
                     mesh_id: None,
                     texture_id: None,
                     default_face_material: None,
@@ -7887,6 +8186,7 @@ mod tests {
                     local_id: 10,
                     scale_centi: None,
                     position_centi: None,
+                    rotation_quat_i16: None,
                     mesh_id: None,
                     texture_id: None,
                     default_face_material: None,
@@ -8779,6 +9079,7 @@ mod tests {
                 local_id: 1,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("BBB")),
                 texture_id: None,
                 default_face_material: None,
@@ -8789,6 +9090,7 @@ mod tests {
                 local_id: 2,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("aaa")),
                 texture_id: None,
                 default_face_material: None,
@@ -8799,6 +9101,7 @@ mod tests {
                 local_id: 3,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("bbb")),
                 texture_id: None,
                 default_face_material: None,
@@ -8809,6 +9112,7 @@ mod tests {
                 local_id: 4,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("   ")),
                 texture_id: None,
                 default_face_material: None,
@@ -8819,6 +9123,7 @@ mod tests {
                 local_id: 5,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("cccccccc-cccc-cccc-cccc-cccccccccccc")),
                 texture_id: None,
                 default_face_material: None,
@@ -8845,6 +9150,7 @@ mod tests {
                 local_id: 1,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: Some(AssetID::new("bbb")),
                 default_face_material: None,
@@ -8855,6 +9161,7 @@ mod tests {
                 local_id: 2,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: Some(AssetID::new("aaa")),
                 default_face_material: None,
@@ -8865,6 +9172,7 @@ mod tests {
                 local_id: 3,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: Some(AssetID::new("bbb")),
                 default_face_material: None,
@@ -8875,6 +9183,7 @@ mod tests {
                 local_id: 4,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: Some(AssetID::new("   ")),
                 default_face_material: None,
@@ -8897,6 +9206,7 @@ mod tests {
             local_id: 9,
             scale_centi: None,
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
             default_face_material: Some(viewer_core::DecodedWorldObjectFaceMaterial {
@@ -9235,6 +9545,7 @@ mod tests {
                 local_id: 1,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("bbb")),
                 texture_id: None,
                 default_face_material: None,
@@ -9245,6 +9556,7 @@ mod tests {
                 local_id: 2,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("aaa")),
                 texture_id: None,
                 default_face_material: None,
@@ -9255,6 +9567,7 @@ mod tests {
                 local_id: 3,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("ccc")),
                 texture_id: None,
                 default_face_material: None,
@@ -9309,6 +9622,7 @@ mod tests {
                 local_id: 1,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: Some(String::from("aaa")),
                 texture_id: None,
                 default_face_material: None,
@@ -9319,6 +9633,7 @@ mod tests {
                 local_id: 2,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
                 default_face_material: None,

@@ -787,6 +787,7 @@ pub struct DecodedWorldObjectFeedObject {
     pub local_id: u32,
     pub scale_centi: Option<[u16; 3]>,
     pub position_centi: Option<[i32; 3]>,
+    pub rotation_quat_i16: Option<[i16; 4]>,
     pub mesh_id: Option<String>,
     pub texture_id: Option<AssetID>,
     pub default_face_material: Option<DecodedWorldObjectFaceMaterial>,
@@ -1993,6 +1994,7 @@ pub struct WorldObjectIngestionItem {
     pub decoded_object_local_id: Option<u32>,
     pub decoded_object_scale_centi: Option<[u16; 3]>,
     pub decoded_object_position_centi: Option<[i32; 3]>,
+    pub decoded_object_rotation_quat_i16: Option<[i16; 4]>,
     pub decoded_object_mesh_id: Option<String>,
     pub decoded_object_texture_id: Option<AssetID>,
     pub decoded_object_default_face_material: Option<DecodedWorldObjectFaceMaterial>,
@@ -2036,6 +2038,7 @@ impl WorldObjectIngestionSeam {
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
             decoded_object_position_centi: None,
+            decoded_object_rotation_quat_i16: None,
             decoded_object_mesh_id: None,
             decoded_object_texture_id: None,
             decoded_object_default_face_material: None,
@@ -2068,6 +2071,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
+                decoded_object_rotation_quat_i16: None,
                 decoded_object_mesh_id: None,
                 decoded_object_texture_id: None,
                 decoded_object_default_face_material: None,
@@ -2129,6 +2133,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
+                decoded_object_rotation_quat_i16: None,
                 decoded_object_mesh_id: None,
                 decoded_object_texture_id: None,
                 decoded_object_default_face_material: None,
@@ -2200,6 +2205,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
+                decoded_object_rotation_quat_i16: None,
                 decoded_object_mesh_id: None,
                 decoded_object_texture_id: None,
                 decoded_object_default_face_material: None,
@@ -2232,6 +2238,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
+                    decoded_object_rotation_quat_i16: None,
                     decoded_object_mesh_id: None,
                     decoded_object_texture_id: None,
                     decoded_object_default_face_material: None,
@@ -2284,6 +2291,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
+                decoded_object_rotation_quat_i16: None,
                 decoded_object_mesh_id: None,
                 decoded_object_texture_id: None,
                 decoded_object_default_face_material: None,
@@ -2335,6 +2343,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
+                decoded_object_rotation_quat_i16: None,
                 decoded_object_mesh_id: None,
                 decoded_object_texture_id: None,
                 decoded_object_default_face_material: None,
@@ -2387,6 +2396,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
+                    decoded_object_rotation_quat_i16: None,
                     decoded_object_mesh_id: None,
                     decoded_object_texture_id: None,
                     decoded_object_default_face_material: None,
@@ -2421,6 +2431,7 @@ impl WorldObjectIngestionSeam {
                         decoded_object_local_id: Some(obj.local_id),
                         decoded_object_scale_centi: obj.scale_centi,
                         decoded_object_position_centi: obj.position_centi,
+                        decoded_object_rotation_quat_i16: obj.rotation_quat_i16,
                         decoded_object_mesh_id: obj.mesh_id.clone(),
                         decoded_object_texture_id: obj.texture_id.clone(),
                         decoded_object_default_face_material: obj.default_face_material.clone(),
@@ -2456,6 +2467,7 @@ impl WorldObjectIngestionSeam {
                         decoded_object_local_id: Some(*local_id),
                         decoded_object_scale_centi: None,
                         decoded_object_position_centi: None,
+                        decoded_object_rotation_quat_i16: None,
                         decoded_object_mesh_id: None,
                         decoded_object_texture_id: None,
                         decoded_object_default_face_material: None,
@@ -2528,6 +2540,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
+                    decoded_object_rotation_quat_i16: None,
                     decoded_object_mesh_id: None,
                     decoded_object_texture_id: None,
                     decoded_object_default_face_material: None,
@@ -2573,6 +2586,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
+                    decoded_object_rotation_quat_i16: None,
                     decoded_object_mesh_id: None,
                     decoded_object_texture_id: None,
                     decoded_object_default_face_material: None,
@@ -2607,6 +2621,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
+                    decoded_object_rotation_quat_i16: None,
                     decoded_object_mesh_id: None,
                     decoded_object_texture_id: None,
                     decoded_object_default_face_material: None,
@@ -3990,9 +4005,21 @@ fn world_object_feed_proxy_transform(
             ]
         })
         .unwrap_or([0.18, 0.18, 0.18]);
+    let rotation = item
+        .decoded_object_rotation_quat_i16
+        .map(|[x, y, z, w]| {
+            // Map decoded SL quaternion (X,Y,Z,W) into scene-space axis convention (X,Z,Y,W).
+            [
+                f32::from(x) / 32_767.0,
+                f32::from(z) / 32_767.0,
+                f32::from(y) / 32_767.0,
+                f32::from(w) / 32_767.0,
+            ]
+        })
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
     Transform {
-        rotation: [0.0, 0.0, 0.0, 1.0],
+        rotation,
         position: [px, py, pz],
         scale,
     }
@@ -6066,6 +6093,7 @@ mod tests {
                 local_id: 42,
                 scale_centi: Some([20, 30, 40]),
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
                 default_face_material: None,
@@ -6076,6 +6104,7 @@ mod tests {
                 local_id: 99,
                 scale_centi: None,
                 position_centi: None,
+                rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
                 default_face_material: None,
@@ -6101,6 +6130,7 @@ mod tests {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
             default_face_material: None,
@@ -6125,6 +6155,7 @@ mod tests {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
             default_face_material: None,
@@ -6153,6 +6184,7 @@ mod tests {
             local_id: 42,
             scale_centi: Some([120, 340, 560]),
             position_centi: Some([13000, 12550, 250]),
+            rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
             default_face_material: None,
@@ -6182,6 +6214,7 @@ mod tests {
             local_id: 42,
             scale_centi: None,
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
             default_face_material: None,
@@ -6200,6 +6233,36 @@ mod tests {
     }
 
     #[test]
+    fn scene_world_object_feed_maps_decoded_rotation_quaternion_to_scene_axes() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 77,
+            scale_centi: Some([100, 100, 100]),
+            position_centi: Some([12800, 12800, 100]),
+            rotation_quat_i16: Some([0, 23_170, 0, 23_170]),
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+        let expected = [0.0, 0.0, 23_170.0 / 32_767.0, 23_170.0 / 32_767.0];
+        for (actual, expected_component) in proxy.transform.rotation.iter().zip(expected) {
+            assert!((actual - expected_component).abs() <= 0.0005);
+        }
+    }
+
+    #[test]
     fn scene_world_object_feed_uses_live_mesh_geometry_when_mesh_id_present() {
         let mut scene = Scene::prototype();
         let mut snapshot = sample_snapshot(true, true);
@@ -6209,6 +6272,7 @@ mod tests {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: Some(String::from("947D4505-EB76-2EF5-C049-E7882881D689")),
             texture_id: None,
             default_face_material: None,
@@ -6250,6 +6314,7 @@ mod tests {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: Some(String::from("947D4505-EB76-2EF5-C049-E7882881D689")),
             texture_id: Some(AssetID::new("10930d3b-1821-c584-a0c7-28a34999800d")),
             default_face_material: None,
@@ -6282,6 +6347,7 @@ mod tests {
             local_id: 4242,
             scale_centi: Some([100, 100, 100]),
             position_centi: None,
+            rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
             default_face_material: Some(DecodedWorldObjectFaceMaterial {
@@ -6442,6 +6508,7 @@ mod tests {
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
             decoded_object_position_centi: None,
+            decoded_object_rotation_quat_i16: None,
             decoded_object_mesh_id: None,
             decoded_object_texture_id: None,
             decoded_object_default_face_material: None,

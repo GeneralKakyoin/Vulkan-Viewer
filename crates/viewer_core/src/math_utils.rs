@@ -79,18 +79,24 @@ pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 }
 
 pub fn quat_to_mat4(q: [f32; 4]) -> [[f32; 4]; 4] {
-    let x2 = q[0] + q[0];
-    let y2 = q[1] + q[1];
-    let z2 = q[2] + q[2];
-    let xx = q[0] * x2;
-    let xy = q[0] * y2;
-    let xz = q[0] * z2;
-    let yy = q[1] * y2;
-    let yz = q[1] * z2;
-    let zz = q[2] * z2;
-    let wx = q[3] * x2;
-    let wy = q[3] * y2;
-    let wz = q[3] * z2;
+    let q_len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    let normalized = if q_len > 0.0 {
+        [q[0] / q_len, q[1] / q_len, q[2] / q_len, q[3] / q_len]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    };
+    let x2 = normalized[0] + normalized[0];
+    let y2 = normalized[1] + normalized[1];
+    let z2 = normalized[2] + normalized[2];
+    let xx = normalized[0] * x2;
+    let xy = normalized[0] * y2;
+    let xz = normalized[0] * z2;
+    let yy = normalized[1] * y2;
+    let yz = normalized[1] * z2;
+    let zz = normalized[2] * z2;
+    let wx = normalized[3] * x2;
+    let wy = normalized[3] * y2;
+    let wz = normalized[3] * z2;
 
     [
         [1.0 - (yy + zz), xy + wz, xz - wy, 0.0],
@@ -123,4 +129,54 @@ pub fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
         m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
         m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transform_to_mat4_default_transform_is_identity() {
+        let matrix = transform_to_mat4(Transform::default());
+        assert_eq!(
+            matrix,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn transform_to_mat4_preserves_identity_rotation_and_applies_scale_translation() {
+        let transform = Transform {
+            position: [5.0, 6.0, 7.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [2.0, 3.0, 4.0],
+        };
+        let matrix = transform_to_mat4(transform);
+        assert_eq!(matrix[0][0], 2.0);
+        assert_eq!(matrix[1][1], 3.0);
+        assert_eq!(matrix[2][2], 4.0);
+        assert_eq!(matrix[3][0], 5.0);
+        assert_eq!(matrix[3][1], 6.0);
+        assert_eq!(matrix[3][2], 7.0);
+        assert_eq!(matrix[3][3], 1.0);
+    }
+
+    #[test]
+    fn quat_to_mat4_normalizes_non_unit_identity_quaternion() {
+        let matrix = quat_to_mat4([0.0, 0.0, 0.0, 2.0]);
+        assert_eq!(
+            matrix,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        );
+    }
 }
