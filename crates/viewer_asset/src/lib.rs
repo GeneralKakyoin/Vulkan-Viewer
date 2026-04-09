@@ -5,9 +5,19 @@ use viewer_core::geometry::sculpt::generate_sculpt_mesh;
 use viewer_core::{SculptType, Vertex, VolumeParams};
 
 pub mod mesh_loader;
+mod sl_mesh_loader;
 pub mod texture_fixture;
-use mesh_loader::load_gltf_mesh;
+
+pub use sl_mesh_loader::{
+    MeshSourceFormat, debug_triangle_second_life_mesh_bytes, detect_mesh_source_format,
+};
 pub use texture_fixture::{DecodedRgbaImage, FixtureTextureCache};
+
+pub mod mesh_decode_utils;
+pub mod texture_decode_utils;
+
+pub(crate) use mesh_decode_utils::*;
+pub use texture_decode_utils::*;
 
 #[derive(Debug, Clone)]
 pub enum AssetStatus<T> {
@@ -53,10 +63,28 @@ pub trait LiveTextureProvider: Send + Sync {
     ) -> anyhow::Result<Option<AssetFetchOutcome<DecodedRgbaImage>>>;
 }
 
+#[derive(Debug)]
 pub struct ProcessedMesh {
     pub vertices: Vec<Vertex>,
     pub submeshes: Vec<SubMesh>,
     pub aabb: viewer_core::Aabb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshCacheLookupState {
+    EmptyData,
+    CachedReady,
+    Decoded,
+    DecodeFailed,
+}
+
+#[derive(Debug, Clone)]
+pub struct MeshCacheLookup {
+    pub mesh: Arc<ProcessedMesh>,
+    pub state: MeshCacheLookupState,
+    pub format: MeshSourceFormat,
+    pub failure: Option<AssetFetchFailureReason>,
+    pub detail: Option<String>,
 }
 
 #[derive(Default)]
@@ -65,6 +93,8 @@ pub struct GeometryCache {
     pub sculpts: HashMap<(String, SculptType), Arc<ProcessedMesh>>,
     pub meshes: HashMap<(String, u32), Arc<ProcessedMesh>>, // UUID, LOD
     pub mesh_attempted_hash: HashMap<(String, u32), u64>, // prevents per-frame reload of same bytes
+    pub mesh_source_formats: HashMap<(String, u32), MeshSourceFormat>,
+    pub mesh_failure_details: HashMap<(String, u32), String>,
 }
 
 impl GeometryCache {
@@ -111,7 +141,7 @@ impl GeometryCache {
         mesh
     }
 
-    pub fn get_mesh(&mut self, uuid: &str, lod: u32, data: &[u8]) -> Arc<ProcessedMesh> {
+    pub fn get_mesh_with_status(&mut self, uuid: &str, lod: u32, data: &[u8]) -> MeshCacheLookup {
         let key = (uuid.to_string(), lod);
 
         // Ensure we always have a stable cached entry for determinism (even when missing).
@@ -127,151 +157,91 @@ impl GeometryCache {
 
         let is_ready = !cached.vertices.is_empty() && !cached.submeshes.is_empty();
         if is_ready {
-            return Arc::clone(cached);
+            return MeshCacheLookup {
+                mesh: Arc::clone(cached),
+                state: MeshCacheLookupState::CachedReady,
+                format: self
+                    .mesh_source_formats
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(MeshSourceFormat::Unknown),
+                failure: None,
+                detail: None,
+            };
         }
 
         if data.is_empty() {
             self.mesh_attempted_hash.insert(key, 0);
-            return Arc::clone(cached);
+            return MeshCacheLookup {
+                mesh: Arc::clone(cached),
+                state: MeshCacheLookupState::EmptyData,
+                format: MeshSourceFormat::Unknown,
+                failure: None,
+                detail: None,
+            };
         }
 
         let new_hash = hash_bytes(data);
+        let detected_format = detect_mesh_source_format(data);
         if self.mesh_attempted_hash.get(&key).copied() == Some(new_hash) {
-            return Arc::clone(cached);
+            return MeshCacheLookup {
+                mesh: Arc::clone(cached),
+                state: MeshCacheLookupState::DecodeFailed,
+                format: self
+                    .mesh_source_formats
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(detected_format),
+                failure: Some(if detected_format == MeshSourceFormat::Unknown {
+                    AssetFetchFailureReason::Unsupported
+                } else {
+                    AssetFetchFailureReason::Decode
+                }),
+                detail: self.mesh_failure_details.get(&key).cloned(),
+            };
         }
 
-        match load_gltf_mesh(data) {
+        match load_mesh_bytes(data, lod) {
             Ok(mesh) => {
+                self.mesh_source_formats
+                    .insert(key.clone(), detected_format);
+                self.mesh_failure_details.remove(&key);
                 let mesh_arc = Arc::new(mesh);
                 self.meshes.insert(key.clone(), Arc::clone(&mesh_arc));
                 self.mesh_attempted_hash.remove(&key);
-                mesh_arc
+                MeshCacheLookup {
+                    mesh: mesh_arc,
+                    state: MeshCacheLookupState::Decoded,
+                    format: detected_format,
+                    failure: None,
+                    detail: None,
+                }
             }
-            Err(_) => {
+            Err(err) => {
                 self.mesh_attempted_hash.insert(key, new_hash);
-                Arc::clone(cached)
+                let failure = if detected_format == MeshSourceFormat::Unknown {
+                    AssetFetchFailureReason::Unsupported
+                } else {
+                    AssetFetchFailureReason::Decode
+                };
+                self.mesh_source_formats
+                    .insert((uuid.to_string(), lod), detected_format);
+                self.mesh_failure_details
+                    .insert((uuid.to_string(), lod), err.to_string());
+                MeshCacheLookup {
+                    mesh: Arc::clone(cached),
+                    state: MeshCacheLookupState::DecodeFailed,
+                    format: detected_format,
+                    failure: Some(failure),
+                    detail: Some(err.to_string()),
+                }
             }
         }
     }
-}
 
-pub fn get_lod_level(distance: f32) -> u32 {
-    if distance < 15.0 {
-        0
+    pub fn get_mesh(&mut self, uuid: &str, lod: u32, data: &[u8]) -> Arc<ProcessedMesh> {
+        self.get_mesh_with_status(uuid, lod, data).mesh
     }
-    // High
-    else if distance < 40.0 {
-        1
-    }
-    // Mid
-    else if distance < 80.0 {
-        2
-    }
-    // Low
-    else {
-        3
-    } // Tiny
-}
-
-fn hash_bytes(data: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish()
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TextureDecodeError {
-    #[error("unsupported image format")]
-    Unsupported,
-}
-
-pub fn decode_texture_rgba8(bytes: &[u8]) -> Result<DecodedRgbaImage, TextureDecodeError> {
-    if let Ok(img) = image::load_from_memory(bytes) {
-        let (width, height) = image::GenericImageView::dimensions(&img);
-        let rgba = img.to_rgba8().into_raw();
-        return Ok(DecodedRgbaImage {
-            width,
-            height,
-            rgba,
-        });
-    }
-
-    if let Ok(j2k) = jpeg2k::Image::from_bytes(bytes)
-        && let Ok(decoded) = image::DynamicImage::try_from(&j2k)
-    {
-        let rgba = decoded.to_rgba8();
-        return Ok(DecodedRgbaImage {
-            width: rgba.width(),
-            height: rgba.height(),
-            rgba: rgba.into_raw(),
-        });
-    }
-
-    let jp2 = justjp2::decode(bytes).map_err(|_| TextureDecodeError::Unsupported)?;
-    if jp2.components.is_empty() || jp2.width == 0 || jp2.height == 0 {
-        return Err(TextureDecodeError::Unsupported);
-    }
-
-    let width = jp2.width as usize;
-    let height = jp2.height as usize;
-    let mut rgba = vec![0u8; width * height * 4];
-    for y in 0..height {
-        for x in 0..width {
-            let r = sample_jp2_component_u8(&jp2.components, 0, x, y, width, height);
-            let g = sample_jp2_component_u8(&jp2.components, 1, x, y, width, height);
-            let b = sample_jp2_component_u8(&jp2.components, 2, x, y, width, height);
-            let alpha = sample_jp2_component_u8(&jp2.components, 3, x, y, width, height);
-            let idx = (y * width + x) * 4;
-            rgba[idx] = r;
-            rgba[idx + 1] = g;
-            rgba[idx + 2] = b;
-            rgba[idx + 3] = if jp2.components.len() >= 4 {
-                alpha
-            } else {
-                255
-            };
-        }
-    }
-
-    Ok(DecodedRgbaImage {
-        width: jp2.width,
-        height: jp2.height,
-        rgba,
-    })
-}
-
-fn sample_jp2_component_u8(
-    components: &[justjp2::Component],
-    component_idx: usize,
-    x: usize,
-    y: usize,
-    out_width: usize,
-    out_height: usize,
-) -> u8 {
-    let component = components
-        .get(component_idx)
-        .or_else(|| components.first())
-        .expect("jp2 components non-empty");
-    let comp_width = component.width.max(1) as usize;
-    let comp_height = component.height.max(1) as usize;
-    let sx = (x * comp_width) / out_width.max(1);
-    let sy = (y * comp_height) / out_height.max(1);
-    let idx = sy.saturating_mul(comp_width).saturating_add(sx);
-    let sample = *component.data.get(idx).unwrap_or(&0);
-    let precision = component.precision.clamp(1, 31);
-    let max = ((1i64 << precision) - 1).max(1);
-    let normalized = if component.signed {
-        let bias = 1i64 << (precision - 1);
-        (i64::from(sample) + bias).clamp(0, max)
-    } else {
-        i64::from(sample).clamp(0, max)
-    };
-    ((normalized * 255) / max) as u8
-}
-
-pub fn decode_png_rgba8(bytes: &[u8]) -> anyhow::Result<DecodedRgbaImage> {
-    decode_texture_rgba8(bytes).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 #[cfg(test)]
@@ -281,57 +251,46 @@ mod tests {
     #[test]
     fn get_mesh_caches_missing_entry_on_empty_data() {
         let mut cache = GeometryCache::new();
-        let a = cache.get_mesh("dummy", 0, &[]);
-        let b = cache.get_mesh("dummy", 0, &[]);
-        assert!(Arc::ptr_eq(&a, &b));
-        assert!(a.vertices.is_empty());
-        assert!(a.submeshes.is_empty());
+        let a = cache.get_mesh_with_status("dummy", 0, &[]);
+        let b = cache.get_mesh_with_status("dummy", 0, &[]);
+        assert_eq!(a.state, MeshCacheLookupState::EmptyData);
+        assert_eq!(b.state, MeshCacheLookupState::EmptyData);
+        assert!(Arc::ptr_eq(&a.mesh, &b.mesh));
+        assert!(a.mesh.vertices.is_empty());
+        assert!(a.mesh.submeshes.is_empty());
     }
 
     #[test]
     fn get_mesh_does_not_reparse_same_invalid_bytes_every_call() {
         let mut cache = GeometryCache::new();
-        let a = cache.get_mesh("dummy", 0, b"not-a-gltf");
-        let b = cache.get_mesh("dummy", 0, b"not-a-gltf");
-        assert!(Arc::ptr_eq(&a, &b));
-        assert!(a.vertices.is_empty());
-        assert!(a.submeshes.is_empty());
+        let a = cache.get_mesh_with_status("dummy", 0, b"not-a-gltf");
+        let b = cache.get_mesh_with_status("dummy", 0, b"not-a-gltf");
+        assert_eq!(a.state, MeshCacheLookupState::DecodeFailed);
+        assert_eq!(b.state, MeshCacheLookupState::DecodeFailed);
+        assert_eq!(a.failure, Some(AssetFetchFailureReason::Unsupported));
+        assert!(Arc::ptr_eq(&a.mesh, &b.mesh));
+        assert!(a.mesh.vertices.is_empty());
+        assert!(a.mesh.submeshes.is_empty());
     }
 
     #[test]
-    fn decode_texture_rgba8_decodes_png() {
-        let image = image::RgbaImage::from_raw(1, 1, vec![1, 2, 3, 255]).expect("valid image");
-        let mut bytes = Vec::new();
-        image
-            .write_to(
-                &mut std::io::Cursor::new(&mut bytes),
-                image::ImageFormat::Png,
-            )
-            .expect("encode png");
-
-        let decoded = decode_texture_rgba8(&bytes).expect("png should decode");
-        assert_eq!(decoded.width, 1);
-        assert_eq!(decoded.height, 1);
-        assert_eq!(decoded.rgba, vec![1, 2, 3, 255]);
+    fn get_mesh_decodes_second_life_mesh_bytes() {
+        let bytes = crate::debug_triangle_second_life_mesh_bytes();
+        let mut cache = GeometryCache::new();
+        let lookup = cache.get_mesh_with_status("mesh", 0, &bytes);
+        assert_eq!(lookup.state, MeshCacheLookupState::Decoded);
+        assert_eq!(lookup.format, MeshSourceFormat::SecondLifeMesh);
+        assert!(lookup.mesh.vertices.len() >= 3);
+        assert!(!lookup.mesh.submeshes.is_empty());
     }
 
     #[test]
-    fn decode_texture_rgba8_decodes_jpeg2000() {
-        let bytes = include_bytes!(
-            "..\\..\\..\\reference\\firestorm\\indra\\newview\\skins\\starlight\\themes\\mono_teal\\textures\\default_profile_picture.j2c"
-        );
-        let decoded = decode_texture_rgba8(bytes).expect("jpeg2000 should decode");
-        assert!(decoded.width > 0);
-        assert!(decoded.height > 0);
+    fn debug_second_life_mesh_fixture_is_detectable() {
+        let bytes = crate::debug_triangle_second_life_mesh_bytes();
+        assert!(!bytes.is_empty());
         assert_eq!(
-            decoded.rgba.len(),
-            (decoded.width as usize) * (decoded.height as usize) * 4
+            detect_mesh_source_format(&bytes),
+            MeshSourceFormat::SecondLifeMesh
         );
-    }
-
-    #[test]
-    fn decode_texture_rgba8_rejects_unsupported_bytes() {
-        let err = decode_texture_rgba8(b"not-an-image").expect_err("must reject invalid bytes");
-        assert!(matches!(err, TextureDecodeError::Unsupported));
     }
 }

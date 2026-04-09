@@ -49,36 +49,40 @@ For any meaningful task:
    Name them explicitly before writing the plan.
    If ownership is unclear, check `ARCHITECTURE.md`, `INTERFACES.md`, and `FIELD_GUIDE.md` before asking the user.
 
-3. **Research before asking.**
+3. **Define file placement before implementation.**
+   For each owned crate, state where the change will live (`existing file` vs `new subfile/module`).
+   Prefer crate-local, behavior-local files and avoid growing monolithic `lib.rs`/`main.rs` files when a bounded submodule is viable.
+
+4. **Research before asking.**
    Do not ask questions that are answerable from repo docs or code.
    Ask only when the issue is a real tradeoff, product intent question, or architecture fork.
 
-4. **Check the task against current state.**
+5. **Check the task against current state.**
    Plans must align with:
    - current repo truth in `CURRENT_STATE.md`
    - latest next step in `HANDOFF.md`
    - active priorities in this file
    - current rendering roadmap state, if the task is on the rendering track
 
-5. **Write the plan to `docs/plans/`.**
+6. **Write the plan to `docs/plans/`.**
    A good plan is decision-complete and implementation-ready.
    The implementer should not have to invent scope, boundaries, or validation.
 
-6. **Capture deferred-too-early features.**
+7. **Capture deferred-too-early features.**
    If planning identifies useful scope that is too early for the current task/milestone,
    record it in `docs/plans/DEFERRED_FEATURES.md` with reason, trigger/dependency, and earliest reconsideration milestone.
 
-7. **Run the LEARNINGS pre-check.**
+8. **Run the LEARNINGS pre-check.**
    Name the specific `docs/LEARNINGS.md` entries that constrain the plan.
    If none apply, state "No applicable learnings" explicitly in the plan.
 
-8. **Review the plan before implementation.**
+9. **Review the plan before implementation.**
    Store plan reviews in `docs/reviews/`.
 
-9. **Get user sign-off before implementation.**
+10. **Get user sign-off before implementation.**
    Do not begin meaningful implementation on an unapproved plan.
 
-10. **Close with LEARNINGS delta.**
+11. **Close with LEARNINGS delta.**
    For implementation/review completion artifacts, include:
    - `added` (new durable lesson)
    - `updated` (existing lesson refined)

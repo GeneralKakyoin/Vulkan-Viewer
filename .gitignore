@@ -3,6 +3,9 @@
 **/*.rs.bk
 .DS_Store
 .env
+artifacts/
+reference/opensimulator/
+clippy_viewer_app.txt
 
 .vscode/*
 !.vscode/settings.json

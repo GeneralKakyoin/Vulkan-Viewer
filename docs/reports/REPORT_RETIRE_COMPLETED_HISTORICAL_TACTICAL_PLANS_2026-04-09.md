@@ -1,0 +1,80 @@
+# REPORT: Retire Completed Historical Tactical Plans (2026-04-09)
+
+## Summary of Implemented Work
+Retired previously completed dated tactical plans from docs/plans/ root into docs/plans/Retired/ using completion evidence (matching report + implementation review). This pass includes completed object-ingress plans requested by the user.
+
+## Files Changed
+- docs/plans/Retired/PLAN_CODE_CLEANUP_WARNING_HYGIENE_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_ENDPOINT_AWARE_HANDSHAKE_REPRIME_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_FACE_ACCURATE_TEXTURE_MATERIAL_PARITY_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_FAILPROOF_MESH_ID_RETENTION_AND_EXPORT_UNBLOCK_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_FALLBACK_REGION_HANDSHAKE_REPLY_ORDERING_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_FIRESTORM_INSTRUMENTATION_PREP_2026-03-29.md [MOVED]
+- docs/plans/Retired/PLAN_FIRESTORM_MESH_PARITY_HARDENING_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_FIRESTORM_OBJECT_DECODE_FAILSOFT_PARITY_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_FIRESTORM_STARTUP_FIRST_DIVERGENCE_DIFF_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_FIRST_SIM_SOCKET_CONTINUITY_2026-03-29.md [MOVED]
+- docs/plans/Retired/PLAN_FULL_REGION_HANDSHAKE_STRICTNESS_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_LIVE_MESH_BLOCKER_ISOLATION_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_LIVE_MESH_INGEST_PIPELINE_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_LIVE_OBJECT_FEED_UNBLOCK_2026-03-29.md [MOVED]
+- docs/plans/Retired/PLAN_LIVE_SL_MESH_HEADER_COMPAT_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_LIVE_TEXTURE_CAPABILITY_URL_PARITY_2026-03-29.md [MOVED]
+- docs/plans/Retired/PLAN_LIVE_TEXTURE_FETCH_SCHEDULER_PIPELINE_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_LLUDP_OBJECT_MESH_DISCOVERY_AND_DEBUG_DECLUTTER_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_LLUDP_OBJECT_UPDATE_UNBLOCK_4_STEP_STARTUP_PATH_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_MESH_FETCH_COOKIE_PARITY_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_MESH_FETCH_TO_VISIBLE_OBJECTS_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_MESH_INGRESS_403_CLASSIFICATION_FIDELIS_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_NON_RETRYABLE_4XX_TEXTURE_FETCH_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_DATA_INGEST_DECODE_PARITY_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_FEED_MESH_ID_DECODE_SCHEDULING_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_ACK_TRAILER_PARITY_2026-03-29.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_AGENT_UPDATE_CADENCE_2026-03-29.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_CAPABILITY_PROBE_EVENT_QUEUE_GATING_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_CAPABILITY_READINESS_INVOCATION_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_LANE_REQUEST_SHAPING_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_LLUDP_STARTUP_PARITY_BUNDLE_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_POST_AMC_REQUEST_PARITY_2026-03-30.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_REGION_OBJECTS_HOST_FAMILY_TAG_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_REGION_OBJECTS_RECONNECT_AB_COMPARE_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_REGION_OBJECTS_TYPED_FIELD_PROMOTION_LANDIMPACT_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_RUNTIME_SOCKET_FORENSICS_2026-03-30.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_SEED_CAP_BROADENING_HOST_LANE_DISCOVERY_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_TWO_LANE_TRANSPORT_PROBE_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_INGRESS_UNTRUSTED_PROBE_POST_FALLBACK_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECT_UUID_FOCUS_INGEST_RENDER_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_OBJECTUPDATECACHED_CACHE_MISS_RECOVERY_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_REGION_HANDSHAKE_REPLY_FLAGS_AND_FALLBACK_UNBLOCK_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_REGION_HANDSHAKE_UNBLOCK_OPENSIM_ENDPOINT_PARITY_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_REGION_OBJECTS_MESH_CANDIDATE_EXTRACTION_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_SINGLE_LIVE_TEXTURE_CENTER_TEST_2026-04-01.md [MOVED]
+- docs/plans/Retired/PLAN_STARTUP_RECEIVE_FIRST_ACK_FLUSH_PARITY_2026-04-03.md [MOVED]
+- docs/plans/Retired/PLAN_WORLD_OBJECT_FEED_MESH_GEOMETRY_SWAP_2026-04-02.md [MOVED]
+- docs/plans/Retired/PLAN_WORLD_OBJECT_FEED_TRUE_PLACEMENT_SCALE_2026-04-03.md [MOVED]
+- docs/plans/PLAN_RETIRE_COMPLETED_HISTORICAL_TACTICAL_PLANS_2026-04-09.md [NEW]
+- docs/reviews/REVIEW_PLAN_RETIRE_COMPLETED_HISTORICAL_TACTICAL_PLANS_2026-04-09.md [NEW]
+- docs/reviews/REVIEW_IMPL_RETIRE_COMPLETED_HISTORICAL_TACTICAL_PLANS_2026-04-09.md [NEW]
+- docs/reports/REPORT_RETIRE_COMPLETED_HISTORICAL_TACTICAL_PLANS_2026-04-09.md [NEW]
+- docs/CURRENT_STATE.md [MODIFIED]
+- docs/HANDOFF.md [MODIFIED]
+
+## Validation Run
+- cargo fmt --all -> PASS
+- cargo check --workspace -> PASS
+
+## Result Status
+Completed.
+
+## Risks or Follow-Up Items
+- Some historical references may still point to old root plan paths; use docs/plans/Retired/ for retired tactical plan lookup.
+- Functional next step remains unchanged (EventQueue decode/readiness investigation).
+
+## Learnings Delta
+
+one
+Reason: Documentation/process retirement pass; no new durable engineering behavior discovered.
+
+## Continuity Updates Performed
+- Added latest notable-change entry to docs/CURRENT_STATE.md.
+- Replaced docs/HANDOFF.md with latest retirement handoff and unchanged next functional step.

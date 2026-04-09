@@ -16,5 +16,6 @@ thiserror.workspace = true
 image.workspace = true
 justjp2.workspace = true
 jpeg2k.workspace = true
+flate2 = "1"
 
 viewer_core = { path = "../viewer_core" }

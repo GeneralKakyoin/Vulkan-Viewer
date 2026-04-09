@@ -17,7 +17,12 @@ impl MaterialSet {
 }
 
 pub mod geometry;
+mod math_utils;
 pub mod spatial;
+pub use math_utils::{
+    cross, dot, flatten_mat4, look_to_rh, mat4_mul, mat4_mul_vec4, normalize, perspective_rh_zo,
+    quat_mul, quat_to_mat4, transform_to_mat4,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AssetID(String);
@@ -758,10 +763,35 @@ impl Default for Scene {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedWorldObjectFaceMaterial {
+    pub face_id: u16,
+    pub texture_id: Option<AssetID>,
+    pub normal_id: Option<AssetID>,
+    pub specular_id: Option<AssetID>,
+    pub material_id: Option<AssetID>,
+    pub rgba: [u8; 4],
+    pub offset_s: i16,
+    pub offset_t: i16,
+    pub scale_s: i16,
+    pub scale_t: i16,
+    pub rotation: i16,
+    pub bump: u8,
+    pub fullbright: bool,
+    pub shiny: u8,
+    pub media_flags: u8,
+    pub glow: u8,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedWorldObjectFeedObject {
     pub local_id: u32,
     pub scale_centi: Option<[u16; 3]>,
+    pub position_centi: Option<[i32; 3]>,
+    pub mesh_id: Option<String>,
     pub texture_id: Option<AssetID>,
+    pub default_face_material: Option<DecodedWorldObjectFaceMaterial>,
+    pub face_material_overrides: Vec<DecodedWorldObjectFaceMaterial>,
+    pub object_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1962,6 +1992,11 @@ pub struct WorldObjectIngestionItem {
     pub decoded_object_feed_export_truncated: bool,
     pub decoded_object_local_id: Option<u32>,
     pub decoded_object_scale_centi: Option<[u16; 3]>,
+    pub decoded_object_position_centi: Option<[i32; 3]>,
+    pub decoded_object_mesh_id: Option<String>,
+    pub decoded_object_texture_id: Option<AssetID>,
+    pub decoded_object_default_face_material: Option<DecodedWorldObjectFaceMaterial>,
+    pub decoded_object_face_material_overrides: Vec<DecodedWorldObjectFaceMaterial>,
     pub continuity: Option<RegionContinuitySummary>,
 }
 
@@ -2000,6 +2035,11 @@ impl WorldObjectIngestionSeam {
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
+            decoded_object_position_centi: None,
+            decoded_object_mesh_id: None,
+            decoded_object_texture_id: None,
+            decoded_object_default_face_material: None,
+            decoded_object_face_material_overrides: Vec::new(),
             continuity: None,
         }];
         if slice.traffic.available {
@@ -2027,6 +2067,11 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                decoded_object_position_centi: None,
+                decoded_object_mesh_id: None,
+                decoded_object_texture_id: None,
+                decoded_object_default_face_material: None,
+                decoded_object_face_material_overrides: Vec::new(),
                 continuity: None,
             });
         }
@@ -2083,6 +2128,11 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                decoded_object_position_centi: None,
+                decoded_object_mesh_id: None,
+                decoded_object_texture_id: None,
+                decoded_object_default_face_material: None,
+                decoded_object_face_material_overrides: Vec::new(),
                 continuity: None,
             });
         }
@@ -2149,6 +2199,11 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                decoded_object_position_centi: None,
+                decoded_object_mesh_id: None,
+                decoded_object_texture_id: None,
+                decoded_object_default_face_material: None,
+                decoded_object_face_material_overrides: Vec::new(),
                 continuity: None,
             });
             if let Some(coarse_second_xyz) = second_xyz {
@@ -2176,6 +2231,11 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    decoded_object_position_centi: None,
+                    decoded_object_mesh_id: None,
+                    decoded_object_texture_id: None,
+                    decoded_object_default_face_material: None,
+                    decoded_object_face_material_overrides: Vec::new(),
                     continuity: None,
                 });
             }
@@ -2223,6 +2283,11 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                decoded_object_position_centi: None,
+                decoded_object_mesh_id: None,
+                decoded_object_texture_id: None,
+                decoded_object_default_face_material: None,
+                decoded_object_face_material_overrides: Vec::new(),
                 continuity: None,
             });
         }
@@ -2269,6 +2334,11 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
                 decoded_object_scale_centi: None,
+                decoded_object_position_centi: None,
+                decoded_object_mesh_id: None,
+                decoded_object_texture_id: None,
+                decoded_object_default_face_material: None,
+                decoded_object_face_material_overrides: Vec::new(),
                 continuity: None,
             });
         }
@@ -2316,6 +2386,11 @@ impl WorldObjectIngestionSeam {
                         .decoded_object_feed_export_truncated,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    decoded_object_position_centi: None,
+                    decoded_object_mesh_id: None,
+                    decoded_object_texture_id: None,
+                    decoded_object_default_face_material: None,
+                    decoded_object_face_material_overrides: Vec::new(),
                     continuity: None,
                 });
 
@@ -2345,6 +2420,11 @@ impl WorldObjectIngestionSeam {
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(obj.local_id),
                         decoded_object_scale_centi: obj.scale_centi,
+                        decoded_object_position_centi: obj.position_centi,
+                        decoded_object_mesh_id: obj.mesh_id.clone(),
+                        decoded_object_texture_id: obj.texture_id.clone(),
+                        decoded_object_default_face_material: obj.default_face_material.clone(),
+                        decoded_object_face_material_overrides: obj.face_material_overrides.clone(),
                         continuity: None,
                     });
                 }
@@ -2375,6 +2455,11 @@ impl WorldObjectIngestionSeam {
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(*local_id),
                         decoded_object_scale_centi: None,
+                        decoded_object_position_centi: None,
+                        decoded_object_mesh_id: None,
+                        decoded_object_texture_id: None,
+                        decoded_object_default_face_material: None,
+                        decoded_object_face_material_overrides: Vec::new(),
                         continuity: None,
                     });
                 }
@@ -2442,6 +2527,11 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    decoded_object_position_centi: None,
+                    decoded_object_mesh_id: None,
+                    decoded_object_texture_id: None,
+                    decoded_object_default_face_material: None,
+                    decoded_object_face_material_overrides: Vec::new(),
                     continuity: None,
                 });
                 seam.items.push(WorldObjectIngestionItem {
@@ -2482,6 +2572,11 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    decoded_object_position_centi: None,
+                    decoded_object_mesh_id: None,
+                    decoded_object_texture_id: None,
+                    decoded_object_default_face_material: None,
+                    decoded_object_face_material_overrides: Vec::new(),
                     continuity: None,
                 });
             }
@@ -2511,6 +2606,11 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
                     decoded_object_scale_centi: None,
+                    decoded_object_position_centi: None,
+                    decoded_object_mesh_id: None,
+                    decoded_object_texture_id: None,
+                    decoded_object_default_face_material: None,
+                    decoded_object_face_material_overrides: Vec::new(),
                     continuity: Some(state.continuity.clone()),
                 });
             }
@@ -2700,11 +2800,25 @@ impl Scene {
 
         let transform = world_object_feed_proxy_transform(item, coarse_anchor_pos);
         let color = world_object_feed_proxy_color(local_id);
+        let geometry = world_object_feed_geometry(item);
+        let materials = world_object_feed_materials(item);
+        let alpha_mode = world_object_feed_alpha_mode(&materials);
 
         if let Some(&instance_id) = self.world_object_feed_map.get(&local_id)
             && let Some(instance) = self.instances.get_mut(&instance_id)
         {
-            if instance.transform != transform || instance.color != color {
+            if instance.transform != transform
+                || instance.color != color
+                || instance.geometry != geometry
+                || instance.materials != materials
+                || instance.alpha_mode != alpha_mode
+            {
+                if instance.geometry != geometry {
+                    instance.geometry = geometry.clone();
+                    instance.local_aabb = local_aabb_for_geometry(&geometry);
+                }
+                instance.materials = materials;
+                instance.alpha_mode = alpha_mode;
                 instance.transform = transform;
                 instance.color = color;
                 instance.dirty_spatial = true;
@@ -2713,12 +2827,15 @@ impl Scene {
         }
 
         let id = self.insert_instance(
-            GeometrySource::Diagnostic(MeshKind::Cube),
+            geometry,
             InstanceRole::WorldObjectFeedProxy,
             transform,
             color,
-            AlphaMode::Opaque,
+            alpha_mode,
         );
+        if let Some(instance) = self.instances.get_mut(&id) {
+            instance.materials = materials;
+        }
         self.world_object_feed_map.insert(local_id, id);
     }
 
@@ -3840,22 +3957,36 @@ fn world_object_feed_proxy_transform(
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let anchor = coarse_anchor_pos.unwrap_or([base_x + 0.25, 0.22, base_z - 0.15]);
 
-    let bucket = (local_id % 64) as f32;
-    let ring = ((local_id / 64) % 8) as f32;
-    let heading = (bucket / 64.0) * core::f32::consts::TAU + ring * 0.17;
-    let radius = 0.55 + ring * 0.22;
-
-    let px = anchor[0] + heading.cos() * radius;
-    let pz = anchor[2] + heading.sin() * radius;
-    let py = (anchor[1] + 0.08 + ring * 0.03).clamp(0.05, 3.0);
+    let (px, py, pz) = if let Some([x, y, z]) = item.decoded_object_position_centi {
+        // Map decoded SL-style local position (X,Y,Z) to scene-space (X,Z,Y) meters.
+        // Region-local coordinates are centered around 128m to stay aligned with the region anchor cluster.
+        let x_m = x as f32 / 100.0;
+        let y_m = y as f32 / 100.0;
+        let z_m = z as f32 / 100.0;
+        (
+            base_x + (x_m - 128.0),
+            z_m.clamp(0.01, 64.0),
+            base_z + (y_m - 128.0),
+        )
+    } else {
+        let bucket = (local_id % 64) as f32;
+        let ring = ((local_id / 64) % 8) as f32;
+        let heading = (bucket / 64.0) * core::f32::consts::TAU + ring * 0.17;
+        let radius = 0.55 + ring * 0.22;
+        (
+            anchor[0] + heading.cos() * radius,
+            (anchor[1] + 0.08 + ring * 0.03).clamp(0.05, 3.0),
+            anchor[2] + heading.sin() * radius,
+        )
+    };
 
     let scale = item
         .decoded_object_scale_centi
         .map(|[x, y, z]| {
             [
-                (x as f32 / 100.0).clamp(0.05, 8.0),
-                (y as f32 / 100.0).clamp(0.05, 8.0),
-                (z as f32 / 100.0).clamp(0.05, 8.0),
+                (x as f32 / 100.0).clamp(0.01, 64.0),
+                (z as f32 / 100.0).clamp(0.01, 64.0),
+                (y as f32 / 100.0).clamp(0.01, 64.0),
             ]
         })
         .unwrap_or([0.18, 0.18, 0.18]);
@@ -3864,6 +3995,100 @@ fn world_object_feed_proxy_transform(
         rotation: [0.0, 0.0, 0.0, 1.0],
         position: [px, py, pz],
         scale,
+    }
+}
+
+fn world_object_feed_geometry(item: &WorldObjectIngestionItem) -> GeometrySource {
+    if let Some(mesh_id) = item.decoded_object_mesh_id.as_deref() {
+        let normalized = mesh_id.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            return GeometrySource::Mesh(normalized, 0);
+        }
+    }
+    GeometrySource::Diagnostic(MeshKind::Cube)
+}
+
+fn world_object_feed_materials(item: &WorldObjectIngestionItem) -> MaterialSet {
+    let mut default_material = item
+        .decoded_object_default_face_material
+        .as_ref()
+        .map(face_material_payload_to_descriptor);
+
+    if default_material.is_none()
+        && let Some(texture_id) = item.decoded_object_texture_id.clone()
+    {
+        default_material = Some(MaterialDescriptor::Legacy(TextureEntry {
+            texture_id,
+            ..TextureEntry::default()
+        }));
+    }
+
+    let mut by_face = BTreeMap::new();
+    for face in &item.decoded_object_face_material_overrides {
+        by_face.insert(face.face_id, face_material_payload_to_descriptor(face));
+    }
+
+    MaterialSet {
+        default: default_material.unwrap_or_default(),
+        by_face,
+    }
+}
+
+fn face_material_payload_to_descriptor(
+    face: &DecodedWorldObjectFaceMaterial,
+) -> MaterialDescriptor {
+    let rgba = [
+        f32::from(face.rgba[0]) / 255.0,
+        f32::from(face.rgba[1]) / 255.0,
+        f32::from(face.rgba[2]) / 255.0,
+        f32::from(face.rgba[3]) / 255.0,
+    ];
+    let texture_id = face.texture_id.clone().unwrap_or_default();
+    let normal_id = face.normal_id.clone().unwrap_or_default();
+    let specular_id = face.specular_id.clone().unwrap_or_default();
+    if !normal_id.is_empty() || !specular_id.is_empty() {
+        return MaterialDescriptor::Pbr(PbrDescriptor {
+            base_color_id: texture_id,
+            normal_id,
+            metallic_roughness_id: specular_id,
+            emissive_id: AssetID::default(),
+            base_color_tint: rgba,
+            metallic_factor: 0.0,
+            roughness_factor: 1.0,
+        });
+    }
+    MaterialDescriptor::Legacy(TextureEntry {
+        texture_id,
+        rgba,
+        offset_s: f32::from(face.offset_s) / 32767.0,
+        offset_t: f32::from(face.offset_t) / 32767.0,
+        scale_s: f32::from(face.scale_s) / 10_000.0,
+        scale_t: f32::from(face.scale_t) / 10_000.0,
+        rotation: f32::from(face.rotation) / 32767.0,
+        bump: face.bump,
+        fullbright: face.fullbright,
+        shiny: face.shiny,
+        media_flags: u16::from(face.media_flags),
+    })
+}
+
+fn world_object_feed_alpha_mode(materials: &MaterialSet) -> AlphaMode {
+    let default_alpha = material_alpha(&materials.default);
+    if default_alpha < 0.995 {
+        return AlphaMode::Blend;
+    }
+    for material in materials.by_face.values() {
+        if material_alpha(material) < 0.995 {
+            return AlphaMode::Blend;
+        }
+    }
+    AlphaMode::Opaque
+}
+
+fn material_alpha(material: &MaterialDescriptor) -> f32 {
+    match material {
+        MaterialDescriptor::Legacy(entry) => entry.rgba[3],
+        MaterialDescriptor::Pbr(pbr) => pbr.base_color_tint[3],
     }
 }
 
@@ -5840,12 +6065,22 @@ mod tests {
             DecodedWorldObjectFeedObject {
                 local_id: 42,
                 scale_centi: Some([20, 30, 40]),
+                position_centi: None,
+                mesh_id: None,
                 texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
             },
             DecodedWorldObjectFeedObject {
                 local_id: 99,
                 scale_centi: None,
+                position_centi: None,
+                mesh_id: None,
                 texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
             },
         ];
         snapshot.decoded_object_feed_recent_kills = Vec::new();
@@ -5865,7 +6100,12 @@ mod tests {
         truncated.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
+            position_centi: None,
+            mesh_id: None,
             texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
         }];
         truncated.decoded_object_feed_recent_kills = Vec::new();
         apply_scene_from_snapshot(&mut scene, Some(&truncated));
@@ -5884,7 +6124,12 @@ mod tests {
         remove_one.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
             scale_centi: Some([20, 30, 40]),
+            position_centi: None,
+            mesh_id: None,
             texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
         }];
         remove_one.decoded_object_feed_recent_kills = vec![99];
         apply_scene_from_snapshot(&mut scene, Some(&remove_one));
@@ -5896,6 +6141,197 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn scene_world_object_feed_maps_decoded_position_to_in_region_world_space() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 42,
+            scale_centi: Some([120, 340, 560]),
+            position_centi: Some([13000, 12550, 250]),
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+
+        let [base_x, base_z] = world_cluster_base(None);
+        assert_eq!(proxy.transform.position, [base_x + 2.0, 2.5, base_z - 2.5]);
+        assert_eq!(proxy.transform.scale, [1.2, 5.6, 3.4]);
+    }
+
+    #[test]
+    fn scene_world_object_feed_positionless_objects_keep_fallback_ring_transform() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 42,
+            scale_centi: None,
+            position_centi: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+        assert_eq!(proxy.transform.scale, [0.18, 0.18, 0.18]);
+        assert!(proxy.transform.position[1] > 0.05);
+    }
+
+    #[test]
+    fn scene_world_object_feed_uses_live_mesh_geometry_when_mesh_id_present() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 42,
+            scale_centi: Some([20, 30, 40]),
+            position_centi: None,
+            mesh_id: Some(String::from("947D4505-EB76-2EF5-C049-E7882881D689")),
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+        assert_eq!(
+            proxy.geometry,
+            GeometrySource::Mesh(String::from("947d4505-eb76-2ef5-c049-e7882881d689"), 0)
+        );
+
+        snapshot.decoded_object_feed_objects[0].mesh_id = None;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        let proxy_after = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should still exist");
+        assert_eq!(
+            proxy_after.geometry,
+            GeometrySource::Diagnostic(MeshKind::Cube)
+        );
+    }
+
+    #[test]
+    fn scene_world_object_feed_applies_decoded_texture_to_default_material() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 42,
+            scale_centi: Some([20, 30, 40]),
+            position_centi: None,
+            mesh_id: Some(String::from("947D4505-EB76-2EF5-C049-E7882881D689")),
+            texture_id: Some(AssetID::new("10930d3b-1821-c584-a0c7-28a34999800d")),
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+
+        let default_ids = proxy.materials.default.texture_ids();
+        assert_eq!(default_ids.len(), 1);
+        assert_eq!(
+            default_ids[0],
+            AssetID::new("10930d3b-1821-c584-a0c7-28a34999800d")
+        );
+    }
+
+    #[test]
+    fn scene_world_object_feed_applies_face_override_materials_and_alpha_mode() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 4242,
+            scale_centi: Some([100, 100, 100]),
+            position_centi: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: Some(DecodedWorldObjectFaceMaterial {
+                face_id: 0,
+                texture_id: Some(AssetID::new("tex_default")),
+                normal_id: None,
+                specular_id: None,
+                material_id: None,
+                rgba: [255, 255, 255, 120],
+                offset_s: 0,
+                offset_t: 0,
+                scale_s: 10_000,
+                scale_t: 10_000,
+                rotation: 0,
+                bump: 0,
+                fullbright: false,
+                shiny: 0,
+                media_flags: 0,
+                glow: 0,
+            }),
+            face_material_overrides: vec![DecodedWorldObjectFaceMaterial {
+                face_id: 3,
+                texture_id: Some(AssetID::new("tex_face_3")),
+                normal_id: None,
+                specular_id: None,
+                material_id: None,
+                rgba: [255, 255, 255, 255],
+                offset_s: 0,
+                offset_t: 0,
+                scale_s: 10_000,
+                scale_t: 10_000,
+                rotation: 0,
+                bump: 0,
+                fullbright: false,
+                shiny: 0,
+                media_flags: 0,
+                glow: 0,
+            }],
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+        assert_eq!(proxy.alpha_mode, AlphaMode::Blend);
+        let face_3_ids = proxy.materials.material_for_face(3).texture_ids();
+        assert_eq!(face_3_ids, vec![AssetID::new("tex_face_3")]);
     }
 
     #[test]
@@ -6005,6 +6441,11 @@ mod tests {
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
             decoded_object_scale_centi: None,
+            decoded_object_position_centi: None,
+            decoded_object_mesh_id: None,
+            decoded_object_texture_id: None,
+            decoded_object_default_face_material: None,
+            decoded_object_face_material_overrides: Vec::new(),
             continuity: None,
         };
         assert_eq!(
@@ -6898,131 +7339,6 @@ mod tests {
         let (_, a) = compute_profile_freshness(now, Some(now - 86400_u64 * 150 * 1000), ttl);
         assert_eq!(a, "99d+");
     }
-}
-
-pub fn perspective_rh_zo(fovy_radians: f32, aspect: f32, znear: f32, zfar: f32) -> [[f32; 4]; 4] {
-    let f = 1.0 / (0.5 * fovy_radians).tan();
-    [
-        [f / aspect, 0.0, 0.0, 0.0],
-        [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, zfar / (znear - zfar), -1.0],
-        [0.0, 0.0, (zfar * znear) / (znear - zfar), 0.0],
-    ]
-}
-
-pub fn look_to_rh(eye: [f32; 3], direction: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
-    let forward = normalize(direction);
-    let side = normalize(cross(up, forward));
-    let camera_up = cross(forward, side);
-
-    [
-        [side[0], camera_up[0], -forward[0], 0.0],
-        [side[1], camera_up[1], -forward[1], 0.0],
-        [side[2], camera_up[2], -forward[2], 0.0],
-        [
-            -dot(side, eye),
-            -dot(camera_up, eye),
-            dot(forward, eye),
-            1.0,
-        ],
-    ]
-}
-
-pub fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut out = [[0.0; 4]; 4];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c][r] =
-                a[0][r] * b[c][0] + a[1][r] * b[c][1] + a[2][r] * b[c][2] + a[3][r] * b[c][3];
-        }
-    }
-    out
-}
-
-pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-pub fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let len = (dot(v, v)).sqrt();
-    if len > 0.0 {
-        [v[0] / len, v[1] / len, v[2] / len]
-    } else {
-        [0.0, 0.0, -1.0]
-    }
-}
-
-pub fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
-    [
-        m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2] + m[3][0] * v[3],
-        m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2] + m[3][1] * v[3],
-        m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2] + m[3][2] * v[3],
-        m[0][3] * v[0] + m[1][3] * v[1] + m[2][3] * v[2] + m[3][3] * v[3],
-    ]
-}
-
-pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
-}
-
-pub fn quat_to_mat4(q: [f32; 4]) -> [[f32; 4]; 4] {
-    let x2 = q[0] + q[0];
-    let y2 = q[1] + q[1];
-    let z2 = q[2] + q[2];
-    let xx = q[0] * x2;
-    let xy = q[0] * y2;
-    let xz = q[0] * z2;
-    let yy = q[1] * y2;
-    let yz = q[1] * z2;
-    let zz = q[2] * z2;
-    let wx = q[3] * x2;
-    let wy = q[3] * y2;
-    let wz = q[3] * z2;
-
-    [
-        [1.0 - (yy + zz), xy + wz, xz - wy, 0.0],
-        [xy - wz, 1.0 - (xx + zz), yz + wx, 0.0],
-        [xz + wy, yz - wx, 1.0 - (xx + yy), 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-pub fn transform_to_mat4(t: Transform) -> [[f32; 4]; 4] {
-    let s = [
-        [t.scale[0], 0.0, 0.0, 0.0],
-        [0.0, t.scale[1], 0.0, 0.0],
-        [0.0, 0.0, t.scale[2], 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-    let r = quat_to_mat4(t.rotation);
-    let tr = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [t.position[0], t.position[1], t.position[2], 1.0],
-    ];
-    // T * R * S
-    mat4_mul(tr, mat4_mul(r, s))
-}
-
-pub fn flatten_mat4(m: [[f32; 4]; 4]) -> [f32; 16] {
-    [
-        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
-        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
-    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

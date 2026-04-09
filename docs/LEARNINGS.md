@@ -814,3 +814,352 @@ more than one session to establish correctly.
 **Files affected:** object-ingress decision workflow, reconnect evidence plans, continuity branch selection.
 
 ---
+
+## L58 — If the runtime-gated LLUDP startup parity bundle still yields gate `FAIL` (`ObjectUpdate*` absent, no local IDs), stop LLUDP startup guessing and pivot to capability-readiness checks
+
+**Category:** Protocol / startup-branch decision policy
+
+**Learned when:** Running the April 1, 2026 bounded live parity-bundle capture with `VIEWER_APP_LLUDP_STARTUP_PARITY_BUNDLE=on`.
+
+**What happened:** The new startup gate line emitted exactly as intended (`startup prime mode=lludp_parity_bundle:on` and `lludp_object_gate: verdict=FAIL ...`), but both startup and first steady-state windows still showed `object_update=none`, `update_messages=0`, `total_objects=0`, and `local_ids=none`.
+
+**Rule for future plans:** When the bounded parity-bundle run fails this strict gate, do not add another LLUDP startup packet/control tweak in the same branch. Move immediately to simulator-host capability-readiness invocation checks, using the parity-bundle capture as the baseline failure evidence.
+
+**Files affected:** object-ingress branch selection, `viewer_app` startup diagnostics, follow-up capability-readiness planning.
+
+---
+
+## L59 — Capability readiness probes can fail with concrete simulator-host HTTP outcomes (`InterestList` 404 `Agent not found`, `UntrustedSimulatorMessage` 405) while LLUDP object ingress remains zero
+
+**Category:** Protocol / capability-readiness investigation
+
+**Learned when:** Running the April 1, 2026 bounded capability-readiness invocation capture with readiness matrix relays enabled.
+
+**What happened:** On the same simulator-host `:12043` lane where seed capabilities were present, one-shot readiness probes returned:
+- `InterestList` → `404 Not Found` with body `Agent not found`
+- `UntrustedSimulatorMessage` → `405 Method Not Allowed`
+
+At the same time, LLUDP gate output stayed `FAIL` (`object_update=none`, `local_ids=none`), and EventQueue later degraded into repeated cap-not-found failures.
+
+**Rule for future plans:** Treat these HTTP outcomes as first-class readiness evidence, not noise. After this point, prioritize capability-readiness interpretation/ordering work over additional LLUDP startup-packet guessing.
+
+**Files affected:** `viewer_net` capability probe helpers, `viewer_app` readiness matrix/reconnect policy, object-ingress branch selection.
+
+---
+
+## L60 — On this simulator-host path, `InterestList` should be gated behind first `EventQueueGet:ok`; probing it earlier can produce a false-negative `404 Agent not found`
+
+**Category:** Protocol / startup ordering evidence (`viewer_app`)
+
+**Learned when:** Running the April 1, 2026 bounded EventQueue-gated capability probe capture (`VIEWER_APP_CAPABILITY_PROBES_REQUIRE_EVENT_QUEUE_OK=true`).
+
+**What happened:** With startup one-shot probes deferred until first successful `EventQueueGet`, `InterestList` changed from prior `404 Agent not found` to `ok` (`keys=mode,stats`). `UntrustedSimulatorMessage` still returned `405 Method Not Allowed`, and LLUDP gate remained `FAIL`.
+
+**Rule for future plans:** Do not interpret startup `InterestList` failures before first `EventQueueGet:ok` as authoritative. For readiness evidence on this path, require EventQueue-success gating before classifying `InterestList` outcomes.
+
+**Files affected:** `viewer_app` capability probe ordering/gating, object-ingress readiness interpretation.
+
+---
+
+## L61 — `UntrustedSimulatorMessage` readiness should treat HTTP success as transport-ready even when response body is non-LLSD/unparsed
+
+**Category:** Protocol / capability-readiness transport interpretation (`viewer_net`)
+
+**Learned when:** Running the April 1, 2026 untrusted capability POST fallback slice after EventQueue-gated ordering was in place.
+
+**What happened:** Switching from GET-only probing to GET->POST fallback removed the prior `405` method failure. The simulator returned HTTP `200` with a body that did not parse as the expected LLSD map. Treating this as a hard decode failure obscured that the capability invocation path itself was now working.
+
+**Rule for future plans:** For bounded readiness probes on `UntrustedSimulatorMessage`, classify successful HTTP status as transport-ready even if payload parsing is not yet understood. Preserve parse status explicitly in probe metadata (`probe_decode=unparsed_body`) instead of collapsing to error.
+
+**Files affected:** `viewer_net` untrusted capability probe path and readiness interpretation.
+
+---
+
+## L62 — Narrow seed-cap requests can hide alternate host lanes; broadened discovery is required before lane-level ingress conclusions
+
+**Category:** Protocol / capability discovery strategy (`viewer_net` + `viewer_app`)
+
+**Learned when:** Completing the April 1, 2026 seed-cap broadening and host-lane discovery slice.
+
+**What happened:** With the earlier minimal seed request set, startup evidence under-reported available capabilities and made it difficult to test the user hypothesis that object-adjacent data might arrive on another HTTP lane. After broadening the request to a Firestorm-aligned list and adding host-grouped non-baseline summaries, bounded live logs immediately surfaced additional lanes (for example, `asset-cdn` capability names like `GetMesh`, `GetMesh2`, `GetTexture`, `ViewerAsset`) alongside a much larger simhost capability set.
+
+**Rule for future plans:** Before concluding that "no alternate capability lane exists" on a simulator-host path, first ensure seed-cap discovery is broad enough and host-grouped evidence is present. Treat lane discovery as observability groundwork only; do not claim LLUDP/object-ingress recovery from capability breadth alone.
+
+**Files affected:** `viewer_net` seed capability request list, `viewer_app` capability host-lane summarization, object-ingress branch selection.
+
+---
+
+## L63 — Two-lane transport probes can return non-2xx and still provide decisive lane evidence
+
+**Category:** Protocol / capability-lane investigation (`viewer_net` + `viewer_app`)
+
+**Learned when:** Running the April 1, 2026 bounded two-lane transport probe slice after host-lane discovery.
+
+**What happened:** One-shot non-baseline lane probes returned non-success statuses on both selected lanes (`asset-cdn` `ViewerAsset` => `403`, `simhost` `SimulatorFeatures` => `503`). Despite non-2xx results, the probes provided concrete, reproducible lane-level behavior (status/content-type/body-size), which is strictly better than inferring lane absence from missing semantic decode paths.
+
+**Rule for future plans:** During early lane investigation, treat bounded transport metadata as first-class evidence even when responses are non-2xx. Do not classify a lane as absent until both reachability and lane-specific request-shaping attempts are evaluated.
+
+**Files affected:** `viewer_net` capability transport probe helper, `viewer_app` non-baseline lane probe orchestration/logging, object-ingress follow-up planning.
+
+---
+
+## L64 — Lane-level conclusions require Firestorm-shaped requests per capability lane; generic GET-only probes can misstate lane behavior
+
+**Category:** Protocol / capability-lane investigation (`viewer_grid` + `viewer_net` + `viewer_app`)
+
+**Learned when:** Completing the April 1, 2026 lane request-shaping matrix slice with bounded live validation.
+
+**What happened:** After replacing generic non-baseline GET probes with shaped lane probes, outcomes changed materially and became lane/key specific. On the same run, `asset-cdn` `ViewerAsset` returned mixed results by query key (`texture_id`/`sound_id` `200`, others `403`), while gated simhost shaped probes showed `SimulatorFeatures` GET `200`, `InterestList` POST `200`, and `UntrustedSimulatorMessage` GET `405`.
+
+**Rule for future plans:** Do not treat generic GET transport probes as sufficient evidence for capability-lane behavior. For lane diagnostics, use capability-specific request shaping (method/body/query-key) and preserve per-shape metadata (method, query key, URL variant, decode class) before making branch decisions.
+
+**Files affected:** `viewer_grid` capability request-shape helpers, `viewer_net` shaped probe executor, `viewer_app` startup probe matrix and relay evidence.
+
+---
+
+## L65 — Live `ViewerAsset` texture ingest must decode through shared J2C-capable path, not PNG-only assumptions
+
+**Category:** Asset transport bridge / `viewer_app` + `viewer_asset`
+
+**Learned when:** Implementing the April 1, 2026 live texture fetch scheduler pipeline slice after lane shaping had already proven `texture_id` responses can be `image/x-j2c`.
+
+**What happened:** The worker could successfully fetch texture bytes over capability URLs, but app-side ingestion classified the result using `decode_png_rgba8(...)`. That silently turns valid J2C payloads into decode failures and obscures whether the transport path is correct.
+
+**Rule for future plans:** Any live texture ingest path in `viewer_app` must decode with `viewer_asset::decode_texture_rgba8(...)` (or an equivalent shared decoder that supports J2C and PNG). Do not use PNG-only decode helpers for `ViewerAsset` texture payloads.
+
+**Files affected:** `viewer_app` `LiveFeedUpdate::TextureAsset` ingest path, `viewer_asset` decode contract usage.
+
+---
+
+## L66 — Deterministic denied/not-found HTTP texture responses (`401/403/404`) should be non-retryable in the live scheduler path
+
+**Category:** Asset transport bridge / `viewer_app` scheduler behavior
+
+**Learned when:** Running bounded live scheduler captures on April 1, 2026 with fixture-driven live requests.
+
+**What happened:** The scheduler correctly queued and retried requests, but HTTP `403 AccessDenied` outcomes were classified as retryable `Transport`, causing repeated backoff cycles with no chance of success for those IDs.
+
+**Rule for future plans:** In the live texture scheduler path, treat deterministic denied/not-found HTTP statuses (`401/403/404`) as non-retryable failures. Keep retries for transient classes (timeouts/transport faults), and fail-fast for capability/auth/not-found classes.
+
+**Files affected:** `viewer_app` texture fetch failure classification and retry decision flow.
+
+---
+## L67 — Startup-interest send verification must use full send diagnostics; transcript tails are insufficient evidence
+
+**Category:** Protocol diagnostics / `viewer_net` + `viewer_app`
+
+**Learned when:** Implementing the April 1, 2026 LLUDP 4-step startup-path slice with explicit startup gate instrumentation.
+
+**What happened:** Startup send behavior was already present, but app forensics only displayed a short transcript tail. In bounded runs this can hide required sends and lead to false startup-path conclusions.
+
+**Rule for future plans:** For LLUDP startup evidence, use a first-class startup-interest gate derived from full handshake send diagnostics (with message name, order index, packet id), and treat transcript tails as supporting context only.
+
+**Files affected:** `viewer_net` first-simulator startup summary helpers, `viewer_app` forensics relay output and decision flow.
+
+---
+
+## L68 — OpenSimulator handshake flow indicates initial object stream can be gated behind successful `RegionHandshakeReply` progression
+
+**Category:** Protocol parity research / LLUDP startup sequencing
+
+**Learned when:** Reviewing `nebadon2025/opensimulator` handshake and EventQueue code paths on April 1, 2026.
+
+**What happened:** OpenSimulator sends `RegionHandshake` on accepted `UseCircuitCode`, validates `CompleteAgentMovement` identifiers, and then uses `RegionHandshakeReply` to unlock `NeedInitialData`, which drives initial terrain/object/avatar update dispatch. The same codebase also emits neighbor endpoint data in multiple EventQueue shapes (`SimulatorInfo.IP` binary + `Port`, and `sim-ip-and-port` string), which can break retargeting if only string/port-only parsing is implemented.
+
+**Rule for future plans:** When LLUDP object ingress stays blocked with `RegionHandshake=none`, prioritize endpoint-shape completeness (including binary-IP forms) and handshake-reply progression evidence before adding more speculative startup packets.
+
+**Files affected:** `reference/opensimulator/nebadon2025-opensimulator/OpenSim/Region/ClientStack/Linden/Caps/EventQueue/EventQueueGetModule.cs`, `reference/opensimulator/nebadon2025-opensimulator/OpenSim/Region/ClientStack/Linden/UDP/LLUDPServer.cs`, `reference/opensimulator/nebadon2025-opensimulator/OpenSim/Region/Framework/Scenes/ScenePresence.cs`.
+
+---
+
+## L69 — Fixing EventQueue endpoint-shape parity (binary-IP + `sim-ip-and-port`) can still leave `RegionHandshake` absent
+
+**Category:** LLUDP ingress diagnosis / endpoint-vs-handshake gating
+
+**Learned when:** Completing the April 1, 2026 OpenSimulator endpoint-parity implementation and bounded live capture.
+
+**What happened:** The viewer now decodes OpenSimulator-style binary `SimulatorInfo.IP` fields, resolves authoritative child endpoints, and sends `UseCircuitCode` / `CompleteAgentMovement` to explicit child `ip:port` targets. Despite this, the same run still showed `region_handshake=none`, `region_handshake_reply=none`, and LLUDP object gate `FAIL`.
+
+**Rule for future plans:** Once endpoint-shape parity is proven in live evidence, stop spending slices on more endpoint parsing variants. Move the next bounded branch to handshake eligibility/session-state gating on child endpoints.
+
+**Files affected:** `viewer_net` EventQueue target extraction and binary-IP decode, `viewer_app` follow-up endpoint routing and first-simulator handshake progression relays.
+
+---
+
+## L70 — Full-stack protocol extraction before the next patch prevents repeated endpoint-level churn
+
+**Category:** Protocol execution strategy / planning discipline
+
+**Learned when:** Producing the LL full-stack extraction and gap-roadmap baseline on April 1, 2026 after multiple endpoint and capability parity slices.
+
+**What happened:** Endpoint parsing parity and lane request-shaping were both improved and validated, but LLUDP ingress still remained blocked. The missing step was a single consolidated map tying login/bootstrap, EventQueue gates, child endpoint follow-up, handshake progression, and object unlock semantics together with line-anchored evidence. Without that consolidated map, patches tended to over-focus on whichever lane had freshest logs.
+
+**Rule for future plans:** When a protocol unblock branch stalls after several bounded fixes, pause and produce one execution-grade full-stack map (lanes, gates, state machines, PASS/FAIL matrix, ranked blockers) before adding another behavior patch. Use that map to force the next change to target the highest-confidence blocker.
+
+**Files affected:** `docs/reports/REPORT_LL_PROTOCOL_FULL_STACK_EXTRACTION_2026-04-01.md`, `docs/plans/PLAN_LL_PROTOCOL_GAP_CLOSURE_2026-04-01.md`.
+
+---
+
+## L71 — Viewer-derived `RegionHandshakeReply` flags plus AMC-stage fallback can unlock LLUDP `ObjectUpdate*` ingress even when startup still shows `RegionHandshake=none`
+
+**Category:** LLUDP handshake gating / `viewer_net`
+
+**Learned when:** Implementing and live-validating the April 1, 2026 region-handshake unblock slice with OpenSim and Firestorm behavioral references.
+
+**What happened:** The previous path reused simulator `RegionFlags` from inbound `RegionHandshake` when forming `RegionHandshakeReply`, and only sent when that inbound handshake decode had been observed. After switching reply flags to viewer-derived capability bits (including `0x1000` self-appearance support) and allowing a bounded one-shot fallback send once AMC-stage preconditions were reached, the same bounded run moved from startup `lludp_object_gate: FAIL` to `after_first_steady_state_window lludp_object_gate: PASS` with concrete `ObjectUpdate` local-id evidence.
+
+**Rule for future plans:** Treat `RegionHandshakeReply` as viewer-capability signaling, not simulator-flag echo. Keep a stage-gated one-shot fallback path available when inbound `RegionHandshake` visibility is missing, and judge success by LLUDP object gate evidence (`ObjectUpdate*` + local IDs), not by startup handshake counters alone.
+
+**Files affected:** `viewer_net` handshake reply flag composition and fallback send gate, plus bounded runtime artifact `artifacts/logs/network_debug_region_handshake_reply_flags_fix_2026-04-01.jsonl`.
+
+---
+
+## L72 — The fastest reliable live-texture verification path is a single center object with one forced fixture/live ID
+
+**Category:** Runtime verification ergonomics / `viewer_app`
+
+**Learned when:** Adding and validating the April 1, 2026 single-object live texture center test mode.
+
+**What happened:** Broad scene modes can emit many unrelated updates and make texture-ingest triage noisy. A mode that spawns exactly one center object and binds one known texture ID reduced verification to two decisive signals: `texture_fetch: queued` then `texture_fetch: ready`.
+
+**Rule for future plans:** For first-pass live texture ingest checks, prefer a minimal deterministic scene with one target object and one forced texture ID. Use richer stress scenes only after the single-object path is green.
+
+**Files affected:** `viewer_app` stress-test mode parsing/spawn dispatch and center-texture spawn path; runtime artifact `artifacts/logs/live_single_live_texture_center_test_2026-04-01.log`.
+
+---
+
+## L73 — For live mesh-ingest verification, force at least one fixture mesh UUID; visible-scene-only probing can produce no mesh requests
+
+**Category:** Asset transport bridge / runtime verification ergonomics (`viewer_app`)
+
+**Learned when:** Completing the April 1, 2026 live mesh-ingest pipeline slice.
+
+**What happened:** With live startup enabled and no forced mesh IDs, bounded runs produced no `mesh_fetch` relay lines, because visible scene geometry in that capture did not yield mesh-source requests. Setting `VIEWER_FIXTURE_MESHES=<uuid>` immediately exercised the command lane and produced deterministic `mesh_fetch: queued` then `mesh_fetch: failed` (`403`) evidence.
+
+**Rule for future plans:** For first-pass mesh transport verification, do not rely on opportunistic visible-scene mesh discovery. Force at least one mesh UUID via `VIEWER_FIXTURE_MESHES` so command-lane execution is always observable, then iterate UUID validity until `mesh_fetch: ready` is captured.
+
+**Files affected:** `viewer_app` mesh request scheduler and fixture parsing path, `docs/TESTING_REFERENCE.md`, runtime artifact `artifacts/logs/live_mesh_fixture_probe_2026-04-01.log`.
+
+---
+
+## L74 — `RegionObjects` capability samples can have healthy typed object summaries while still exposing no mesh-asset identifiers
+
+**Category:** Protocol diagnostics / mesh-candidate extraction (`viewer_net` + `viewer_app`)
+
+**Learned when:** Implementing and live-validating RegionObjects mesh-candidate extraction on April 2, 2026 (`secondlife://Ahern/8/10/41`).
+
+**What happened:** After adding bounded candidate extraction and emitting `mesh_candidates=...` in RegionObjects summaries, live captures showed `mesh_candidates=none` while object ingress was otherwise healthy (`typed_sample=...`, `ObjectUpdate*` present). This indicates the sampled RegionObjects payload shape on this route did not contain mesh/sculpt asset-id fields suitable for direct mesh fetch.
+
+**Rule for future plans:** Treat RegionObjects mesh-candidate extraction as best-effort observability, not guaranteed mesh-ID discovery. If `mesh_candidates=none` persists, add or use a second candidate source (for example, LLUDP object-update decode) before concluding mesh ingest is blocked by transport.
+
+**Files affected:** `viewer_net` RegionObjects inspection extraction path, `viewer_app` RegionObjects summary relay formatting, runtime artifact `artifacts/logs/live_region_objects_mesh_candidates_2026-04-02.log`.
+
+---
+
+## L75 — Object-UUID-focused rendering depends on observed LLUDP `ObjectUpdate` FullID, not RegionObjects linkset keys
+
+**Category:** Runtime verification ergonomics / object ingress (`viewer_net` + `viewer_app`)
+
+**Learned when:** Implementing and bounded-live-validating the April 2, 2026 object UUID focus ingest/render slice in Puppy.
+
+**What happened:** Even when RegionObjects clearly included the target linkset UUID (`10930d3b-1821-c584-a0c7-28a34999800d`) and LLUDP object ingress was healthy (`ObjectUpdate` observed, gate `PASS`), the new `VIEWER_APP_OBJECT_UUID_FOCUS` filter still produced `total_objects=0` during the same bounded window. The focus filter keys off decoded LLUDP `ObjectUpdate` `FullID` UUIDs, and a matching `FullID` was not observed in that short capture.
+
+**Rule for future plans:** Treat object-UUID focus mode as an LLUDP FullID matching tool, not a RegionObjects linkset-key filter. If focus stays empty while ingress is healthy, the next probe should extend capture duration and/or force nearby interest/camera movement before concluding decode or render regression.
+
+**Files affected:** `viewer_net` object-feed FullID retention/export, `viewer_app` `VIEWER_APP_OBJECT_UUID_FOCUS` filtering path, runtime artifact `artifacts/logs/live_object_uuid_focus_puppy_2026-04-02.log`.
+
+## L76 — Compressed and terse LLUDP object updates carry bounded positional payloads that should feed object-ingest placement when present
+
+**Category:** Protocol decode + ingestion mapping (`viewer_net` + `viewer_core`)
+
+**Learned when:** Implementing the April 2, 2026 object-data ingestion/decode parity slice with Firestorm and OpenSim source references.
+
+**What happened:** Object-feed logic previously treated `ObjectUpdateCompressed` and `ImprovedTerseObjectUpdate` as local-id-only signals, and scene proxy placement remained largely hash/ring-based. Firestorm and OpenSim packet handling show these packet families include positional payloads in their data blocks. After decoding and propagating this bounded position data, object-feed proxy placement can reflect real spatial ordering instead of only local-id distribution.
+
+**Rule for future plans:** For LLUDP object-ingest quality work, decode and preserve available positional payloads from full/compressed/terse object updates, and use hash/ring placement only as explicit fallback when decoded position is unavailable.
+
+**Files affected:** `crates/viewer_net/src/lib.rs`, `crates/viewer_app/src/main.rs`, `crates/viewer_core/src/lib.rs`, references in `reference/firestorm/...` and `reference/opensimulator/...`.
+
+---
+
+## L77 — A bounded receive-first checkpoint plus immediate ACK flush can restore LLUDP object ingress even when startup send-order parity is still imperfect
+
+**Category:** Startup ordering / transport timing (`viewer_app` + `viewer_net`)
+
+**Learned when:** Implementing the April 3, 2026 startup receive-first + immediate ACK flush parity slice and running a bounded non-strict Fidelis live capture.
+
+**What happened:** Earlier bounded runs kept `lludp_object_gate` at `FAIL` even after multiple startup ordering tweaks. After moving startup prime to process an initial social receive checkpoint before sending the startup-interest bundle, and flushing pending LLUDP ACK IDs immediately after each social receive, the same bounded route/window reached `ObjectUpdate` ingress and flipped `lludp_object_gate` to `PASS`.
+
+**Rule for future plans:** When startup has AMC but object ingress remains blocked, prefer a bounded receive-first checkpoint plus immediate ACK drain in the active social loop before adding larger speculative startup packet bundles.
+
+**Files affected:** `crates/viewer_app/src/main.rs`, `crates/viewer_net/src/lib.rs`, runtime artifact `artifacts/logs/live_startup_parity_receivefirst_ackflush_2026-04-03_175048.log`.
+
+---
+
+## L78 — Embedded `ObjectUpdate.ExtraParams` mesh entries do not share the standalone `ObjectExtraParams` byte layout
+
+**Category:** Protocol decode / `viewer_net`
+
+**Learned when:** Implementing the April 3, 2026 failproof mesh-ID retention and export unblock slice with real `FirestormsFidelis` replay payloads.
+
+**What happened:** Early mesh-ID extraction logic treated embedded `ObjectUpdate.ExtraParams` like standalone `ObjectExtraParams`, including an `in_use` byte. Real Firestorm payload replay showed the embedded path is instead `count + param_type + length-prefixed value`, and the mesh payload resolves through Firestorm's sculpt-style unpacking (`UUID + type`). Treating the layouts as identical can make live object ingress appear mesh-empty even when mesh IDs are on the wire.
+
+**Rule for future plans:** When working on LLUDP mesh-ID extraction, keep embedded `ObjectUpdate` / `ObjectUpdateCompressed` `ExtraParams` parsing separate from standalone `ObjectExtraParams` packet parsing. Validate layout changes against real replay payloads before trusting live diagnostics.
+
+**Files affected:** `crates/viewer_net/src/lib.rs`, `reference/firestorm/indra/newview/llviewerobject.cpp`, `reference/firestorm/indra/llprimitive/llprimitive.cpp`, runtime artifact `artifacts/pcaps/FirestormsFidelis.pcapng`.
+
+---
+
+## L79 — A synthetic Second Life mesh fixture is the safest first proof for decode-to-render work
+
+**Category:** Runtime verification ergonomics / `viewer_asset` + `viewer_app`
+
+**Learned when:** Completing the April 3, 2026 mesh-fetch-to-visible-objects slice.
+
+**What happened:** Live mesh discovery/fetch was already proven, but bounded live login stability was still unreliable for render verification. Seeding a deterministic synthetic SL mesh asset directly into the screenshot torture scene made it possible to prove the full downstream path (`SL mesh bytes -> decode -> renderer upload -> visible screenshot`) without depending on live login/session timing.
+
+**Rule for future plans:** For first-pass downstream mesh/render debugging, add or reuse a deterministic SL mesh fixture path before depending on live login or live camera framing. Use live runs after the offline path is already green.
+
+**Files affected:** `crates/viewer_asset/src/sl_mesh_loader.rs`, `crates/viewer_asset/src/lib.rs`, `crates/viewer_app/src/main.rs`, runtime artifact `artifacts/screenshots_mesh_visibility_offline_verify_2026-04-03/viewer_test_0001.png`.
+
+---
+
+## L80 — Firestorm-compatible binary LLSD parsing must admit quoted string tokens and `d` dates before declaring live SL mesh headers invalid
+
+**Category:** Protocol decode / `viewer_asset`
+
+**Learned when:** Fixing and live-validating the April 3, 2026 SL mesh header compatibility slice.
+
+**What happened:** Live mesh fetch was healthy, but every asset failed immediately with `failed to parse SL mesh LLSD header` even though the signatures looked like valid binary-LLSD maps (`7b0000000a6b0000`, `7b0000000c6b0000`, etc.). Comparing `viewer_asset` against Firestorm’s `LLSDBinaryParser` in `reference/firestorm/indra/llcommon/llsdserialize.cpp` showed the Rust parser was missing three legal binary forms: notation-style quoted strings as values, notation-style quoted strings as map keys, and binary `d` date tokens. Once those cases were added, the blanket live header failure disappeared and real live mesh assets decoded successfully.
+
+**Rule for future plans:** When a live SL mesh asset looks like binary LLSD but the header parse fails, compare `viewer_asset` token support directly against Firestorm’s binary parser before assuming corruption or transport issues. Missing legal token variants can masquerade as total live asset incompatibility.
+
+**Files affected:** `crates/viewer_asset/src/sl_mesh_loader.rs`, `reference/firestorm/indra/llcommon/llsdserialize.cpp`, runtime artifacts `artifacts/logs/live_sl_mesh_header_fix_2026-04-03.out.log` and `artifacts/logs/network_debug_live_sl_mesh_header_fix_2026-04-03.jsonl`.
+
+---
+
+## L81 — Exception-stream decoders silently drift if default fields are consumed twice
+
+**Category:** Protocol decode / `viewer_net`
+
+**Learned when:** Implementing and testing face-accurate `TextureEntry` decode for per-face texture/material parity on April 3, 2026.
+
+**What happened:** Two regressions appeared immediately in targeted tests: the decoder consumed default UUID/material fields once in outer logic and then again inside shared exception parsers. This shifted offsets, dropped material-extension IDs, and produced misleading partial success where defaults looked valid but overrides or trailing blocks were misread.
+
+**Rule for future plans:** For exception-encoded LL payloads, keep parser ownership of defaults explicit. If the caller consumes a default field, downstream parser helpers must parse overrides only. Always add tests that include both complete payloads and truncated tails to catch offset drift early.
+
+**Files affected:** `crates/viewer_net/src/lib.rs`, tests `decode_texture_entry_material_data_parses_default_and_face_overrides` and `decode_texture_entry_material_data_is_fail_soft_for_truncated_payload`.
+
+---
+
+## L82 — Crate-local, behavior-local file placement prevents repeat monolith growth and improves agent continuity
+
+**Category:** Process / Architecture hygiene (cross-crate)
+
+**Learned when:** Repository policy pass on April 4, 2026 after repeated large-file accretion across `viewer_net`, `viewer_app`, and `viewer_core`.
+
+**What happened:** The codebase remained functional, but long-term maintainability and agent onboarding degraded as more unrelated behavior accumulated in oversized `lib.rs`/`main.rs` files. Planning and review quality improved once file placement was treated as an explicit decision rather than an implementation afterthought.
+
+**Rule for future plans:** Every meaningful task must identify owning crate(s) and intended local file/module placement up front. Prefer adding or extending crate-local behavior-focused subfiles/modules. If editing a monolithic file is unavoidable, keep the change bounded and record why extraction was deferred.
+
+**Files affected:** `AGENTS.md`, `docs/MASTER_PLAN.md`, `docs/ARCHITECTURE.md`, `docs/INTERFACES.md`, `docs/TASKS.md`, `docs/agents/CODEX.md`.

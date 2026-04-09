@@ -100,6 +100,15 @@ Do not perform broad cleanup, opportunistic refactors, file moves, structural re
 
 When ownership or location is non-obvious, consult docs/FIELD_GUIDE.md before asking the user or doing broad repo search.
 
+### Code placement and locality rule
+
+Future code changes must be made in the owning crate and the nearest behavior-focused file/module for that behavior.
+
+- Do not keep growing monolithic entry files when a bounded submodule/file is the cleaner location.
+- Prefer adding/updating crate-local subfiles (and `mod` wiring) over cross-crate convenience edits.
+- If no suitable local file exists, create one in the owning crate.
+- If a task requires touching a large existing file directly, keep the change bounded and record why extraction was not done yet.
+
 ## 7. Architecture and boundary discipline
 
 Respect crate ownership and interface boundaries at all times.
@@ -308,6 +317,7 @@ Do not falsely reassure the user.
 Do not claim something works unless it was actually validated.
 Do not keep asking questions already answerable from repo materials.
 Do not optimize for speed at the expense of correctness, continuity, or architectural cleanliness.
+Prefer crate-local, behavior-local edits and incremental module extraction over adding more unrelated logic to giant files.
 
 ## 17. What this file is not
 

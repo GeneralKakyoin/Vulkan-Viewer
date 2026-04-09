@@ -16,6 +16,7 @@ Codex is the default implementation-oriented writer for this repo.
 - perform broad refactors outside plan
 - perform destructive Git actions
 - push or merge without explicit approval
+- grow monolithic crate entry files when a crate-local behavior submodule/file is the correct location
 
 ## Codex startup behavior
 
@@ -30,4 +31,5 @@ Codex is the default implementation-oriented writer for this repo.
 
 Use Codex as the default writer.
 Use it for bounded implementation, validation, reports, and continuity updates.
+Prefer crate-local, behavior-local file placement and create new subfiles/modules when that is the clearer ownership fit.
 Use Gemini via CLI only as a bounded second eye for review and repo-analysis support, not as the primary planner or decision-maker.

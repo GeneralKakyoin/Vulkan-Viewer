@@ -127,6 +127,7 @@ The following rules are repository law unless deliberately revised by explicit a
 * Do not turn `viewer_app` into a dumping ground for subsystem internals.
 * Do not move renderer policy upward just because it is convenient for a local change.
 * Do not collapse crate boundaries to chase a short-term fix.
+* Do not keep centralizing new behavior into monolithic crate entry files when a crate-local submodule/file is the correct location.
 * Do not change repo structure broadly unless the change is explicitly planned and justified.
 * Do not rely on chat memory instead of repository documentation for continuity.
 * Do not treat temporary implementation convenience as architectural permission.

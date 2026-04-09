@@ -279,6 +279,7 @@ viewer_core::Scene (Vec<RenderableInstance>)
 - **Grid policy stays in `viewer_grid`**: what a capability URL means, what a response field implies — this lives in `viewer_grid`, not in `viewer_net`.
 - **Transport mechanics stay in `viewer_net`**: retry policy, codec selection, LLUDP framing — not `viewer_grid`.
 - **Self-avatar fallback**: when coarse ID blocks are absent, self placeholder must persist using a deterministic fallback ID.
+- **Crate-local code placement**: implement behavior in the owning crate and nearest behavior-focused subfile/module; avoid accreting unrelated logic into oversized crate entry files.
 
 ---
 
@@ -292,6 +293,7 @@ viewer_core::Scene (Vec<RenderableInstance>)
 - **Don't begin broad world/object decoding** before the bounded ingestion seam and spatial partitioning are ready as documented in `TASKS.md`.
 - **Don't expand `Unknown` traffic classifications** without a live observation record in `docs/RESEARCH/post_amc_bootstrap_boundary_map.md`.
 - **Don't use `unwrap()` in decode or handshake paths**. Use `?` or explicit error classification.
+- **Don't default new behavior to monolithic files** (`main.rs`/`lib.rs`) when a crate-local submodule is the correct ownership location.
 
 ---
 

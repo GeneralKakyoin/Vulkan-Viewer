@@ -1,7 +1,5 @@
 # .codex/config.toml
 
-service_tier = "flex"
-
 [project]
 name = "viewer"
 

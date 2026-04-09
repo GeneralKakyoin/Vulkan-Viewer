@@ -84,6 +84,7 @@ Supported values:
 | `2` |  | Geometry torture scene (procedural + sculpt + mesh placeholders) |
 | `camera` | `auto_camera`, `auto-camera`, `5` | Deterministic orbiting auto-camera |
 | `screenshot` | `screenshots`, `capture`, `6` | Auto-camera + periodic PNG capture |
+| `live_texture` | `live-texture`, `single_live_texture`, `7` | Single center cube for live texture-ingest verification |
 
 ### Auto-camera tuning env vars (`STRESS_TEST=camera|screenshot`)
 
@@ -110,6 +111,27 @@ $env:STRESS_TEST='screenshot'
 $env:VIEWER_TEST_SCREENSHOT_DIR='artifacts/screenshots_smoke'
 $env:VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES='1'
 $env:VIEWER_TEST_SCREENSHOT_MAX_FRAMES='1'
+cargo run -p viewer_app
+```
+
+### Mesh visibility verification env vars
+
+- `VIEWER_APP_MESH_VERIFY` (bool-like, default `false`)
+- `VIEWER_APP_MESH_VERIFY_ID` (optional mesh UUID/string target; defaults to first observed mesh key when unset)
+- `VIEWER_APP_MESH_VERIFY_LOG_PATH` (path, default `artifacts/logs/mesh_visibility_verify.jsonl`)
+- `VIEWER_APP_MESH_VERIFY_SCREENSHOT_DIR` (optional path for a targeted mesh-verification screenshot)
+
+Recommended deterministic offline mesh-visibility smoke:
+```powershell
+$env:VIEWER_APP_LIVE_STARTUP='off'
+$env:STRESS_TEST='screenshot'
+$env:VIEWER_TEST_SCREENSHOT_DIR='artifacts/screenshots_mesh_visibility_smoke'
+$env:VIEWER_TEST_SCREENSHOT_EVERY_N_FRAMES='1'
+$env:VIEWER_TEST_SCREENSHOT_MAX_FRAMES='1'
+$env:VIEWER_APP_MESH_VERIFY='true'
+$env:VIEWER_APP_MESH_VERIFY_ID='debug-secondlife-mesh'
+$env:VIEWER_APP_MESH_VERIFY_LOG_PATH='artifacts/logs/mesh_visibility_smoke.jsonl'
+$env:VIEWER_APP_MESH_VERIFY_SCREENSHOT_DIR='artifacts/screenshots_mesh_visibility_smoke'
 cargo run -p viewer_app
 ```
 
@@ -198,9 +220,26 @@ These variables are read by `viewer_app` when in-process live startup is enabled
 - `VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS` (u32, default `80`, `1..10000`)
   - reconnect-only bounded delay before the one-shot post-reconnect `RegionObjects` re-probe
   - used to test whether first post-reconnect `typed_sample=none` is a timing artifact
+- `VIEWER_APP_LLUDP_STARTUP_PARITY_BUNDLE` (bool-like, default `false`)
+  - enables bounded startup parity-bundle priming mode for LLUDP object-ingress experiments
+  - keeps default startup behavior unchanged when disabled
+- `VIEWER_APP_REQUIRE_REGION_HANDSHAKE_REPLY` (bool-like, default `false`)
+  - when `true`, only sends `RegionHandshakeReply` after observed inbound `RegionHandshake`
+  - enables strict handshake investigations; when `false`, legacy fallback reply behavior remains
+- `VIEWER_APP_AGENT_UPDATE_FAR` (f32, default `96.0`, clamped `16..4096`)
+  - overrides far-plane value used for periodic non-reliable `AgentUpdate` keepalive sends
+- `VIEWER_APP_AGENT_UPDATE_KEEPALIVE_TICKS` (optional u64, clamped `1..60000`)
+  - when set, overrides derived keepalive cadence and forces deterministic tick period for A/B runs
 - `VIEWER_APP_EVENT_QUEUE_POLL_TIMEOUT_MS` (u64, default `45000`, min `100`)
 - `VIEWER_APP_EVENT_QUEUE_POLL_EVERY_TICKS` (u32, default `10`, min `1`)
 - `VIEWER_APP_EVENT_QUEUE_FAILURES_BEFORE_RECONNECT` (u32, default `0`)
+- `VIEWER_APP_EVENT_QUEUE_CAP_NOT_FOUND_BEFORE_RECONNECT` (u32, default `3`)
+  - bounded reconnect trigger specifically for repeated EventQueue `404 cap not found` failures
+- `VIEWER_APP_CAPABILITY_PROBES_REQUIRE_EVENT_QUEUE_OK` (bool-like, default `true`)
+  - gates startup one-shot `InterestList` and `UntrustedSimulatorMessage` probes until first `EventQueueGet:ok`
+- `VIEWER_APP_LANE_PROBE_ASSET_IDS` (optional CSV UUID list)
+  - preferred asset-id source for shaped `ViewerAsset` lane probes
+  - if unset, bounded synthetic UUIDs are used for transport-shape evidence
 - `VIEWER_APP_SOCIAL_POLL_TIMEOUT_MS` (u64, default `35`, min `5`)
 - `VIEWER_APP_SOCIAL_POLL_MAX_PACKETS` (usize, default `4`)
 - `VIEWER_APP_NEARBY_POLL_TIMEOUT_MS` (u64, default `40`, min `5`)
@@ -210,6 +249,14 @@ These variables are read by `viewer_app` when in-process live startup is enabled
 - `VIEWER_APP_PROFILE_CACHE_TTL_SECS` (u64, default `120`)
 - `VIEWER_NETWORK_DEBUG_LOG_PATH` (path, default `logs/network_debug.jsonl`)
   - append-only JSONL sink for network-debug relay categories used by the in-app `Network Debug` window
+- `VIEWER_APP_MESH_VERIFY` (bool-like, default `false`)
+  - enables bounded mesh-visibility lifecycle verification in `viewer_app`
+- `VIEWER_APP_MESH_VERIFY_ID` (optional string, default unset)
+  - fixes the verification target to a specific mesh id; when unset the first observed mesh is selected
+- `VIEWER_APP_MESH_VERIFY_LOG_PATH` (path, default `artifacts/logs/mesh_visibility_verify.jsonl`)
+  - append-only JSONL sink for mesh-visibility lifecycle stages when verification is enabled
+- `VIEWER_APP_MESH_VERIFY_SCREENSHOT_DIR` (optional path)
+  - targeted screenshot output directory for the selected mesh-visibility verification target
 
 Example bounded reconnect-teleport capture run:
 ```powershell
@@ -230,6 +277,14 @@ These are used to validate asset/render integration without relying on live text
   - unset/empty/`0`: disabled
   - `1` / `true` / `yes` / `on`: enable default fixture IDs (`water_diffuse`, `stone_diffuse`, `stone_normal`)
   - otherwise: comma-separated asset IDs (example: `stone_diffuse,stone_normal`)
+- `VIEWER_FIXTURE_MESHES`
+  - unset/empty/`0`: disabled
+  - otherwise: comma-separated mesh UUIDs (example: `00000000-0000-0000-0000-000000000001`)
+  - used to force bounded live mesh fetch requests (`mesh_fetch: queued|ready|failed`) even when visible scene geometry has no mesh sources
+- `VIEWER_APP_OBJECT_UUID_FOCUS`
+  - optional canonical UUID (example: `10930d3b-1821-c584-a0c7-28a34999800d`)
+  - when set, live scene object-feed export is filtered to objects whose decoded LLUDP `FullID` matches this UUID
+  - useful to isolate one in-world object from a busy region during ingest/render verification
 
 Fixture location:
 - `test_assets/*` (repo directory; used by `viewer_asset::FixtureTextureCache`)

@@ -350,6 +350,7 @@ These must remain true unless a deliberate architectural decision changes them:
 4. `viewer_ui` displays state but does not own authoritative logic
 5. `viewer_app` orchestrates but should stay thin
 6. Firestorm-derived behavior must pass through clean Rust interfaces
+7. New behavior should be added in the owning crate's nearest subfile/module; avoid monolithic file accretion when a local module is viable
 
 ---
 
@@ -360,8 +361,9 @@ If a task requires changing an interface:
 1. identify the owning crate
 2. explain why the current interface is insufficient
 3. make the change narrowly
-4. update this file if the boundary meaning changed
-5. update `CURRENT_STATE.md` and `HANDOFF.md` if the change matters for future work
+4. place implementation in the owning crate's local module/file (create one when needed) instead of cross-crate convenience placement
+5. update this file if the boundary meaning changed
+6. update `CURRENT_STATE.md` and `HANDOFF.md` if the change matters for future work
 
 ---
 

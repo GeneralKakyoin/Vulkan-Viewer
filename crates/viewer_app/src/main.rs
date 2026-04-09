@@ -1,7 +1,17 @@
 use anyhow::{Context, Result};
 use dotenvy::dotenv;
+mod capability_diagnostics_utils;
+mod first_sim_diagnostics_utils;
+mod object_feed_diagnostics_utils;
+mod runtime_relay_utils;
 mod social_cache;
+mod start_location_utils;
+use capability_diagnostics_utils::*;
+use first_sim_diagnostics_utils::*;
+use object_feed_diagnostics_utils::*;
+use runtime_relay_utils::*;
 use social_cache::{SocialCache, SocialCacheConfig};
+use start_location_utils::*;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
@@ -23,12 +33,13 @@ use viewer_core::{
     compute_p2p_session_id,
 };
 use viewer_grid::{
-    GridLoginResult, LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent,
+    AssetCapabilityPolicy, CapabilityProbeMethod, CapabilityProbeRequestShape, GridLoginResult,
+    LoginIntent, SecondLifeAdapter, StartLocation, StartLocationIntent, ViewerAssetQueryKey,
 };
 use viewer_net::{
-    AgentProfileData, CapabilityUrlFamily, Connection, ConnectionConfig, ConnectionError,
-    FirstSimulatorInboundTrafficScope, LoginFallbackClassifiedReason, LoginFallbackOutcome,
-    LoginTrace, LoginWireFormat, NearbyChatMessage, RegionObjectsInspection,
+    AgentProfileData, CapabilityProbeRequest, CapabilityUrlFamily, Connection, ConnectionConfig,
+    ConnectionError, FirstSimulatorInboundTrafficScope, LoginFallbackClassifiedReason,
+    LoginFallbackOutcome, LoginTrace, LoginWireFormat, NearbyChatMessage, RegionObjectsInspection,
     SeedCapabilityInventoryEntry, SocialCircuit, SocialEvent, classify_capability_url,
     poll_event_queue_url_once,
 };
@@ -64,7 +75,9 @@ struct AppState {
     geometry_cache: viewer_asset::GeometryCache,
     fixture_texture_cache: viewer_asset::FixtureTextureCache,
     fixture_texture_ids: Vec<viewer_core::AssetID>,
+    fixture_mesh_ids: Vec<String>,
     fixture_texture_missing_logged: HashSet<viewer_core::AssetID>,
+    live_mesh_assets: BTreeMap<(String, u32), LiveMeshAssetState>,
     ui: UiSystem,
     camera: Camera,
     scene: Scene,
@@ -105,11 +118,48 @@ struct AppState {
     last_recovery_result: Option<viewer_core::RecoveryActionResult>,
     transition_visual_state: viewer_core::TransitionVisualState,
     network_debug: NetworkDebugState,
+    mesh_verification: MeshVerificationState,
 }
 
 const RECOVERY_PROBE_COOLDOWN_MS: u64 = 15_000;
 const RECOVERY_ASSET_REFRESH_COOLDOWN_MS: u64 = 5_000;
 const NETWORK_DEBUG_SECTION_MAX_LINES: usize = 8;
+const LIVE_TEXTURE_FETCH_MAX_INFLIGHT: usize = 4;
+const LIVE_TEXTURE_FETCH_MAX_ATTEMPTS: u8 = 3;
+const LIVE_TEXTURE_FETCH_RETRY_BASE_TICKS: u64 = 4;
+
+#[derive(Debug, Clone)]
+struct ScheduledTextureFetch {
+    priority: viewer_core::AssetPriority,
+    first_enqueued_tick: u64,
+    ready_at_tick: u64,
+    completed_attempts: u8,
+}
+
+#[derive(Debug, Clone)]
+struct InFlightTextureFetch {
+    priority: viewer_core::AssetPriority,
+    first_enqueued_tick: u64,
+    attempt: u8,
+}
+
+#[derive(Debug)]
+struct TextureFetchTaskResult {
+    id: AssetID,
+    priority: viewer_core::AssetPriority,
+    first_enqueued_tick: u64,
+    attempt: u8,
+    outcome: TextureFetchTaskOutcome,
+}
+
+#[derive(Debug)]
+enum TextureFetchTaskOutcome {
+    Ready(Vec<u8>),
+    Failed {
+        reason: viewer_asset::AssetFetchFailureReason,
+        detail: String,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StressTestMode {
@@ -118,6 +168,7 @@ enum StressTestMode {
     GeometryTorture,
     AutoCamera,
     Screenshot,
+    SingleLiveTextureCenter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +188,9 @@ impl StressTestMode {
             "2" => Self::GeometryTorture,
             "camera" | "auto_camera" | "auto-camera" | "5" => Self::AutoCamera,
             "screenshot" | "screenshots" | "capture" | "6" => Self::Screenshot,
+            "live_texture" | "live-texture" | "single_live_texture" | "7" => {
+                Self::SingleLiveTextureCenter
+            }
             _ => Self::None,
         }
     }
@@ -258,6 +312,59 @@ struct ScreenshotConfig {
     max_frames: u32,
 }
 
+#[derive(Debug, Clone)]
+struct LiveMeshAssetBytes {
+    bytes: Vec<u8>,
+    byte_len: usize,
+    byte_signature: String,
+    format_hint: viewer_asset::MeshSourceFormat,
+}
+
+#[derive(Debug, Clone)]
+enum LiveMeshAssetState {
+    Requested,
+    Fetched(LiveMeshAssetBytes),
+    Decoded {
+        asset: LiveMeshAssetBytes,
+        format: viewer_asset::MeshSourceFormat,
+        vertices: usize,
+        submeshes: usize,
+    },
+    Failed {
+        reason: viewer_asset::AssetFetchFailureReason,
+        detail: String,
+        byte_len: Option<usize>,
+        byte_signature: Option<String>,
+        format: viewer_asset::MeshSourceFormat,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct MeshVerificationConfig {
+    target_mesh_id: Option<(String, u32)>,
+    log_path: PathBuf,
+    screenshot_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default)]
+struct MeshVerificationState {
+    config: Option<MeshVerificationConfig>,
+    selected_target: Option<(String, u32)>,
+    emitted_events: BTreeSet<String>,
+    pending_screenshot: Option<PathBuf>,
+    captured_screenshot: Option<PathBuf>,
+}
+
+impl LiveMeshAssetState {
+    fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Fetched(asset) => Some(asset.bytes.as_slice()),
+            Self::Decoded { asset, .. } => Some(asset.bytes.as_slice()),
+            Self::Requested | Self::Failed { .. } => None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct InputState {
     move_forward: bool,
@@ -303,11 +410,19 @@ struct InProcessLiveFeedConfig {
     auto_teleport_slurl: Option<String>,
     auto_teleport_delay_ticks: u32,
     region_objects_reprobe_delay_ticks: u32,
+    lludp_startup_parity_bundle: bool,
+    require_region_handshake_reply: bool,
+    agent_update_far: f32,
+    agent_update_keepalive_ticks_override: Option<u64>,
     run_probe: bool,
     worker_tick_ms: u64,
     event_queue_poll_timeout_ms: u64,
     event_queue_poll_every_ticks: u32,
     event_queue_failures_before_reconnect: u32,
+    event_queue_cap_not_found_before_reconnect: u32,
+    capability_probes_require_event_queue_ok: bool,
+    lane_probe_asset_ids: Vec<String>,
+    object_uuid_focus: Option<String>,
     social_poll_timeout_ms: u64,
     social_poll_max_packets: usize,
     nearby_poll_timeout_ms: u64,
@@ -319,6 +434,11 @@ struct InProcessLiveFeedConfig {
 }
 
 const AGENT_UPDATE_KEEPALIVE_PERIOD_MS: u64 = 1_000;
+const AGENT_UPDATE_CONTROL_FLAGS: u32 = 0;
+const DEFAULT_AGENT_UPDATE_FAR: f32 = 96.0;
+const REGION_HANDSHAKE_REPRIME_INTERVAL_TICKS: u64 = 40;
+const REGION_HANDSHAKE_REPRIME_MAX_ATTEMPTS: u32 = 3;
+const FIRST_SIM_TRANSCRIPT_TAIL_LEN: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiveStartupMode {
@@ -477,6 +597,16 @@ enum LiveFeedUpdate {
         id: String,
         reason: viewer_asset::AssetFetchFailureReason,
     },
+    MeshAsset {
+        id: String,
+        lod: u32,
+        bytes: Vec<u8>,
+    },
+    MeshAssetFailed {
+        id: String,
+        lod: u32,
+        reason: viewer_asset::AssetFetchFailureReason,
+    },
     ContinuityProbeResult(viewer_core::ProbeResultCode),
 }
 
@@ -513,6 +643,10 @@ enum LiveFeedCommand {
     RequestTexture {
         id: AssetID,
         priority: viewer_core::AssetPriority,
+    },
+    RequestMesh {
+        id: String,
+        lod: u32,
     },
     ExecuteContinuityProbe {
         queued_at_unix_ms: u64,
@@ -558,6 +692,7 @@ impl viewer_asset::LiveTextureProvider for AppLiveTextureProvider {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_recovery_action(
     action: viewer_core::RecoveryAction,
     now_ms: u64,
@@ -573,9 +708,7 @@ fn compute_recovery_action(
 
     let (code, cooldown_remaining_ms) = match action {
         viewer_core::RecoveryAction::RetryContinuityProbe => {
-            if !probe_available {
-                (viewer_core::RecoveryResultCode::Unavailable, None)
-            } else if probe_in_flight {
+            if !probe_available || probe_in_flight {
                 (viewer_core::RecoveryResultCode::Unavailable, None)
             } else if let Some(last) = last_probe_ms {
                 let elapsed = now_ms.saturating_sub(last);
@@ -826,6 +959,19 @@ where
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(80)
             .clamp(1, 10_000);
+    let lludp_startup_parity_bundle = lookup("VIEWER_APP_LLUDP_STARTUP_PARITY_BUNDLE")
+        .map(|v| parse_bool_like(&v))
+        .unwrap_or(false);
+    let require_region_handshake_reply = lookup("VIEWER_APP_REQUIRE_REGION_HANDSHAKE_REPLY")
+        .map(|v| parse_bool_like(&v))
+        .unwrap_or(false);
+    let agent_update_far = lookup("VIEWER_APP_AGENT_UPDATE_FAR")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(DEFAULT_AGENT_UPDATE_FAR)
+        .clamp(16.0, 4096.0);
+    let agent_update_keepalive_ticks_override = lookup("VIEWER_APP_AGENT_UPDATE_KEEPALIVE_TICKS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|ticks| ticks.clamp(1, 60_000));
     let run_probe = lookup("VIEWER_APP_IN_PROCESS_PROBE")
         .map(|v| parse_bool_like(&v))
         .unwrap_or(true);
@@ -845,6 +991,27 @@ where
         lookup("VIEWER_APP_EVENT_QUEUE_FAILURES_BEFORE_RECONNECT")
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
+    let event_queue_cap_not_found_before_reconnect =
+        lookup("VIEWER_APP_EVENT_QUEUE_CAP_NOT_FOUND_BEFORE_RECONNECT")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(3);
+    let capability_probes_require_event_queue_ok =
+        lookup("VIEWER_APP_CAPABILITY_PROBES_REQUIRE_EVENT_QUEUE_OK")
+            .map(|v| parse_bool_like(&v))
+            .unwrap_or(true);
+    let lane_probe_asset_ids = lookup("VIEWER_APP_LANE_PROBE_ASSET_IDS")
+        .map(|v| {
+            v.split([',', ';', ' ', '\t', '\n', '\r'])
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let object_uuid_focus = lookup("VIEWER_APP_OBJECT_UUID_FOCUS")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .filter(|v| is_canonical_uuid_like(v));
     let social_poll_timeout_ms = lookup("VIEWER_APP_SOCIAL_POLL_TIMEOUT_MS")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(35)
@@ -893,11 +1060,19 @@ where
         auto_teleport_slurl,
         auto_teleport_delay_ticks,
         region_objects_reprobe_delay_ticks,
+        lludp_startup_parity_bundle,
+        require_region_handshake_reply,
+        agent_update_far,
+        agent_update_keepalive_ticks_override,
         run_probe,
         worker_tick_ms,
         event_queue_poll_timeout_ms,
         event_queue_poll_every_ticks,
         event_queue_failures_before_reconnect,
+        event_queue_cap_not_found_before_reconnect,
+        capability_probes_require_event_queue_ok,
+        lane_probe_asset_ids,
+        object_uuid_focus,
         social_poll_timeout_ms,
         social_poll_max_packets,
         nearby_poll_timeout_ms,
@@ -999,11 +1174,79 @@ fn classify_asset_fetch_failure_reason(
         viewer_net::ConnectionError::Http(err) if err.is_timeout() => {
             viewer_asset::AssetFetchFailureReason::Timeout
         }
+        viewer_net::ConnectionError::Http(err)
+            if err
+                .status()
+                .map(|status| non_retryable_texture_http_status(status.as_u16()))
+                .unwrap_or(false) =>
+        {
+            viewer_asset::AssetFetchFailureReason::MissingCapability
+        }
+        viewer_net::ConnectionError::HttpStatus { status, .. }
+            if non_retryable_texture_http_status(status.as_u16()) =>
+        {
+            viewer_asset::AssetFetchFailureReason::MissingCapability
+        }
         viewer_net::ConnectionError::MissingCapability(_) => {
             viewer_asset::AssetFetchFailureReason::MissingCapability
         }
         _ => viewer_asset::AssetFetchFailureReason::Transport,
     }
+}
+
+fn classify_mesh_http_status_bucket(status_code: u16, body: &str) -> Option<&'static str> {
+    if status_code != 403 {
+        return None;
+    }
+
+    let body = body.to_ascii_lowercase();
+    if body.contains("accessdenied") {
+        return Some("AccessDenied");
+    }
+    if body.contains("nosuchkey") || body.contains("not found") {
+        return Some("NotFoundOrNoSuchKey");
+    }
+    if body.contains("signaturedoesnotmatch")
+        || body.contains("request has expired")
+        || body.contains("expiredtoken")
+    {
+        return Some("AuthSignatureOrExpiry");
+    }
+    if body.contains("invalidtoken") || body.contains("access denied") {
+        return Some("AuthDenied");
+    }
+
+    Some("ForbiddenUnclassified")
+}
+
+fn classify_mesh_403_bucket(error: &viewer_net::ConnectionError) -> Option<&'static str> {
+    let viewer_net::ConnectionError::HttpStatus { status, body } = error else {
+        return None;
+    };
+    classify_mesh_http_status_bucket(status.as_u16(), body)
+}
+
+fn non_retryable_texture_http_status(status_code: u16) -> bool {
+    matches!(status_code, 401 | 403 | 404)
+}
+
+fn should_retry_live_texture_failure(
+    reason: viewer_asset::AssetFetchFailureReason,
+    attempt: u8,
+) -> bool {
+    if attempt >= LIVE_TEXTURE_FETCH_MAX_ATTEMPTS {
+        return false;
+    }
+    matches!(
+        reason,
+        viewer_asset::AssetFetchFailureReason::Timeout
+            | viewer_asset::AssetFetchFailureReason::Transport
+    )
+}
+
+fn live_texture_retry_backoff_ticks(attempt: u8) -> u64 {
+    LIVE_TEXTURE_FETCH_RETRY_BASE_TICKS
+        .saturating_mul(1_u64 << u32::from(attempt.saturating_sub(1).min(5)))
 }
 
 async fn run_in_process_live_feed(
@@ -1027,6 +1270,15 @@ async fn run_in_process_live_feed(
         "startup",
         "live worker starting",
     );
+    emit_relay(
+        &tx,
+        RuntimeRelayLevel::Info,
+        "startup",
+        &format!(
+            "event queue polling: every_ticks={} timeout_ms={}",
+            config.event_queue_poll_every_ticks, config.event_queue_poll_timeout_ms
+        ),
+    );
 
     loop {
         let mut connection = Connection::new(ConnectionConfig {
@@ -1034,6 +1286,8 @@ async fn run_in_process_live_feed(
             connect_timeout: std::time::Duration::from_secs(config.connect_timeout_secs),
             wire_format: config.wire_format,
         });
+        connection
+            .set_require_observed_region_handshake_for_reply(config.require_region_handshake_reply);
 
         let connect_state = if reconnect_attempt == 0 {
             ChatConnectionState::Connecting
@@ -1152,6 +1406,7 @@ async fn run_in_process_live_feed(
         let is_reconnect_session = reconnect_attempt > 0;
         let mut event_ack = 0u64;
         let mut event_queue_consecutive_failures = 0u32;
+        let mut event_queue_cap_not_found_failures = 0u32;
         let mut event_queue_poll_task: Option<
             tokio::task::JoinHandle<
                 Result<viewer_net::EventQueuePollResult, viewer_net::ConnectionError>,
@@ -1169,6 +1424,20 @@ async fn run_in_process_live_feed(
                     &mut protocol_events,
                     format!("seed_caps:ok {}", capability_inventory_summary),
                 );
+                let discovered_non_baseline =
+                    summarize_non_baseline_caps_by_host(&caps.entries, 16);
+                push_protocol_event(
+                    &mut protocol_events,
+                    format!("seed_caps:non_baseline_by_host {discovered_non_baseline}"),
+                );
+                emit_relay(
+                    &tx,
+                    RuntimeRelayLevel::Info,
+                    "parallel_protocol",
+                    &format!(
+                        "seed non-baseline capability names by host: {discovered_non_baseline}"
+                    ),
+                );
                 Some(caps)
             }
             Err(err) => {
@@ -1182,6 +1451,23 @@ async fn run_in_process_live_feed(
                 None
             }
         };
+        let mut pending_gated_lane_probe_shapes = Vec::<LaneProbeShapeTask>::new();
+        if let Some(caps) = capabilities.as_ref() {
+            let (mut immediate_lane_probe_shapes, gated_lane_probe_shapes) =
+                build_lane_probe_shape_matrix(&caps.entries, &config);
+            pending_gated_lane_probe_shapes = gated_lane_probe_shapes;
+            run_lane_probe_shape_tasks_once(
+                &mut connection,
+                &tx,
+                &mut protocol_events,
+                &mut immediate_lane_probe_shapes,
+            )
+            .await;
+            if pending_gated_lane_probe_shapes.is_empty() {
+                push_protocol_event(&mut protocol_events, "LaneProbeShape:gated_none");
+            }
+        }
+        let mut capability_readiness = init_capability_readiness(capabilities.as_ref());
         let event_queue_url = capabilities
             .as_ref()
             .and_then(|caps| caps.entries.get("EventQueueGet"))
@@ -1206,7 +1492,49 @@ async fn run_in_process_live_feed(
                     .or_else(|| caps.entries.get("ViewerAsset"))
             })
             .cloned();
+        let mut pending_interest_list_probe_url = capabilities
+            .as_ref()
+            .and_then(|caps| caps.entries.get("InterestList"))
+            .cloned();
+        let mut pending_untrusted_simulator_message_probe_url = capabilities
+            .as_ref()
+            .and_then(|caps| caps.entries.get("UntrustedSimulatorMessage"))
+            .cloned();
+        let mut event_queue_has_observed_ok = false;
+        let mut event_queue_simulator_target_messages = 0usize;
+        let mut event_queue_enable_simulator_messages = 0usize;
+        let mut capability_probe_gate_open =
+            !config.capability_probes_require_event_queue_ok || event_queue_url.is_none();
+        if capability_probe_gate_open {
+            let reason = if !config.capability_probes_require_event_queue_ok {
+                "config_disabled"
+            } else {
+                "event_queue_missing"
+            };
+            push_protocol_event(
+                &mut protocol_events,
+                format!("probe_gate:open reason={reason}"),
+            );
+        } else {
+            push_protocol_event(
+                &mut protocol_events,
+                String::from("probe_gate:wait EventQueueGet:ok"),
+            );
+            if pending_interest_list_probe_url.is_some() {
+                push_protocol_event(
+                    &mut protocol_events,
+                    String::from("InterestList:deferred waiting_for=EventQueueGet:ok"),
+                );
+            }
+            if pending_untrusted_simulator_message_probe_url.is_some() {
+                push_protocol_event(
+                    &mut protocol_events,
+                    String::from("UntrustedSimulatorMessage:deferred waiting_for=EventQueueGet:ok"),
+                );
+            }
+        }
         if let Some(url) = event_queue_url.as_ref() {
+            mark_capability_invocation_started(&mut capability_readiness, "EventQueueGet");
             push_protocol_event(
                 &mut protocol_events,
                 format!(
@@ -1220,8 +1548,14 @@ async fn run_in_process_live_feed(
                 Some(spawn_event_queue_poll_task(url.clone(), event_ack, timeout));
         }
         if let Some(url) = region_objects_url.as_deref() {
+            mark_capability_invocation_started(&mut capability_readiness, "RegionObjects");
             match connection.fetch_region_objects_once(url).await {
                 Ok(inspection) => {
+                    mark_capability_invocation_result(
+                        &mut capability_readiness,
+                        "RegionObjects",
+                        Ok("ok"),
+                    );
                     let summary = summarize_region_objects_inspection(&inspection);
                     let classified_url = format_classified_url(url);
                     let host_family = format_capability_host_family_tag(url);
@@ -1237,6 +1571,11 @@ async fn run_in_process_live_feed(
                     );
                 }
                 Err(err) => {
+                    mark_capability_invocation_result(
+                        &mut capability_readiness,
+                        "RegionObjects",
+                        Err(&err.to_string()),
+                    );
                     let classified_url = format_classified_url(url);
                     let host_family = format_capability_host_family_tag(url);
                     push_protocol_event(
@@ -1251,6 +1590,23 @@ async fn run_in_process_live_feed(
                     );
                 }
             }
+        }
+        if capability_probe_gate_open {
+            run_pending_capability_readiness_probes(
+                &mut connection,
+                &mut capability_readiness,
+                &mut protocol_events,
+                &mut pending_interest_list_probe_url,
+                &mut pending_untrusted_simulator_message_probe_url,
+            )
+            .await;
+            run_lane_probe_shape_tasks_once(
+                &mut connection,
+                &tx,
+                &mut protocol_events,
+                &mut pending_gated_lane_probe_shapes,
+            )
+            .await;
         }
         let mut post_reconnect_region_objects_reprobe_pending =
             is_reconnect_session && region_objects_url.is_some();
@@ -1295,9 +1651,15 @@ async fn run_in_process_live_feed(
         if !local_agent_id.is_empty() {
             known_avatar_name_ids.insert(local_agent_id.clone());
         }
+        let (texture_fetch_result_tx, texture_fetch_result_rx) =
+            mpsc::channel::<TextureFetchTaskResult>();
+        let mut pending_texture_fetches = BTreeMap::<AssetID, ScheduledTextureFetch>::new();
+        let mut inflight_texture_fetches = BTreeMap::<AssetID, InFlightTextureFetch>::new();
         let mut worker_tick: u64 = 0;
         let agent_update_keepalive_interval_ticks = agent_update_keepalive_interval_ticks(&config);
         let mut last_agent_update_tick = None;
+        let mut region_handshake_reprime_attempts: u32 = 0;
+        let mut last_region_handshake_reprime_tick: Option<u64> = None;
         let mut first_sim_socket_steady_state_summary_emitted = false;
         let mut social_circuit: Option<SocialCircuit> = connection
             .open_social_circuit(&config.receive_bind)
@@ -1306,6 +1668,19 @@ async fn run_in_process_live_feed(
         let mut followed_enable_simulator_ports = BTreeSet::new();
         let mut followed_seed_capability_urls = BTreeSet::new();
         emit_first_simulator_socket_summary(&tx, &connection, "after_open_social_circuit");
+        emit_relay(
+            &tx,
+            RuntimeRelayLevel::Info,
+            "social",
+            &format!(
+                "startup prime mode=lludp_parity_bundle:{}",
+                if config.lludp_startup_parity_bundle {
+                    "on"
+                } else {
+                    "off"
+                }
+            ),
+        );
         if let Some(circuit) = social_circuit.as_ref() {
             if let Err(err) = prime_startup_social_circuit(
                 &mut connection,
@@ -1446,7 +1821,7 @@ async fn run_in_process_live_feed(
             }
         }
 
-        update_live_visual_from_connection(&mut snapshot, &connection);
+        update_live_visual_from_connection(&mut snapshot, &connection, &config);
         snapshot.source = String::from("viewer_app_in_process:ready");
         emit_object_feed_startup_summary(&tx, &snapshot, &connection);
         emit_parallel_protocol_summary(
@@ -1454,10 +1829,15 @@ async fn run_in_process_live_feed(
             &connection,
             "startup",
             &capability_inventory_summary,
+            &summarize_capability_readiness(&capability_readiness),
             &protocol_events,
             event_queue_url.as_deref(),
             event_ack,
             event_queue_consecutive_failures,
+            event_queue_cap_not_found_failures,
+            event_queue_has_observed_ok,
+            event_queue_simulator_target_messages,
+            event_queue_enable_simulator_messages,
         );
         let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
         let _ = tx.send(LiveFeedUpdate::WorldAvatars {
@@ -1554,6 +1934,165 @@ async fn run_in_process_live_feed(
                     }
                 }
             }
+
+            while let Ok(task_result) = texture_fetch_result_rx.try_recv() {
+                let id = task_result.id.clone();
+                let id_str = id.to_string();
+                let Some(in_flight) = inflight_texture_fetches.remove(&id) else {
+                    emit_relay(
+                        &tx,
+                        RuntimeRelayLevel::Warn,
+                        "texture_fetch",
+                        &format!("completion for non-inflight texture {id_str} ignored"),
+                    );
+                    continue;
+                };
+                let effective_priority = task_result.priority.min(in_flight.priority);
+                let effective_first_enqueued_tick = task_result
+                    .first_enqueued_tick
+                    .min(in_flight.first_enqueued_tick);
+                match task_result.outcome {
+                    TextureFetchTaskOutcome::Ready(bytes) => {
+                        let _ = tx.send(LiveFeedUpdate::TextureAsset {
+                            id: id_str.clone(),
+                            bytes,
+                        });
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "texture_fetch",
+                            &format!(
+                                "ready id={} attempt={} priority={:?}",
+                                id_str, task_result.attempt, effective_priority
+                            ),
+                        );
+                    }
+                    TextureFetchTaskOutcome::Failed { reason, detail } => {
+                        if should_retry_live_texture_failure(reason, task_result.attempt) {
+                            let backoff_ticks =
+                                live_texture_retry_backoff_ticks(task_result.attempt);
+                            pending_texture_fetches
+                                .entry(id.clone())
+                                .and_modify(|existing| {
+                                    if effective_priority < existing.priority {
+                                        existing.priority = effective_priority;
+                                    }
+                                    existing.ready_at_tick =
+                                        worker_tick.saturating_add(backoff_ticks);
+                                    existing.completed_attempts = task_result.attempt;
+                                })
+                                .or_insert(ScheduledTextureFetch {
+                                    priority: effective_priority,
+                                    first_enqueued_tick: effective_first_enqueued_tick,
+                                    ready_at_tick: worker_tick.saturating_add(backoff_ticks),
+                                    completed_attempts: task_result.attempt,
+                                });
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "texture_fetch",
+                                &format!(
+                                    "retry id={} reason={:?} attempt={} backoff_ticks={} detail={}",
+                                    id_str, reason, task_result.attempt, backoff_ticks, detail
+                                ),
+                            );
+                        } else {
+                            let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
+                                id: id_str.clone(),
+                                reason,
+                            });
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "texture_fetch",
+                                &format!(
+                                    "failed id={} reason={:?} attempt={} detail={}",
+                                    id_str, reason, task_result.attempt, detail
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let available_texture_slots =
+                LIVE_TEXTURE_FETCH_MAX_INFLIGHT.saturating_sub(inflight_texture_fetches.len());
+            if available_texture_slots > 0 {
+                let mut dispatch_candidates = pending_texture_fetches
+                    .iter()
+                    .filter(|(_, queued)| queued.ready_at_tick <= worker_tick)
+                    .map(|(id, queued)| (id.clone(), queued.priority, queued.first_enqueued_tick))
+                    .collect::<Vec<_>>();
+                dispatch_candidates.sort_by(|a, b| {
+                    a.1.cmp(&b.1)
+                        .then_with(|| a.2.cmp(&b.2))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                for (id, _, _) in dispatch_candidates
+                    .into_iter()
+                    .take(available_texture_slots)
+                {
+                    let Some(queued) = pending_texture_fetches.remove(&id) else {
+                        continue;
+                    };
+                    let attempt = queued.completed_attempts.saturating_add(1);
+                    inflight_texture_fetches.insert(
+                        id.clone(),
+                        InFlightTextureFetch {
+                            priority: queued.priority,
+                            first_enqueued_tick: queued.first_enqueued_tick,
+                            attempt,
+                        },
+                    );
+
+                    let tx_result = texture_fetch_result_tx.clone();
+                    let caps = capabilities.clone();
+                    let fetch_timeout =
+                        std::time::Duration::from_millis(config.asset_live_timeout_ms);
+                    tokio::spawn(async move {
+                        let outcome = if let Some(caps) = caps {
+                            let urls = viewer_grid::AssetCapabilityPolicy::texture_url_candidates(
+                                &caps.entries,
+                                &id,
+                            );
+                            if urls.is_empty() {
+                                TextureFetchTaskOutcome::Failed {
+                                    reason:
+                                        viewer_asset::AssetFetchFailureReason::MissingCapability,
+                                    detail: String::from(
+                                        "GetTexture/ViewerAsset capability URL candidates missing",
+                                    ),
+                                }
+                            } else {
+                                match viewer_net::fetch_texture_asset_bytes(&urls, fetch_timeout)
+                                    .await
+                                {
+                                    Ok(bytes) => TextureFetchTaskOutcome::Ready(bytes),
+                                    Err(err) => TextureFetchTaskOutcome::Failed {
+                                        reason: classify_asset_fetch_failure_reason(&err),
+                                        detail: err.to_string(),
+                                    },
+                                }
+                            }
+                        } else {
+                            TextureFetchTaskOutcome::Failed {
+                                reason: viewer_asset::AssetFetchFailureReason::MissingCapability,
+                                detail: String::from(
+                                    "active session capabilities unavailable for texture request",
+                                ),
+                            }
+                        };
+                        let _ = tx_result.send(TextureFetchTaskResult {
+                            id,
+                            priority: queued.priority,
+                            first_enqueued_tick: queued.first_enqueued_tick,
+                            attempt,
+                            outcome,
+                        });
+                    });
+                }
+            }
+
             while let Ok(command) = command_rx.try_recv() {
                 match command {
                     LiveFeedCommand::SendChat {
@@ -1915,77 +2454,166 @@ async fn run_in_process_live_feed(
                             }
                         }
                     }
-                    LiveFeedCommand::RequestTexture {
-                        id,
-                        priority: _priority,
-                    } => {
-                        let tx = tx.clone();
-                        let caps = capabilities.clone();
+                    LiveFeedCommand::RequestTexture { id, priority } => {
+                        if id.is_empty() {
+                            continue;
+                        }
+                        let id_str = id.to_string();
+                        if let Some(inflight) = inflight_texture_fetches.get_mut(&id) {
+                            if priority < inflight.priority {
+                                inflight.priority = priority;
+                            }
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Info,
+                                "texture_fetch",
+                                &format!(
+                                    "inflight id={} priority={:?} attempt={} enqueued_tick={}",
+                                    id_str,
+                                    inflight.priority,
+                                    inflight.attempt,
+                                    inflight.first_enqueued_tick
+                                ),
+                            );
+                            continue;
+                        }
+
+                        let entry = pending_texture_fetches.entry(id.clone()).or_insert(
+                            ScheduledTextureFetch {
+                                priority,
+                                first_enqueued_tick: worker_tick,
+                                ready_at_tick: worker_tick,
+                                completed_attempts: 0,
+                            },
+                        );
+                        if priority < entry.priority {
+                            entry.priority = priority;
+                        }
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "texture_fetch",
+                            &format!(
+                                "queued id={} priority={:?} ready_at_tick={} attempts={}",
+                                id_str,
+                                entry.priority,
+                                entry.ready_at_tick,
+                                entry.completed_attempts
+                            ),
+                        );
+                    }
+                    LiveFeedCommand::RequestMesh { id, lod } => {
+                        let id = id.trim().to_ascii_lowercase();
+                        if id.is_empty() {
+                            continue;
+                        }
+
+                        let Some(caps) = capabilities.as_ref() else {
+                            let _ = tx.send(LiveFeedUpdate::MeshAssetFailed {
+                                id: id.clone(),
+                                lod,
+                                reason: viewer_asset::AssetFetchFailureReason::MissingCapability,
+                            });
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "mesh_fetch",
+                                &format!(
+                                    "failed id={} lod={} reason=MissingCapability detail=active session capabilities unavailable for mesh request",
+                                    id, lod
+                                ),
+                            );
+                            continue;
+                        };
+
+                        let mesh_candidates =
+                            viewer_grid::AssetCapabilityPolicy::mesh_request_candidates(
+                                &caps.entries,
+                                &id,
+                            );
+                        let urls = mesh_candidates
+                            .iter()
+                            .map(|candidate| candidate.url.clone())
+                            .collect::<Vec<_>>();
+
+                        if urls.is_empty() {
+                            let _ = tx.send(LiveFeedUpdate::MeshAssetFailed {
+                                id: id.clone(),
+                                lod,
+                                reason: viewer_asset::AssetFetchFailureReason::MissingCapability,
+                            });
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Warn,
+                                "mesh_fetch",
+                                &format!(
+                                    "failed id={} lod={} reason=MissingCapability detail=GetMesh/GetMesh2/ViewerAsset candidates missing",
+                                    id, lod
+                                ),
+                            );
+                            continue;
+                        }
+
+                        emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "mesh_fetch",
+                            &format!("queued id={} lod={} candidates={}", id, lod, urls.len()),
+                        );
+
                         let fetch_timeout =
                             std::time::Duration::from_millis(config.asset_live_timeout_ms);
-                        tokio::spawn(async move {
-                            let id_str = id.to_string();
-                            if let Some(caps) = caps {
-                                let urls =
-                                    viewer_grid::AssetCapabilityPolicy::texture_url_candidates(
-                                        &caps.entries,
-                                        &id,
-                                    );
-                                if !urls.is_empty() {
-                                    match viewer_net::fetch_texture_asset_bytes(
-                                        &urls,
-                                        fetch_timeout,
-                                    )
-                                    .await
-                                    {
-                                        Ok(bytes) => {
-                                            let _ = tx.send(LiveFeedUpdate::TextureAsset {
-                                                id: id_str,
-                                                bytes,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
-                                                id: id_str.clone(),
-                                                reason: classify_asset_fetch_failure_reason(&e),
-                                            });
-                                            emit_relay(
-                                                &tx,
-                                                RuntimeRelayLevel::Warn,
-                                                "texture_fetch",
-                                                &format!("Failed to fetch texture {id_str}: {e}"),
-                                            );
-                                        }
-                                    }
+                        let (result, attempts) =
+                            viewer_net::fetch_mesh_asset_bytes_with_attempts(&urls, fetch_timeout)
+                                .await;
+                        for attempt in &attempts {
+                            let candidate = mesh_candidates
+                                .iter()
+                                .find(|candidate| candidate.url == attempt.url);
+                            emit_relay(
+                                &tx,
+                                RuntimeRelayLevel::Info,
+                                "mesh_fetch",
+                                &format_mesh_fetch_attempt_line(&id, lod, candidate, attempt),
+                            );
+                        }
+                        match result {
+                            Ok(bytes) => {
+                                let _ = tx.send(LiveFeedUpdate::MeshAsset {
+                                    id: id.clone(),
+                                    lod,
+                                    bytes,
+                                });
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Info,
+                                    "mesh_fetch",
+                                    &format!("ready id={} lod={} attempt=1", id, lod),
+                                );
+                            }
+                            Err(err) => {
+                                let reason = classify_asset_fetch_failure_reason(&err);
+                                let detail = if let Some(bucket) = classify_mesh_403_bucket(&err) {
+                                    format!("{err}; bucket={bucket}")
                                 } else {
-                                    let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
-                                        id: id_str.clone(),
-                                        reason:
-                                            viewer_asset::AssetFetchFailureReason::MissingCapability,
-                                    });
-                                    emit_relay(
-                                        &tx,
-                                        RuntimeRelayLevel::Warn,
-                                        "texture_fetch",
-                                        &format!("No texture capability found for {id_str}"),
-                                    );
-                                }
-                            } else {
-                                let _ = tx.send(LiveFeedUpdate::TextureAssetFailed {
-                                    id: id_str.clone(),
-                                    reason:
-                                        viewer_asset::AssetFetchFailureReason::MissingCapability,
+                                    err.to_string()
+                                };
+                                let _ = tx.send(LiveFeedUpdate::MeshAssetFailed {
+                                    id: id.clone(),
+                                    lod,
+                                    reason,
                                 });
                                 emit_relay(
                                     &tx,
                                     RuntimeRelayLevel::Warn,
-                                    "texture_fetch",
+                                    "mesh_fetch",
                                     &format!(
-                                        "No active session capabilities to fetch texture {id_str}"
+                                        "failed id={} lod={} reason={:?} detail={}",
+                                        id, lod, reason, detail
                                     ),
                                 );
                             }
-                        });
+                        }
                     }
                     LiveFeedCommand::ExecuteContinuityProbe { queued_at_unix_ms } => {
                         let started_at = now_unix_ms();
@@ -2049,14 +2677,98 @@ async fn run_in_process_live_feed(
             }
 
             if let Some(circuit) = &social_circuit
+                && config.require_region_handshake_reply
+                && !connection.has_observed_region_handshake()
+                && region_handshake_reprime_attempts < REGION_HANDSHAKE_REPRIME_MAX_ATTEMPTS
+            {
+                let can_reprime = match last_region_handshake_reprime_tick {
+                    Some(last_tick) => {
+                        worker_tick.saturating_sub(last_tick)
+                            >= REGION_HANDSHAKE_REPRIME_INTERVAL_TICKS
+                    }
+                    None => worker_tick > 0,
+                };
+                if can_reprime {
+                    region_handshake_reprime_attempts =
+                        region_handshake_reprime_attempts.saturating_add(1);
+                    last_region_handshake_reprime_tick = Some(worker_tick);
+                    emit_relay(
+                        &tx,
+                        RuntimeRelayLevel::Info,
+                        "social",
+                        &format!(
+                            "region_handshake_reprime: attempt={}/{} worker_tick={}",
+                            region_handshake_reprime_attempts,
+                            REGION_HANDSHAKE_REPRIME_MAX_ATTEMPTS,
+                            worker_tick
+                        ),
+                    );
+                    match connection.send_handshake_reprime_bundle(circuit).await {
+                        Ok(datagrams_sent) => emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Info,
+                            "social",
+                            &format!(
+                                "region_handshake_reprime: handshake_bundle_datagrams={datagrams_sent}"
+                            ),
+                        ),
+                        Err(err) => emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Warn,
+                            "social",
+                            &format!(
+                                "region_handshake_reprime handshake bundle failed attempt={} error={err}",
+                                region_handshake_reprime_attempts
+                            ),
+                        ),
+                    }
+                    match connection.send_startup_interest_messages(circuit).await {
+                        Ok(()) => {
+                            last_agent_update_tick = Some(worker_tick);
+                        }
+                        Err(err) => emit_relay(
+                            &tx,
+                            RuntimeRelayLevel::Warn,
+                            "social",
+                            &format!(
+                                "region_handshake_reprime failed attempt={} error={}",
+                                region_handshake_reprime_attempts, err
+                            ),
+                        ),
+                    }
+                }
+            }
+
+            if let Some(circuit) = &social_circuit
                 && should_send_agent_update_keepalive(
                     worker_tick,
                     last_agent_update_tick,
                     agent_update_keepalive_interval_ticks,
                 )
             {
+                let camera_center = connection.current_agent_update_camera_center();
+                let reliable = false;
+                emit_relay(
+                    &tx,
+                    RuntimeRelayLevel::Info,
+                    "social",
+                    &format!(
+                        "agent_update_keepalive: period_ticks={} camera_center={:.2},{:.2},{:.2} far={:.2} control_flags={} reliable={reliable}",
+                        agent_update_keepalive_interval_ticks,
+                        camera_center[0],
+                        camera_center[1],
+                        camera_center[2],
+                        config.agent_update_far,
+                        AGENT_UPDATE_CONTROL_FLAGS,
+                    ),
+                );
                 match connection
-                    .send_agent_update_on_circuit(circuit, false)
+                    .send_agent_update_custom_on_circuit(
+                        circuit,
+                        reliable,
+                        config.agent_update_far,
+                        AGENT_UPDATE_CONTROL_FLAGS,
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -2160,6 +2872,7 @@ async fn run_in_process_live_feed(
                 if event_queue_poll_task.is_none() {
                     let url = url.to_string();
                     let ack = event_ack;
+                    mark_capability_invocation_started(&mut capability_readiness, "EventQueueGet");
                     push_protocol_event(
                         &mut protocol_events,
                         format!(
@@ -2180,6 +2893,30 @@ async fn run_in_process_live_feed(
                     match task.await {
                         Ok(Ok(poll)) => {
                             event_queue_consecutive_failures = 0;
+                            event_queue_cap_not_found_failures = 0;
+                            if !event_queue_has_observed_ok {
+                                event_queue_has_observed_ok = true;
+                                if config.capability_probes_require_event_queue_ok
+                                    && !capability_probe_gate_open
+                                {
+                                    capability_probe_gate_open = true;
+                                    push_protocol_event(
+                                        &mut protocol_events,
+                                        String::from("probe_gate:open reason=EventQueueGet:ok"),
+                                    );
+                                    emit_relay(
+                                        &tx,
+                                        RuntimeRelayLevel::Info,
+                                        "parallel_protocol",
+                                        "capability probe gate opened after EventQueueGet:ok",
+                                    );
+                                }
+                            }
+                            mark_capability_invocation_result(
+                                &mut capability_readiness,
+                                "EventQueueGet",
+                                Ok("ok"),
+                            );
                             let previous_ack = event_ack;
                             if let Some(next_ack) = poll.id {
                                 event_ack = next_ack;
@@ -2194,6 +2931,28 @@ async fn run_in_process_live_feed(
                                     summarize_event_queue_message_names(&poll, 6),
                                 ),
                             );
+                            let simulator_targets =
+                                connection.extract_event_queue_simulator_targets(&poll);
+                            let enable_simulator_count = simulator_targets
+                                .iter()
+                                .filter(|target| target.message == "EnableSimulator")
+                                .count();
+                            event_queue_simulator_target_messages =
+                                event_queue_simulator_target_messages
+                                    .saturating_add(simulator_targets.len());
+                            event_queue_enable_simulator_messages =
+                                event_queue_enable_simulator_messages
+                                    .saturating_add(enable_simulator_count);
+                            if enable_simulator_count > 0 {
+                                push_protocol_event(
+                                    &mut protocol_events,
+                                    format!(
+                                        "EventQueueGet:EnableSimulator count={} total={}",
+                                        enable_simulator_count,
+                                        event_queue_enable_simulator_messages
+                                    ),
+                                );
+                            }
                             if !poll.events.is_empty() {
                                 emit_relay(
                                     &tx,
@@ -2237,13 +2996,25 @@ async fn run_in_process_live_feed(
                         Ok(Err(err)) => {
                             event_queue_consecutive_failures =
                                 event_queue_consecutive_failures.saturating_add(1);
+                            let err_text = err.to_string();
+                            mark_capability_invocation_result(
+                                &mut capability_readiness,
+                                "EventQueueGet",
+                                Err(&err_text),
+                            );
                             push_protocol_event(
                                 &mut protocol_events,
                                 format!(
                                     "EventQueueGet:err count={} {}",
-                                    event_queue_consecutive_failures, err
+                                    event_queue_consecutive_failures, err_text
                                 ),
                             );
+                            if is_event_queue_cap_not_found_error(&err_text) {
+                                event_queue_cap_not_found_failures =
+                                    event_queue_cap_not_found_failures.saturating_add(1);
+                            } else {
+                                event_queue_cap_not_found_failures = 0;
+                            }
                             let should_log = event_queue_consecutive_failures == 1
                                 || event_queue_consecutive_failures.is_multiple_of(10);
                             if should_log {
@@ -2256,6 +3027,21 @@ async fn run_in_process_live_feed(
                                         event_queue_consecutive_failures
                                     ),
                                 );
+                            }
+                            if config.event_queue_cap_not_found_before_reconnect > 0
+                                && event_queue_cap_not_found_failures
+                                    >= config.event_queue_cap_not_found_before_reconnect
+                            {
+                                emit_relay(
+                                    &tx,
+                                    RuntimeRelayLevel::Warn,
+                                    "event_queue",
+                                    &format!(
+                                        "event queue cap-not-found threshold reached ({}) ; reconnecting",
+                                        config.event_queue_cap_not_found_before_reconnect
+                                    ),
+                                );
+                                should_reconnect = true;
                             }
                             if config.event_queue_failures_before_reconnect > 0
                                 && event_queue_consecutive_failures
@@ -2274,6 +3060,11 @@ async fn run_in_process_live_feed(
                             }
                         }
                         Err(join_err) => {
+                            mark_capability_invocation_result(
+                                &mut capability_readiness,
+                                "EventQueueGet",
+                                Err(&join_err.to_string()),
+                            );
                             push_protocol_event(
                                 &mut protocol_events,
                                 format!("EventQueueGet:task_err {join_err}"),
@@ -2287,6 +3078,24 @@ async fn run_in_process_live_feed(
                         }
                     }
                 }
+            }
+
+            if capability_probe_gate_open {
+                run_pending_capability_readiness_probes(
+                    &mut connection,
+                    &mut capability_readiness,
+                    &mut protocol_events,
+                    &mut pending_interest_list_probe_url,
+                    &mut pending_untrusted_simulator_message_probe_url,
+                )
+                .await;
+                run_lane_probe_shape_tasks_once(
+                    &mut connection,
+                    &tx,
+                    &mut protocol_events,
+                    &mut pending_gated_lane_probe_shapes,
+                )
+                .await;
             }
 
             if should_reconnect {
@@ -2311,10 +3120,10 @@ async fn run_in_process_live_feed(
                 }
                 break;
             }
-            update_live_visual_from_connection(&mut snapshot, &connection);
+            update_live_visual_from_connection(&mut snapshot, &connection, &config);
             snapshot.source = String::from("viewer_app_in_process:ready");
             if worker_tick.is_multiple_of(40) {
-                emit_object_feed_tick_summary(&tx, &snapshot);
+                emit_object_feed_tick_summary(&tx, &snapshot, &connection);
             }
             let _ = tx.send(LiveFeedUpdate::Snapshot(snapshot.clone()));
             let avatar_samples = extract_worker_world_avatar_samples(&connection, &local_agent_id);
@@ -2471,10 +3280,15 @@ async fn run_in_process_live_feed(
                     &connection,
                     "after_first_steady_state_window",
                     &capability_inventory_summary,
+                    &summarize_capability_readiness(&capability_readiness),
                     &protocol_events,
                     event_queue_url.as_deref(),
                     event_ack,
                     event_queue_consecutive_failures,
+                    event_queue_cap_not_found_failures,
+                    event_queue_has_observed_ok,
+                    event_queue_simulator_target_messages,
+                    event_queue_enable_simulator_messages,
                 );
                 first_sim_socket_steady_state_summary_emitted = true;
             }
@@ -2783,7 +3597,11 @@ fn build_live_visual_snapshot_from_result(result: &GridLoginResult) -> LiveVisua
     snapshot
 }
 
-fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connection: &Connection) {
+fn update_live_visual_from_connection(
+    snapshot: &mut LiveVisualSnapshot,
+    connection: &Connection,
+    config: &InProcessLiveFeedConfig,
+) {
     snapshot.observed_at_unix_ms = now_unix_ms();
     if let Some(decoded_name) = extract_worker_world_sim_name(connection) {
         snapshot.current_region_name = Some(decoded_name);
@@ -2832,656 +3650,53 @@ fn update_live_visual_from_connection(snapshot: &mut LiveVisualSnapshot, connect
     snapshot.decoded_object_feed_kill_messages = decoded.object_feed_kill_messages as u32;
     snapshot.decoded_object_feed_decode_dropped = decoded.object_feed_decode_dropped as u32;
     snapshot.decoded_object_feed_evicted = decoded.object_feed_evicted as u32;
-    snapshot.decoded_object_feed_total_objects = decoded.object_feed_total_objects as u32;
-    snapshot.decoded_object_feed_export_truncated = decoded.object_feed_export_truncated;
-    snapshot.decoded_object_feed_objects = decoded
+    let mut decoded_object_feed_objects: Vec<viewer_core::DecodedWorldObjectFeedObject> = decoded
         .object_feed_objects
         .iter()
         .map(|obj| viewer_core::DecodedWorldObjectFeedObject {
             local_id: obj.local_id,
             scale_centi: obj.scale_centi,
-            texture_id: None,
+            position_centi: obj.position_centi,
+            mesh_id: obj.mesh_id.clone(),
+            texture_id: obj
+                .texture_id
+                .as_deref()
+                .map(viewer_core::AssetID::new)
+                .filter(|id| !id.is_empty()),
+            default_face_material: obj
+                .default_face_material
+                .as_ref()
+                .map(map_net_face_material_to_core),
+            face_material_overrides: obj
+                .face_material_overrides
+                .iter()
+                .map(map_net_face_material_to_core)
+                .collect(),
+            object_id: obj.object_id.clone(),
         })
         .collect();
+    let focus_enabled = config.object_uuid_focus.is_some();
+    filter_object_feed_objects_by_focus(&mut decoded_object_feed_objects, config);
+    snapshot.decoded_object_feed_total_objects = decoded.object_feed_total_objects as u32;
+    snapshot.decoded_object_feed_export_truncated = if focus_enabled {
+        false
+    } else {
+        decoded.object_feed_export_truncated
+    };
+    snapshot.decoded_object_feed_objects = decoded_object_feed_objects;
     snapshot.decoded_object_feed_recent_kills = decoded.object_feed_recent_kills.clone();
     let continuity_summary = connection.continuity_summary();
     snapshot.continuity = map_net_continuity_to_core(&continuity_summary);
 }
 
-fn emit_object_feed_startup_summary(
-    tx: &mpsc::Sender<LiveFeedUpdate>,
-    snapshot: &LiveVisualSnapshot,
-    connection: &Connection,
+fn filter_object_feed_objects_by_focus(
+    objects: &mut Vec<viewer_core::DecodedWorldObjectFeedObject>,
+    config: &InProcessLiveFeedConfig,
 ) {
-    let region_handshake_updates = connection
-        .simulator_payload_decode_summary()
-        .region_handshake_updates;
-    let receive_kinds = summarize_receive_kinds(connection);
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "object_feed",
-        &format!(
-            "startup decode summary: update_messages={} total_objects={} handshake_complete={} traffic_obs={} region_handshake_updates={} kinds={}",
-            snapshot.decoded_object_feed_update_messages,
-            snapshot.decoded_object_feed_total_objects,
-            snapshot.handshake_agent_movement_complete,
-            snapshot.post_boundary_observations,
-            region_handshake_updates,
-            receive_kinds,
-        ),
-    );
-    emit_first_simulator_forensics_summary(tx, connection, "startup");
-}
-
-fn emit_object_feed_tick_summary(tx: &mpsc::Sender<LiveFeedUpdate>, snapshot: &LiveVisualSnapshot) {
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "object_feed",
-        &format!(
-            "tick summary: update_messages={} total_objects={} handshake_complete={}",
-            snapshot.decoded_object_feed_update_messages,
-            snapshot.decoded_object_feed_total_objects,
-            snapshot.handshake_agent_movement_complete,
-        ),
-    );
-}
-
-fn emit_first_simulator_socket_summary(
-    tx: &mpsc::Sender<LiveFeedUpdate>,
-    connection: &Connection,
-    label: &str,
-) {
-    let summary = connection.summarize_first_simulator_socket_diagnostics();
-    let ports = if summary.unique_local_ports.is_empty() {
-        String::from("none")
-    } else {
-        summary
-            .unique_local_ports
-            .iter()
-            .map(u16::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
+    let Some(focus_uuid) = config.object_uuid_focus.as_deref() else {
+        return;
     };
-    let tail = summarize_first_simulator_socket_tail(connection, 5);
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "first_sim_socket",
-        &format!(
-            "{label}: ports={ports} split={} events={} probe_binds={} fresh_binds={} retained={} reused={} sends={} receives={} tail={tail}",
-            summary.split_local_port_detected,
-            summary.events,
-            summary.probe_bind_events,
-            summary.fresh_bind_events,
-            summary.retained_probe_events,
-            summary.reused_retained_probe_events,
-            summary.send_events,
-            summary.receive_events,
-        ),
-    );
-}
-
-fn emit_first_simulator_forensics_summary(
-    tx: &mpsc::Sender<LiveFeedUpdate>,
-    connection: &Connection,
-    label: &str,
-) {
-    let ack = connection.summarize_first_simulator_ack_forensics();
-    let receive = connection.summarize_first_simulator_receive_forensics();
-    let timeline = connection.summarize_first_simulator_startup_timeline();
-    let transcript = connection.summarize_first_simulator_startup_transcript(8);
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "first_sim_forensics",
-        &format!(
-            "{label} ack: pending={} preview={} appended_sends={} last_appended={} explicit_packet_ack={} first_packet_ack_idx={}",
-            ack.pending_ack_count,
-            format_u32_list_hex(&ack.pending_ack_ids_preview),
-            ack.outbound_appended_ack_sends,
-            format_u32_list_hex(&ack.outbound_appended_ack_ids_last),
-            ack.explicit_packet_ack_receives,
-            format_optional_index(ack.first_packet_ack_receive_index),
-        ),
-    );
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "first_sim_forensics",
-        &format!(
-            "{label} recv: obs={} raw={} unclassified={} typed={}",
-            receive.receive_observations,
-            format_message_number_counts(&receive.raw_packet_message_numbers),
-            format_message_number_counts(&receive.unclassified_packet_message_numbers),
-            format_receive_kind_counts(&receive.typed_kind_counts),
-        ),
-    );
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "first_sim_forensics",
-        &format!(
-            "{label} timeline: region_handshake={} region_handshake_reply={} amc={} packet_ack={} camera_constraint={} generic_message={} object_update={}",
-            format_optional_index(timeline.first_region_handshake_index),
-            format_optional_index(timeline.first_region_handshake_reply_index),
-            format_optional_index(timeline.first_agent_movement_complete_index),
-            format_optional_index(timeline.first_packet_ack_index),
-            format_optional_index(timeline.first_camera_constraint_index),
-            format_optional_index(timeline.first_generic_message_index),
-            format_optional_index(timeline.first_object_update_index),
-        ),
-    );
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "first_sim_forensics",
-        &format!(
-            "{label} transcript: sends={} receives={}",
-            format_transcript_side(&transcript.send_events),
-            format_transcript_side(&transcript.receive_events),
-        ),
-    );
-}
-
-fn summarize_first_simulator_socket_tail(connection: &Connection, limit: usize) -> String {
-    let diagnostics = connection.first_simulator_socket_diagnostics();
-    if diagnostics.is_empty() {
-        return String::from("none");
-    }
-    let start = diagnostics.len().saturating_sub(limit);
-    diagnostics[start..]
-        .iter()
-        .map(format_first_simulator_socket_diagnostic)
-        .collect::<Vec<_>>()
-        .join(" | ")
-}
-
-fn format_first_simulator_socket_diagnostic(
-    diagnostic: &viewer_net::FirstSimulatorSocketDiagnostic,
-) -> String {
-    let local_addr = diagnostic.local_addr.as_deref().unwrap_or("?");
-    let remote_target = diagnostic.remote_target.as_deref().unwrap_or("?");
-    let message_number = diagnostic
-        .packet_message_number
-        .map(|number| format!("{number:#x}"))
-        .unwrap_or_else(|| String::from("-"));
-    let payload_len = diagnostic
-        .payload_len
-        .map(|len| len.to_string())
-        .unwrap_or_else(|| String::from("-"));
-    format!(
-        "#{}:{:?}@{}->{} m={} len={} {}",
-        diagnostic.event_index,
-        diagnostic.kind,
-        local_addr,
-        remote_target,
-        message_number,
-        payload_len,
-        diagnostic.reason,
-    )
-}
-
-fn summarize_receive_kinds(connection: &Connection) -> String {
-    let mut counts = BTreeMap::<String, usize>::new();
-    for diag in connection.first_simulator_handshake_receive_diagnostics() {
-        let key = format!("{:?}", diag.kind);
-        *counts.entry(key).or_default() += 1;
-    }
-    if counts.is_empty() {
-        return String::from("none");
-    }
-    counts
-        .into_iter()
-        .map(|(kind, count)| format!("{kind}:{count}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_optional_index(index: Option<usize>) -> String {
-    index
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| String::from("none"))
-}
-
-fn format_u32_list_hex(values: &[u32]) -> String {
-    if values.is_empty() {
-        return String::from("none");
-    }
-    values
-        .iter()
-        .map(|value| format!("0x{value:08x}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_message_number_counts(entries: &[(u32, usize)]) -> String {
-    if entries.is_empty() {
-        return String::from("none");
-    }
-    entries
-        .iter()
-        .map(|(message_number, count)| format!("0x{message_number:08x}:{count}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_receive_kind_counts(
-    entries: &[(viewer_net::FirstSimulatorInboundMessageKind, usize)],
-) -> String {
-    if entries.is_empty() {
-        return String::from("none");
-    }
-    entries
-        .iter()
-        .map(|(kind, count)| format!("{kind:?}:{count}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_transcript_side(entries: &[String]) -> String {
-    if entries.is_empty() {
-        return String::from("none");
-    }
-    entries.join(" | ")
-}
-
-fn push_protocol_event(events: &mut Vec<String>, entry: impl Into<String>) {
-    const MAX_PROTOCOL_EVENTS: usize = 24;
-    if events.len() >= MAX_PROTOCOL_EVENTS {
-        events.remove(0);
-    }
-    events.push(entry.into());
-}
-
-fn format_capability_url_family(family: CapabilityUrlFamily) -> &'static str {
-    match family {
-        CapabilityUrlFamily::SimulatorHost12043 => "simhost:12043",
-        CapabilityUrlFamily::SimulatorHost12046 => "simhost:12046",
-        CapabilityUrlFamily::AssetCdn => "asset-cdn",
-        CapabilityUrlFamily::BakeTextureCdn => "bake-texture-cdn",
-        CapabilityUrlFamily::MapCdn => "map-cdn",
-        CapabilityUrlFamily::PhoenixViewer => "phoenixviewer",
-        CapabilityUrlFamily::Analytics => "analytics",
-        CapabilityUrlFamily::GenericWeb => "generic-web",
-        CapabilityUrlFamily::Unknown => "unknown",
-    }
-}
-
-fn format_classified_url(url: &str) -> String {
-    let classification = classify_capability_url(url);
-    let host = classification.host.unwrap_or_else(|| String::from("?"));
-    match classification.port {
-        Some(port) => format!(
-            "{}@{}:{}",
-            format_capability_url_family(classification.family),
-            host,
-            port
-        ),
-        None => format!(
-            "{}@{}",
-            format_capability_url_family(classification.family),
-            host
-        ),
-    }
-}
-
-fn format_capability_host_family_tag(url: &str) -> String {
-    let classification = classify_capability_url(url);
-    let host_family = classification
-        .host
-        .as_deref()
-        .and_then(|host| host.split('.').next())
-        .unwrap_or("unknown-host");
-    format!("host_family={host_family}")
-}
-
-fn summarize_seed_capability_inventory(entries: &[SeedCapabilityInventoryEntry]) -> String {
-    if entries.is_empty() {
-        return String::from("none");
-    }
-
-    let mut family_counts = BTreeMap::<String, usize>::new();
-    for entry in entries {
-        let family = format_capability_url_family(entry.classification.family).to_string();
-        *family_counts.entry(family).or_default() += 1;
-    }
-
-    let families = family_counts
-        .into_iter()
-        .map(|(family, count)| format!("{family}:{count}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let entries_text = entries
-        .iter()
-        .map(|entry| {
-            let host = entry.classification.host.as_deref().unwrap_or("?");
-            let family = format_capability_url_family(entry.classification.family);
-            match entry.classification.port {
-                Some(port) => format!("{}={family}@{host}:{port}", entry.name),
-                None => format!("{}={family}@{host}", entry.name),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(";");
-    format!("families={families} entries={entries_text}")
-}
-
-fn summarize_region_objects_inspection(inspection: &RegionObjectsInspection) -> String {
-    let keys = if inspection.top_level_keys.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .top_level_keys
-            .iter()
-            .take(6)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let arrays = if inspection.array_lengths.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .array_lengths
-            .iter()
-            .take(4)
-            .map(|(key, len)| format!("{key}:{len}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let first_item_keys = if inspection.first_array_item_keys.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .first_array_item_keys
-            .iter()
-            .take(3)
-            .map(|(key, item_keys)| {
-                let joined = item_keys
-                    .iter()
-                    .take(5)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("|");
-                format!("{key}={joined}")
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let complex = if inspection.complex_value_types.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .complex_value_types
-            .iter()
-            .take(4)
-            .map(|(key, value_type)| format!("{key}={value_type}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let scalars = if inspection.scalar_values.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .scalar_values
-            .iter()
-            .take(4)
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let child_keys = if inspection.child_map_keys.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .child_map_keys
-            .iter()
-            .take(3)
-            .map(|(key, child_keys)| {
-                let joined = child_keys
-                    .iter()
-                    .take(6)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("|");
-                format!("{key}={joined}")
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let child_scalars = if inspection.child_map_scalar_values.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .child_map_scalar_values
-            .iter()
-            .take(3)
-            .map(|(key, child_scalars)| {
-                let joined = child_scalars
-                    .iter()
-                    .take(4)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("|");
-                format!("{key}={joined}")
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let child_profiles = if inspection.child_map_profiles.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .child_map_profiles
-            .iter()
-            .take(3)
-            .map(|(key, profile)| format!("{key}={profile}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let child_semantics = if inspection.child_map_semantic_values.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .child_map_semantic_values
-            .iter()
-            .take(3)
-            .map(|(key, semantic_values)| {
-                let joined = semantic_values
-                    .iter()
-                    .take(5)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("|");
-                format!("{key}={joined}")
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let child_typed = if inspection.child_map_pathfinding_summaries.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .child_map_pathfinding_summaries
-            .iter()
-            .take(3)
-            .map(|(key, summary)| {
-                let mut parts = Vec::new();
-                parts.push(format!("profile={}", summary.profile));
-                if let Some(variant_hint) = &summary.variant_hint {
-                    parts.push(format!("variant={variant_hint}"));
-                }
-                if let Some(linkset_use) = &summary.linkset_use {
-                    parts.push(format!("linkset_use={linkset_use}"));
-                }
-                if let Some([a, b, c, d]) = summary.walkability_coefficients {
-                    parts.push(format!("walkability={a}/{b}/{c}/{d}"));
-                }
-                if let Some(name) = &summary.name {
-                    parts.push(format!("name={name}"));
-                }
-                if let Some(position) = &summary.position {
-                    parts.push(format!("position={position}"));
-                }
-                if summary.position_key_present {
-                    parts.push(String::from("position_key=present"));
-                }
-                if let Some(position_shape) = &summary.position_shape {
-                    parts.push(format!("position_shape={position_shape}"));
-                }
-                if let Some(description_shape) = &summary.description_shape {
-                    parts.push(format!("description_shape={description_shape}"));
-                }
-                if let Some(description_numeric_tuple) = &summary.description_numeric_tuple {
-                    parts.push(format!(
-                        "description_tuple={}",
-                        description_numeric_tuple.join("|")
-                    ));
-                }
-                if let Some(description) = &summary.description {
-                    parts.push(format!("description={description}"));
-                }
-                if let Some(owner) = &summary.owner {
-                    parts.push(format!("owner={owner}"));
-                }
-                if let Some(landimpact) = summary.landimpact {
-                    parts.push(format!("landimpact={landimpact}"));
-                }
-                if let Some(navmesh_category) = summary.navmesh_category {
-                    parts.push(format!("navmesh_category={navmesh_category}"));
-                }
-                if let Some(can_be_volume) = summary.can_be_volume {
-                    parts.push(format!("can_be_volume={can_be_volume}"));
-                }
-                if let Some(phantom) = summary.phantom {
-                    parts.push(format!("phantom={phantom}"));
-                }
-                format!(
-                    "{key}={}",
-                    parts.into_iter().take(10).collect::<Vec<_>>().join("|")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let tuple_analysis = if let Some(analysis) = &inspection.tuple_description_analysis {
-        let slot_summary = if analysis.slot_distinct_values.is_empty() {
-            String::from("none")
-        } else {
-            analysis
-                .slot_distinct_values
-                .iter()
-                .enumerate()
-                .map(|(idx, values)| {
-                    if values.is_empty() {
-                        format!("s{idx}=none")
-                    } else if values.len() == 1 {
-                        format!("s{idx}=const:{}", values.join("|"))
-                    } else {
-                        format!("s{idx}=var:{}", values.join("|"))
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let samples = if analysis.sample_pairs.is_empty() {
-            String::from("none")
-        } else {
-            analysis.sample_pairs.join(";")
-        };
-        let names = if analysis.distinct_names.is_empty() {
-            String::from("none")
-        } else {
-            analysis.distinct_names.join("|")
-        };
-        format!(
-            "samples={} slots={} names={} slot_values={} sample_pairs={}",
-            analysis.sample_count, analysis.slot_count, names, slot_summary, samples
-        )
-    } else {
-        String::from("none")
-    };
-    let typed_sample = if inspection.typed_object_samples.is_empty() {
-        String::from("none")
-    } else {
-        inspection
-            .typed_object_samples
-            .iter()
-            .take(3)
-            .map(|sample| {
-                let mut parts = Vec::new();
-                parts.push(format!("profile={}", sample.profile));
-                if let Some(name) = &sample.name {
-                    parts.push(format!("name={name}"));
-                }
-                if let Some(linkset_use) = &sample.linkset_use {
-                    parts.push(format!("linkset_use={linkset_use}"));
-                }
-                if let Some([a, b, c, d]) = sample.walkability_coefficients {
-                    parts.push(format!("walkability={a}/{b}/{c}/{d}"));
-                }
-                if let Some(position) = &sample.position {
-                    parts.push(format!("position={position}"));
-                }
-                if let Some(description_shape) = &sample.description_shape {
-                    parts.push(format!("description_shape={description_shape}"));
-                }
-                if let Some(landimpact) = sample.landimpact {
-                    parts.push(format!("landimpact={landimpact}"));
-                }
-                if let Some(owner) = &sample.owner {
-                    parts.push(format!("owner={owner}"));
-                }
-                format!(
-                    "{}={}",
-                    sample.object_id,
-                    parts.into_iter().take(8).collect::<Vec<_>>().join("|")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    format!(
-        "keys={keys} arrays={arrays} complex={complex} first_item_keys={first_item_keys} scalars={scalars} child_keys={child_keys} child_scalars={child_scalars} child_profiles={child_profiles} child_semantics={child_semantics} child_typed={child_typed} typed_sample={typed_sample} tuple_analysis={tuple_analysis}"
-    )
-}
-
-fn emit_parallel_protocol_summary(
-    tx: &mpsc::Sender<LiveFeedUpdate>,
-    connection: &Connection,
-    label: &str,
-    capability_inventory: &str,
-    protocol_events: &[String],
-    event_queue_url: Option<&str>,
-    event_ack: u64,
-    event_queue_consecutive_failures: u32,
-) {
-    let region = connection.summarize_region_transition_control();
-    let event_queue = event_queue_url
-        .map(format_classified_url)
-        .unwrap_or_else(|| String::from("none"));
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "parallel_protocol",
-        &format!("{label} caps: {capability_inventory}"),
-    );
-    emit_relay(
-        tx,
-        RuntimeRelayLevel::Info,
-        "parallel_protocol",
-        &format!(
-            "{label} flow: event_queue_url={event_queue} event_ack={} eq_failures={} region_ctrl={} crossed={} confirm={} events={}",
-            event_ack,
-            event_queue_consecutive_failures,
-            region.observations,
-            region.crossed_region,
-            region.confirm_enable_simulator,
-            format_transcript_side(protocol_events),
-        ),
-    );
+    objects.retain(|obj| obj.object_id.as_deref() == Some(focus_uuid));
 }
 
 fn spawn_event_queue_poll_task(
@@ -3491,6 +3706,14 @@ fn spawn_event_queue_poll_task(
 ) -> tokio::task::JoinHandle<Result<viewer_net::EventQueuePollResult, viewer_net::ConnectionError>>
 {
     tokio::spawn(async move { poll_event_queue_url_once(&url, ack, timeout).await })
+}
+
+fn is_event_queue_cap_not_found_error(error_text: &str) -> bool {
+    let text = error_text.to_ascii_lowercase();
+    text.contains("404")
+        && (text.contains("cap not found")
+            || text.contains("not found")
+            || text.contains("http status 404"))
 }
 
 fn summarize_event_queue_message_names(
@@ -3518,16 +3741,36 @@ fn emit_event_queue_interesting_details(
     poll: &viewer_net::EventQueuePollResult,
 ) {
     let simulator_targets = connection.extract_event_queue_simulator_targets(poll);
-    for target in simulator_targets.into_iter().take(4) {
+    let simulator_events: Vec<&viewer_net::EventQueueMessage> = poll
+        .events
+        .iter()
+        .filter(|event| {
+            event.message == "EnableSimulator" || event.message == "EstablishAgentCommunication"
+        })
+        .collect();
+    for (target, raw_event) in simulator_targets
+        .into_iter()
+        .zip(simulator_events.into_iter())
+        .take(4)
+    {
         let mut parts = Vec::new();
         if let Some(handle) = target.handle.as_deref() {
             parts.push(format!("handle={handle}"));
         }
+        if let Some(endpoint_ip) = target.endpoint_ip.as_deref() {
+            parts.push(format!("endpoint_ip={endpoint_ip}"));
+        }
+        if let Some(endpoint_port) = target.endpoint_port {
+            parts.push(format!("endpoint_port={endpoint_port}"));
+        }
+        if let Some(endpoint_source) = target.endpoint_source.as_deref() {
+            parts.push(format!("endpoint_source={endpoint_source}"));
+        }
         if let Some(ip) = target.ip.as_deref() {
-            parts.push(format!("ip={ip}"));
+            parts.push(format!("ip_raw={ip}"));
         }
         if let Some(port) = target.port.as_deref() {
-            parts.push(format!("port={port}"));
+            parts.push(format!("port_raw={port}"));
         }
         if let Some(sim) = target.sim_ip_and_port.as_deref() {
             parts.push(format!("sim={sim}"));
@@ -3535,16 +3778,12 @@ fn emit_event_queue_interesting_details(
         if let Some(seed) = target.seed_capability.as_deref() {
             parts.push(format!("seed={}", format_classified_url(seed)));
         }
-        let details = if parts.is_empty() {
-            poll.events
-                .iter()
-                .find(|event| event.message == target.message)
-                .map(|event| connection.summarize_event_queue_event_fields(event, 6))
-                .filter(|summary| summary != "none")
-                .unwrap_or_else(|| String::from("no actionable fields"))
-        } else {
-            parts.join(" ")
-        };
+        let raw_fields = connection.summarize_event_queue_event_fields(raw_event, 12);
+        if target.endpoint_ip.is_none() {
+            parts.push(String::from("endpoint_unresolved=true"));
+        }
+        parts.push(format!("raw={raw_fields}"));
+        let details = parts.join(" ");
         emit_relay(
             tx,
             RuntimeRelayLevel::Info,
@@ -3597,7 +3836,7 @@ async fn follow_enable_simulator_ports(
     connection: &mut Connection,
     circuit: Option<&SocialCircuit>,
     poll: &viewer_net::EventQueuePollResult,
-    followed_ports: &mut BTreeSet<u16>,
+    followed_targets: &mut BTreeSet<String>,
 ) {
     let Some(circuit) = circuit else {
         return;
@@ -3606,34 +3845,154 @@ async fn follow_enable_simulator_ports(
         if target.message != "EnableSimulator" {
             continue;
         }
-        let port = target
-            .port
-            .as_deref()
-            .and_then(|value| value.parse::<u16>().ok());
-        let Some(port) = port else {
+        let Some(endpoint) = extract_enable_simulator_endpoint(&target) else {
             continue;
         };
-        if !followed_ports.insert(port) {
+        let (endpoint_key, endpoint_source) = match &endpoint {
+            EnableSimulatorEndpoint::IpPort {
+                sim_ip,
+                port,
+                source,
+            } => (format!("{sim_ip}:{port}"), *source),
+            EnableSimulatorEndpoint::PortOnly { port } => {
+                (format!("*:{}", port), "port_only_fallback")
+            }
+        };
+        if !followed_targets.insert(endpoint_key.clone()) {
             continue;
         }
-        match connection
-            .send_use_circuit_code_on_circuit_to_port(circuit, port)
-            .await
-        {
-            Ok(()) => emit_relay(
-                tx,
-                RuntimeRelayLevel::Info,
-                "event_queue",
-                &format!("EnableSimulator follow-up sent UseCircuitCode port={port}"),
-            ),
+        let use_circuit_result = match &endpoint {
+            EnableSimulatorEndpoint::IpPort { sim_ip, port, .. } => {
+                connection
+                    .send_use_circuit_code_on_circuit_to_target(circuit, sim_ip, *port)
+                    .await
+            }
+            EnableSimulatorEndpoint::PortOnly { port } => {
+                connection
+                    .send_use_circuit_code_on_circuit_to_port(circuit, *port)
+                    .await
+            }
+        };
+        match use_circuit_result {
+            Ok(()) => {
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Info,
+                    "event_queue",
+                    &format!(
+                        "EnableSimulator follow-up sent UseCircuitCode endpoint={endpoint_key} source={endpoint_source}"
+                    ),
+                );
+                let complete_result = match &endpoint {
+                    EnableSimulatorEndpoint::IpPort { sim_ip, port, .. } => {
+                        connection
+                            .send_complete_agent_movement_on_circuit_to_target(
+                                circuit, sim_ip, *port,
+                            )
+                            .await
+                    }
+                    EnableSimulatorEndpoint::PortOnly { port } => {
+                        connection
+                            .send_complete_agent_movement_on_circuit_to_port(circuit, *port)
+                            .await
+                    }
+                };
+                match complete_result {
+                    Ok(()) => emit_relay(
+                        tx,
+                        RuntimeRelayLevel::Info,
+                        "event_queue",
+                        &format!(
+                            "EnableSimulator follow-up sent CompleteAgentMovement endpoint={endpoint_key} source={endpoint_source}"
+                        ),
+                    ),
+                    Err(err) => emit_relay(
+                        tx,
+                        RuntimeRelayLevel::Warn,
+                        "event_queue",
+                        &format!(
+                            "EnableSimulator follow-up failed CompleteAgentMovement endpoint={endpoint_key} source={endpoint_source}: {err}"
+                        ),
+                    ),
+                }
+            }
             Err(err) => emit_relay(
                 tx,
                 RuntimeRelayLevel::Warn,
                 "event_queue",
-                &format!("EnableSimulator follow-up failed port={port}: {err}"),
+                &format!(
+                    "EnableSimulator follow-up failed endpoint={endpoint_key} source={endpoint_source}: {err}"
+                ),
             ),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnableSimulatorEndpoint {
+    IpPort {
+        sim_ip: String,
+        port: u16,
+        source: &'static str,
+    },
+    PortOnly {
+        port: u16,
+    },
+}
+
+fn extract_enable_simulator_endpoint(
+    target: &viewer_net::EventQueueSimulatorTarget,
+) -> Option<EnableSimulatorEndpoint> {
+    if let (Some(sim_ip), Some(port), Some(source)) = (
+        target.endpoint_ip.as_deref(),
+        target.endpoint_port,
+        target.endpoint_source.as_deref(),
+    ) {
+        return Some(EnableSimulatorEndpoint::IpPort {
+            sim_ip: sim_ip.to_string(),
+            port,
+            source: match source {
+                "sim_ip_and_port" => "sim_ip_and_port",
+                "ip_port_fields" => "ip_port_fields",
+                "simulatorinfo_binary_ip_port" => "simulatorinfo_binary_ip_port",
+                _ => "viewer_net_endpoint",
+            },
+        });
+    }
+
+    if let Some(sim) = target.sim_ip_and_port.as_deref()
+        && let Ok(parsed) = sim.parse::<std::net::SocketAddr>()
+    {
+        return Some(EnableSimulatorEndpoint::IpPort {
+            sim_ip: parsed.ip().to_string(),
+            port: parsed.port(),
+            source: "sim_ip_and_port",
+        });
+    }
+
+    if let (Some(ip), Some(port)) = (
+        target.ip.as_deref(),
+        target
+            .port
+            .as_deref()
+            .and_then(|value| value.parse::<u16>().ok()),
+    ) {
+        return Some(EnableSimulatorEndpoint::IpPort {
+            sim_ip: ip.to_string(),
+            port,
+            source: "ip_port_fields",
+        });
+    }
+
+    if let Some(port) = target
+        .port
+        .as_deref()
+        .and_then(|value| value.parse::<u16>().ok())
+    {
+        return Some(EnableSimulatorEndpoint::PortOnly { port });
+    }
+
+    None
 }
 
 async fn follow_region_seed_capabilities(
@@ -3655,6 +4014,8 @@ async fn follow_region_seed_capabilities(
             Ok(caps) => {
                 let inventory = connection.summarize_seed_capability_inventory(&caps);
                 let summary = summarize_seed_capability_inventory(&inventory);
+                let discovered_non_baseline =
+                    summarize_non_baseline_caps_by_host(&caps.entries, 16);
                 emit_relay(
                     tx,
                     RuntimeRelayLevel::Info,
@@ -3666,6 +4027,14 @@ async fn follow_region_seed_capabilities(
                         } else {
                             summary
                         }
+                    ),
+                );
+                emit_relay(
+                    tx,
+                    RuntimeRelayLevel::Info,
+                    "event_queue",
+                    &format!(
+                        "{message_name} seed non-baseline capability names by host: {discovered_non_baseline}"
                     ),
                 );
 
@@ -3837,13 +4206,18 @@ async fn prime_startup_social_circuit(
     local_agent_id: &str,
     config: &InProcessLiveFeedConfig,
 ) -> Result<(), viewer_net::ConnectionError> {
-    let _ = connection
-        .send_pending_region_handshake_reply(circuit)
-        .await?;
+    let bundle_enabled = config.lludp_startup_parity_bundle;
+    // Firestorm-aligned startup ordering: consume the first inbound burst checkpoint
+    // before sending the startup interest bundle.
+    drain_startup_social_circuit(connection, circuit, tx, local_agent_id, config).await?;
     connection.send_startup_interest_messages(circuit).await?;
     connection
         .send_startup_request_parity_messages(circuit)
         .await?;
+    if bundle_enabled {
+        flush_pending_first_sim_ack_ids(connection, circuit, tx, "startup_parity_bundle_prime")
+            .await?;
+    }
     connection.send_retrieve_instant_messages(circuit).await?;
     drain_startup_social_circuit(connection, circuit, tx, local_agent_id, config).await
 }
@@ -3867,6 +4241,9 @@ async fn flush_pending_first_sim_ack_ids(
 }
 
 fn agent_update_keepalive_interval_ticks(config: &InProcessLiveFeedConfig) -> u64 {
+    if let Some(override_ticks) = config.agent_update_keepalive_ticks_override {
+        return override_ticks.max(1);
+    }
     let worker_tick_ms = config.worker_tick_ms.max(1);
     AGENT_UPDATE_KEEPALIVE_PERIOD_MS.saturating_add(worker_tick_ms.saturating_sub(1))
         / worker_tick_ms
@@ -4076,212 +4453,6 @@ fn startup_failure_from_login_outcome(
             class: LiveStartupFailureClass::LoginOther,
             message: String::from("login not successful"),
         },
-    }
-}
-
-fn parse_start_location(value: &str) -> StartLocationIntent {
-    normalize_start_location_input(value)
-        .unwrap_or_else(|_| StartLocationIntent::Uri(value.to_string()))
-}
-
-fn parse_bool_like(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
-fn parse_region_name_from_start_location(value: &str) -> Option<String> {
-    let raw = value.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("last") || raw.eq_ignore_ascii_case("home") {
-        return None;
-    }
-    if let Some(pos) = raw.find("secondlife://") {
-        let tail = &raw[pos + "secondlife://".len()..];
-        let name = tail.split('/').next().unwrap_or("").trim();
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    if let Some(pos) = raw.find("uri:") {
-        let tail = &raw[pos + 4..];
-        let name = tail.split('&').next().unwrap_or("").trim();
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    None
-}
-
-fn describe_start_location_intent(start_location: &StartLocationIntent) -> String {
-    match start_location {
-        StartLocationIntent::Saved(StartLocation::Home) => String::from("home"),
-        StartLocationIntent::Saved(StartLocation::Last) => String::from("last"),
-        StartLocationIntent::Uri(uri) => uri.clone(),
-    }
-}
-
-fn apply_reconnect_teleport_request(
-    tx: &mpsc::Sender<LiveFeedUpdate>,
-    active_start_location: &mut StartLocationIntent,
-    reconnect_reason: &mut Option<String>,
-    should_reconnect: &mut bool,
-    slurl: &str,
-    source: &str,
-) -> bool {
-    if *should_reconnect {
-        emit_relay(
-            tx,
-            RuntimeRelayLevel::Warn,
-            "teleport",
-            &format!(
-                "teleport request ignored source={} input={} reason=reconnect_already_pending",
-                source, slurl
-            ),
-        );
-        return false;
-    }
-
-    match normalize_start_location_input(slurl) {
-        Ok(start_location) => {
-            let target = describe_start_location_intent(&start_location);
-            emit_relay(
-                tx,
-                RuntimeRelayLevel::Info,
-                "teleport",
-                &format!(
-                    "reconnect teleport requested source={} input={} target={}",
-                    source, slurl, target
-                ),
-            );
-            *active_start_location = start_location;
-            *reconnect_reason = Some(format!("teleporting to {target}"));
-            *should_reconnect = true;
-            true
-        }
-        Err(err) => {
-            emit_relay(
-                tx,
-                RuntimeRelayLevel::Warn,
-                "teleport",
-                &format!(
-                    "teleport request rejected source={} input={} reason={}",
-                    source, slurl, err
-                ),
-            );
-            false
-        }
-    }
-}
-
-fn normalize_start_location_input(value: &str) -> Result<StartLocationIntent> {
-    let raw = value.trim();
-    if raw.is_empty() {
-        anyhow::bail!("empty start location");
-    }
-    if raw.eq_ignore_ascii_case("home") {
-        return Ok(StartLocationIntent::Saved(StartLocation::Home));
-    }
-    if raw.eq_ignore_ascii_case("last") {
-        return Ok(StartLocationIntent::Saved(StartLocation::Last));
-    }
-    if raw.to_ascii_lowercase().starts_with("uri:") {
-        return Ok(StartLocationIntent::Uri(raw.to_string()));
-    }
-    if let Some(uri) = normalize_slurl_to_login_uri(raw) {
-        return Ok(StartLocationIntent::Uri(uri));
-    }
-    if raw.contains("://") {
-        anyhow::bail!("unsupported SLURL/start-location format");
-    }
-    Ok(StartLocationIntent::Uri(raw.to_string()))
-}
-
-fn normalize_slurl_to_login_uri(value: &str) -> Option<String> {
-    parse_secondlife_location_components(value)
-        .map(|(region, x, y, z)| format!("uri:{region}&{x}&{y}&{z}"))
-}
-
-fn parse_secondlife_location_components(value: &str) -> Option<(String, i32, i32, i32)> {
-    let raw = value.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let lower = raw.to_ascii_lowercase();
-    if lower.starts_with("secondlife:///app/teleport/") {
-        let tail = &raw["secondlife:///app/teleport/".len()..];
-        return parse_location_tail(tail);
-    }
-    if lower.starts_with("secondlife:///app/region/") {
-        let tail = &raw["secondlife:///app/region/".len()..];
-        return parse_location_tail(tail);
-    }
-    if lower.starts_with("secondlife://") {
-        let tail = &raw["secondlife://".len()..];
-        return parse_location_tail(tail);
-    }
-    if (lower.starts_with("https://maps.secondlife.com/secondlife/")
-        || lower.starts_with("http://maps.secondlife.com/secondlife/"))
-        && let Some(idx) = lower.find("/secondlife/")
-    {
-        let tail = &raw[idx + "/secondlife/".len()..];
-        return parse_location_tail(tail);
-    }
-    None
-}
-
-fn parse_location_tail(tail: &str) -> Option<(String, i32, i32, i32)> {
-    let trimmed = tail.trim_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-    let mut segments = without_query
-        .split('/')
-        .filter(|segment| !segment.is_empty());
-    let region = percent_decode_component(segments.next()?)?;
-    let x = segments.next().and_then(parse_i32_segment).unwrap_or(128);
-    let y = segments.next().and_then(parse_i32_segment).unwrap_or(128);
-    let z = segments.next().and_then(parse_i32_segment).unwrap_or(0);
-    Some((region, x, y, z))
-}
-
-fn parse_i32_segment(value: &str) -> Option<i32> {
-    let decoded = percent_decode_component(value)?;
-    decoded.parse::<i32>().ok()
-}
-
-fn percent_decode_component(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        match bytes[idx] {
-            b'%' if idx + 2 < bytes.len() => {
-                let hi = decode_hex_digit(bytes[idx + 1])?;
-                let lo = decode_hex_digit(bytes[idx + 2])?;
-                decoded.push((hi << 4) | lo);
-                idx += 3;
-            }
-            b'+' => {
-                decoded.push(b' ');
-                idx += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                idx += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-fn decode_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
 
@@ -4871,95 +5042,6 @@ fn open_external_url(url: &str) {
     let _ = try_cmd("cmd", &format!("/C start {}", url));
 }
 
-fn emit_relay(
-    tx: &mpsc::Sender<LiveFeedUpdate>,
-    level: RuntimeRelayLevel,
-    category: &str,
-    message: &str,
-) {
-    let ts = now_unix_ms();
-    let line = format!("[{ts}] {category}: {message}");
-    println!("{line}");
-    let _ = fs::create_dir_all("logs");
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("logs/viewer_app_runtime.jsonl")
-    {
-        let json_line = format!(
-            "{{\"ts\":{},\"category\":\"{}\",\"message\":\"{}\"}}\n",
-            ts,
-            category.replace('"', "'"),
-            message.replace('"', "'")
-        );
-        let _ = file.write_all(json_line.as_bytes());
-    }
-    let event = RuntimeRelayEvent {
-        at_unix_ms: ts,
-        level,
-        category: category.to_string(),
-        message: message.to_string(),
-    };
-    if is_network_debug_category(category) {
-        append_network_debug_log(&event);
-    }
-    let _ = tx.send(LiveFeedUpdate::Relay(event));
-}
-
-fn is_network_debug_category(category: &str) -> bool {
-    matches!(
-        category,
-        "parallel_protocol"
-            | "event_queue"
-            | "first_sim_socket"
-            | "first_sim_forensics"
-            | "first_sim_ack"
-            | "object_feed"
-            | "region_objects"
-            | "social"
-    )
-}
-
-fn network_debug_log_path() -> PathBuf {
-    std::env::var("VIEWER_NETWORK_DEBUG_LOG_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| PathBuf::from("logs/network_debug.jsonl"))
-}
-
-fn append_network_debug_log(event: &RuntimeRelayEvent) {
-    let path = network_debug_log_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let json_line = format!(
-            "{{\"ts\":{},\"level\":\"{:?}\",\"category\":\"{}\",\"message\":\"{}\"}}\n",
-            event.at_unix_ms,
-            event.level,
-            event.category.replace('"', "'"),
-            event.message.replace('"', "'")
-        );
-        let _ = file.write_all(json_line.as_bytes());
-    }
-}
-
-fn append_network_debug_line(debug: &mut NetworkDebugState, title: &str, line: String) {
-    let mut lines = debug
-        .sections
-        .iter()
-        .find(|section| section.title == title)
-        .map(|section| section.lines.clone())
-        .unwrap_or_default();
-    lines.push(line);
-    if lines.len() > NETWORK_DEBUG_SECTION_MAX_LINES {
-        let keep_from = lines.len() - NETWORK_DEBUG_SECTION_MAX_LINES;
-        lines.drain(0..keep_from);
-    }
-    debug.set_section_lines(title, lines);
-}
-
 fn should_apply_world_ingestion_seam(
     previous: Option<&WorldObjectIngestionSeam>,
     next: &WorldObjectIngestionSeam,
@@ -5024,10 +5106,12 @@ impl ViewerApp {
             .collect::<BTreeMap<_, _>>();
 
         let fixture_texture_ids = fixture_texture_ids_from_env();
+        let fixture_mesh_ids = fixture_mesh_ids_from_env();
         let stress_test_mode = StressTestMode::from_env();
         let auto_camera_config = AutoCameraConfig::from_env();
         let screenshot_config =
             screenshot_config_from_lookup(|key| std::env::var(key).ok(), stress_test_mode);
+        let mesh_verification = mesh_verification_state_from_lookup(|key| std::env::var(key).ok());
 
         let live_visual_state = LiveVisualState::from_env();
         let asset_source_mode =
@@ -5066,7 +5150,9 @@ impl ViewerApp {
             geometry_cache: viewer_asset::GeometryCache::new(),
             fixture_texture_cache,
             fixture_texture_ids,
+            fixture_mesh_ids,
             fixture_texture_missing_logged: HashSet::new(),
+            live_mesh_assets: BTreeMap::new(),
             camera: Camera::default(),
             scene: Scene::prototype(),
             world_ingestion_seam: WorldObjectIngestionSeam::default(),
@@ -5095,6 +5181,7 @@ impl ViewerApp {
                     max_events: 200,
                 },
             },
+            mesh_verification,
         };
 
         match state.stress_test_mode {
@@ -5102,6 +5189,9 @@ impl ViewerApp {
             StressTestMode::GeometryTorture
             | StressTestMode::AutoCamera
             | StressTestMode::Screenshot => state.spawn_geometry_torture_test(),
+            StressTestMode::SingleLiveTextureCenter => {
+                state.spawn_single_live_texture_center_test()
+            }
             StressTestMode::None => {}
         }
 
@@ -5112,53 +5202,145 @@ impl ViewerApp {
 impl AppState {
     fn refresh_network_debug_snapshot_section(&mut self) {
         let mut lines = vec![format!(
-            "startup_status={:?} chat_connection={:?}",
+            "status={:?} chat={:?}",
             self.live_visual_state.startup_status, self.live_visual_state.chat_connection
         )];
-        lines.push(format!(
-            "current_region={} world_sim={} fallback_sim={}",
-            self.live_visual_state
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.current_region_name.as_deref())
-                .unwrap_or("unknown"),
-            self.world_sim_name.as_deref().unwrap_or("unknown"),
-            self.startup_sim_name_fallback.as_deref().unwrap_or("none")
-        ));
-        lines.push(format!(
-            "network_log={}",
-            network_debug_log_path().display()
-        ));
         if let Some(snapshot) = self.live_visual_state.snapshot.as_ref() {
+            let object_gate = if snapshot.decoded_object_feed_update_messages > 0 {
+                "PASS"
+            } else {
+                "FAIL"
+            };
             lines.push(format!(
-                "logged_in={} amc={} endpoint={}",
-                snapshot.logged_in,
-                snapshot.handshake_agent_movement_complete,
+                "region={} endpoint={}",
+                snapshot.current_region_name.as_deref().unwrap_or("unknown"),
                 snapshot.first_sim_endpoint.as_deref().unwrap_or("none")
             ));
             lines.push(format!(
-                "traffic_summary={} post_boundary={} region_ctrl={} unknown={}",
-                snapshot.traffic_summary_available,
-                snapshot.post_boundary_observations,
-                snapshot.region_transition_control_observations,
-                snapshot.unknown
+                "logged_in={} amc={} object_gate={}",
+                snapshot.logged_in, snapshot.handshake_agent_movement_complete, object_gate
             ));
             lines.push(format!(
-                "object_feed updates={} kills={} dropped={} evicted={} total={}",
+                "object_feed updates={} kills={} total={}",
                 snapshot.decoded_object_feed_update_messages,
                 snapshot.decoded_object_feed_kill_messages,
-                snapshot.decoded_object_feed_decode_dropped,
-                snapshot.decoded_object_feed_evicted,
                 snapshot.decoded_object_feed_total_objects
             ));
             lines.push(format!(
-                "transition crossed={} confirm_enable={} broader={}",
-                snapshot.crossed_region,
-                snapshot.confirm_enable_simulator,
-                snapshot.likely_broader_traffic
+                "mesh_queue requested={} fetched={} decoded={} failed={}",
+                live_mesh_queue_counts(&self.live_mesh_assets).0,
+                live_mesh_queue_counts(&self.live_mesh_assets).1,
+                live_mesh_queue_counts(&self.live_mesh_assets).2,
+                live_mesh_queue_counts(&self.live_mesh_assets).3
             ));
+            lines.push(live_mesh_asset_summary_line(&self.live_mesh_assets));
+            lines.push(format!(
+                "transition crossed={} confirm_enable={}",
+                snapshot.crossed_region, snapshot.confirm_enable_simulator
+            ));
+        } else {
+            lines.push(String::from("snapshot=none"));
         }
         self.network_debug.set_section_lines("Session", lines);
+    }
+
+    fn push_local_relay(&mut self, level: RuntimeRelayLevel, category: &str, message: String) {
+        tracing::info!("{category}: {message}");
+        let event = RuntimeRelayEvent {
+            at_unix_ms: now_unix_ms(),
+            level,
+            category: category.to_string(),
+            message,
+        };
+        self.ingest_network_debug_event(&event);
+        self.social_state.relay.push(event);
+    }
+
+    fn track_mesh_verification_key(&mut self, key: &(String, u32)) -> bool {
+        let Some(config) = self.mesh_verification.config.as_ref() else {
+            return false;
+        };
+        if self.mesh_verification.selected_target.is_none() {
+            self.mesh_verification.selected_target =
+                Some(config.target_mesh_id.clone().unwrap_or_else(|| key.clone()));
+        }
+        self.mesh_verification.selected_target.as_ref() == Some(key)
+    }
+
+    fn emit_mesh_verification_event(&mut self, stage: &str, key: &(String, u32), detail: String) {
+        if !self.track_mesh_verification_key(key) {
+            return;
+        }
+        let Some(config) = self.mesh_verification.config.as_ref() else {
+            return;
+        };
+        let event_key = format!("{stage}:{}:{}", key.0, key.1);
+        if !self.mesh_verification.emitted_events.insert(event_key) {
+            return;
+        }
+
+        if let Some(parent) = config.log_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config.log_path)
+        {
+            let json_line = format!(
+                "{{\"ts\":{},\"stage\":\"{}\",\"mesh_id\":\"{}\",\"lod\":{},\"detail\":\"{}\"}}\n",
+                now_unix_ms(),
+                stage.replace('"', "'"),
+                key.0.replace('"', "'"),
+                key.1,
+                detail.replace('"', "'")
+            );
+            let _ = file.write_all(json_line.as_bytes());
+        }
+
+        self.push_local_relay(
+            RuntimeRelayLevel::Info,
+            "mesh_visibility",
+            format!("stage={stage} id={} lod={} {detail}", key.0, key.1),
+        );
+    }
+
+    fn maybe_emit_mesh_discovered_event(&mut self) {
+        let Some(snapshot) = self.live_visual_state.snapshot.as_ref() else {
+            return;
+        };
+        for key in extract_decoded_object_feed_mesh_ids(snapshot, 1) {
+            if self.track_mesh_verification_key(&key) {
+                self.emit_mesh_verification_event(
+                    "object_discovered",
+                    &key,
+                    String::from("decoded object-feed mesh source observed"),
+                );
+                break;
+            }
+        }
+    }
+
+    fn schedule_mesh_verification_screenshot(&mut self, key: &(String, u32)) {
+        let Some(dir) = self
+            .mesh_verification
+            .config
+            .as_ref()
+            .and_then(|config| config.screenshot_dir.clone())
+        else {
+            return;
+        };
+        if self.mesh_verification.pending_screenshot.is_some()
+            || self.mesh_verification.captured_screenshot.is_some()
+        {
+            return;
+        }
+        if !self.track_mesh_verification_key(key) {
+            return;
+        }
+        let _ = fs::create_dir_all(&dir);
+        self.mesh_verification.pending_screenshot =
+            Some(dir.join(format!("mesh_verify_{}_lod{}.png", key.0, key.1)));
     }
 
     fn ingest_network_debug_event(&mut self, event: &RuntimeRelayEvent) {
@@ -5210,11 +5392,11 @@ impl AppState {
             RECOVERY_ASSET_REFRESH_COOLDOWN_MS,
         );
 
-        if result.code == viewer_core::RecoveryResultCode::Accepted {
-            if action == viewer_core::RecoveryAction::RefreshVisibleAssets {
-                self.fixture_texture_missing_logged.clear();
-                self.fixture_texture_cache.clear_failures();
-            }
+        if result.code == viewer_core::RecoveryResultCode::Accepted
+            && action == viewer_core::RecoveryAction::RefreshVisibleAssets
+        {
+            self.fixture_texture_missing_logged.clear();
+            self.fixture_texture_cache.clear_failures();
         }
 
         self.last_probe_retry_ms = new_probe_ms;
@@ -5238,6 +5420,31 @@ impl AppState {
         use viewer_core::{
             GeometrySource, HoleType, InstanceRole, PathType, ProfileType, Transform, VolumeParams,
         };
+
+        let debug_mesh_id = String::from("debug-secondlife-mesh");
+        let debug_mesh_lod = 0u32;
+        let debug_mesh_bytes = viewer_asset::debug_triangle_second_life_mesh_bytes();
+        let debug_mesh_len = debug_mesh_bytes.len();
+        let debug_mesh_signature = mesh_byte_signature(&debug_mesh_bytes);
+        let debug_mesh_format = viewer_asset::detect_mesh_source_format(&debug_mesh_bytes);
+        let debug_mesh_key = (debug_mesh_id.clone(), debug_mesh_lod);
+        self.live_mesh_assets.insert(
+            debug_mesh_key.clone(),
+            LiveMeshAssetState::Fetched(LiveMeshAssetBytes {
+                bytes: debug_mesh_bytes,
+                byte_len: debug_mesh_len,
+                byte_signature: debug_mesh_signature.clone(),
+                format_hint: debug_mesh_format,
+            }),
+        );
+        self.emit_mesh_verification_event(
+            "mesh_bytes_fetched",
+            &debug_mesh_key,
+            format!(
+                "mode=offline byte_len={} signature={} format={:?}",
+                debug_mesh_len, debug_mesh_signature, debug_mesh_format
+            ),
+        );
 
         // Grid of diverse procedural prims
         for i in 0..5 {
@@ -5308,7 +5515,7 @@ impl AppState {
             ..Transform::default()
         };
         let inst_id = self.scene.insert_instance(
-            GeometrySource::Mesh("dummy-mesh".to_string(), 0),
+            GeometrySource::Mesh(debug_mesh_id, debug_mesh_lod),
             InstanceRole::SceneStatic,
             mesh_trans,
             [1.0, 1.0, 1.0, 1.0],
@@ -5349,6 +5556,37 @@ impl AppState {
             [0.2, 0.4, 1.0, 0.5], // Semi-transparent blue
             AlphaMode::Blend,
         );
+    }
+
+    fn spawn_single_live_texture_center_test(&mut self) {
+        use viewer_core::{GeometrySource, InstanceRole, MeshKind, Transform};
+
+        let transform = Transform {
+            position: [0.0, 5.0, 0.0],
+            scale: [4.0, 4.0, 4.0],
+            ..Transform::default()
+        };
+        let instance_id = self.scene.insert_instance(
+            GeometrySource::Diagnostic(MeshKind::Cube),
+            InstanceRole::SceneStatic,
+            transform,
+            [1.0, 1.0, 1.0, 1.0],
+            AlphaMode::Opaque,
+        );
+
+        if let Some(texture_id) = self.fixture_texture_ids.first().cloned() {
+            if let Some(instance) = self.scene.get_instance_mut(instance_id) {
+                instance.materials.default =
+                    viewer_core::MaterialDescriptor::Legacy(viewer_core::TextureEntry {
+                        texture_id,
+                        ..viewer_core::TextureEntry::default()
+                    });
+            }
+        } else {
+            tracing::warn!(
+                "single live texture center test requested but no fixture texture id is configured"
+            );
+        }
     }
 
     fn spawn_stress_test(&mut self) {
@@ -5727,7 +5965,7 @@ impl AppState {
                 LiveFeedUpdate::TextureAsset { id, bytes } => {
                     let id = AssetID::new(id);
                     let mut results = self.live_texture_results.lock().unwrap();
-                    match viewer_asset::decode_png_rgba8(&bytes) {
+                    match viewer_asset::decode_texture_rgba8(&bytes) {
                         Ok(img) => {
                             results.insert(
                                 id,
@@ -5760,6 +5998,51 @@ impl AppState {
                             source: viewer_asset::AssetSourceKind::Live,
                             failure: Some(reason),
                         },
+                    );
+                }
+                LiveFeedUpdate::MeshAsset { id, lod, bytes } => {
+                    let key = (id, lod);
+                    let asset = LiveMeshAssetBytes {
+                        byte_len: bytes.len(),
+                        byte_signature: mesh_byte_signature(&bytes),
+                        format_hint: viewer_asset::detect_mesh_source_format(&bytes),
+                        bytes,
+                    };
+                    self.live_mesh_assets
+                        .insert(key.clone(), LiveMeshAssetState::Fetched(asset.clone()));
+                    self.push_local_relay(
+                        RuntimeRelayLevel::Info,
+                        "mesh_asset",
+                        format!(
+                            "fetched id={} lod={} bytes={} signature={} format_hint={:?}",
+                            key.0, key.1, asset.byte_len, asset.byte_signature, asset.format_hint
+                        ),
+                    );
+                    self.emit_mesh_verification_event(
+                        "mesh_bytes_fetched",
+                        &key,
+                        format!(
+                            "bytes={} signature={} format_hint={:?}",
+                            asset.byte_len, asset.byte_signature, asset.format_hint
+                        ),
+                    );
+                }
+                LiveFeedUpdate::MeshAssetFailed { id, lod, reason } => {
+                    let key = (id, lod);
+                    self.live_mesh_assets.insert(
+                        key.clone(),
+                        LiveMeshAssetState::Failed {
+                            reason,
+                            detail: String::from("live mesh fetch failed"),
+                            byte_len: None,
+                            byte_signature: None,
+                            format: viewer_asset::MeshSourceFormat::Unknown,
+                        },
+                    );
+                    self.push_local_relay(
+                        RuntimeRelayLevel::Warn,
+                        "mesh_asset",
+                        format!("failed id={} lod={} reason={:?}", key.0, key.1, reason),
                     );
                 }
             }
@@ -5813,8 +6096,189 @@ impl AppState {
         let frustum = self.camera.frustum(aspect);
         let visibility_list = self.scene.query_frustum(&frustum);
         self.tick_scene_textures(&visibility_list)?;
+        self.tick_scene_meshes(&visibility_list);
+        self.maybe_emit_mesh_discovered_event();
         self.refresh_network_debug_snapshot_section();
 
+        // Prepare dynamic geometry
+        for &id in &visibility_list {
+            let Some(geometry_source) = self
+                .scene
+                .instances
+                .get(&id)
+                .map(|instance| instance.geometry.clone())
+            else {
+                continue;
+            };
+            if self.renderer.has_dynamic_geometry(&geometry_source) {
+                continue;
+            }
+
+            let mesh = match &geometry_source {
+                GeometrySource::Procedural(params, detail) => {
+                    Some(self.geometry_cache.get_procedural(params, *detail))
+                }
+                GeometrySource::Sculpt(uuid, sculpt_type) => {
+                    let dummy_pixels = vec![128u8; 32 * 32 * 3];
+                    Some(
+                        self.geometry_cache
+                            .get_sculpt(uuid, *sculpt_type, &dummy_pixels, 32, 32),
+                    )
+                }
+                GeometrySource::Mesh(uuid, lod) => {
+                    let key = (uuid.clone(), *lod);
+                    let bytes = self
+                        .live_mesh_assets
+                        .get(&key)
+                        .and_then(LiveMeshAssetState::bytes)
+                        .unwrap_or(&[]);
+                    let lookup = self.geometry_cache.get_mesh_with_status(uuid, *lod, bytes);
+                    match lookup.state {
+                        viewer_asset::MeshCacheLookupState::Decoded
+                        | viewer_asset::MeshCacheLookupState::CachedReady => {
+                            let next_state = match self.live_mesh_assets.get(&key).cloned() {
+                                Some(LiveMeshAssetState::Fetched(asset))
+                                | Some(LiveMeshAssetState::Decoded { asset, .. }) => {
+                                    Some(LiveMeshAssetState::Decoded {
+                                        asset,
+                                        format: lookup.format,
+                                        vertices: lookup.mesh.vertices.len(),
+                                        submeshes: lookup.mesh.submeshes.len(),
+                                    })
+                                }
+                                _ => None,
+                            };
+                            if let Some(next_state) = next_state {
+                                let should_log = !matches!(
+                                    self.live_mesh_assets.get(&key),
+                                    Some(LiveMeshAssetState::Decoded { .. })
+                                );
+                                self.live_mesh_assets.insert(key.clone(), next_state);
+                                if should_log {
+                                    self.push_local_relay(
+                                        RuntimeRelayLevel::Info,
+                                        "mesh_asset",
+                                        format!(
+                                            "decoded id={} lod={} format={:?} vertices={} submeshes={}",
+                                            key.0,
+                                            key.1,
+                                            lookup.format,
+                                            lookup.mesh.vertices.len(),
+                                            lookup.mesh.submeshes.len()
+                                        ),
+                                    );
+                                    self.emit_mesh_verification_event(
+                                        "mesh_decoded",
+                                        &key,
+                                        format!(
+                                            "format={:?} vertices={} submeshes={}",
+                                            lookup.format,
+                                            lookup.mesh.vertices.len(),
+                                            lookup.mesh.submeshes.len()
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        viewer_asset::MeshCacheLookupState::DecodeFailed => {
+                            let should_log = !matches!(
+                                self.live_mesh_assets.get(&key),
+                                Some(LiveMeshAssetState::Failed {
+                                    reason: viewer_asset::AssetFetchFailureReason::Decode
+                                        | viewer_asset::AssetFetchFailureReason::Unsupported,
+                                    ..
+                                })
+                            );
+                            if should_log {
+                                self.live_mesh_assets.insert(
+                                    key.clone(),
+                                    LiveMeshAssetState::Failed {
+                                        reason: lookup.failure.unwrap_or(
+                                            viewer_asset::AssetFetchFailureReason::Decode,
+                                        ),
+                                        detail: lookup
+                                            .detail
+                                            .clone()
+                                            .unwrap_or_else(|| String::from("mesh decode failed")),
+                                        byte_len: Some(bytes.len()),
+                                        byte_signature: Some(mesh_byte_signature(bytes)),
+                                        format: lookup.format,
+                                    },
+                                );
+                                self.push_local_relay(
+                                    RuntimeRelayLevel::Warn,
+                                    "mesh_asset",
+                                    format!(
+                                        "decode_failed id={} lod={} format={:?} detail={}",
+                                        key.0,
+                                        key.1,
+                                        lookup.format,
+                                        lookup.detail.as_deref().unwrap_or("mesh decode failed")
+                                    ),
+                                );
+                            }
+                        }
+                        viewer_asset::MeshCacheLookupState::EmptyData => {}
+                    }
+                    Some(lookup.mesh)
+                }
+                _ => None,
+            };
+
+            if let Some(mesh) = mesh {
+                if mesh.vertices.is_empty() || mesh.submeshes.is_empty() {
+                    continue;
+                }
+                let mut submeshes = Vec::new();
+                let mut index_start = 0;
+                let mut all_indices = Vec::new();
+                for sm in &mesh.submeshes {
+                    if sm.indices.is_empty() {
+                        continue;
+                    }
+                    let count = sm.indices.len() as u32;
+                    submeshes.push(viewer_render::SubMeshRange {
+                        face_id: sm.face_id,
+                        index_start,
+                        index_count: count,
+                    });
+                    all_indices.extend_from_slice(&sm.indices);
+                    index_start += count;
+                }
+                if !all_indices.is_empty() && !submeshes.is_empty() {
+                    self.renderer.upsert_geometry(
+                        geometry_source.clone(),
+                        bytemuck::cast_slice(&mesh.vertices),
+                        bytemuck::cast_slice(&all_indices),
+                        submeshes,
+                    );
+                    if let GeometrySource::Mesh(uuid, lod) = &geometry_source {
+                        let key = (uuid.clone(), *lod);
+                        self.emit_mesh_verification_event(
+                            "geometry_uploaded",
+                            &key,
+                            format!(
+                                "vertices={} indices={}",
+                                mesh.vertices.len(),
+                                all_indices.len()
+                            ),
+                        );
+                        self.emit_mesh_verification_event(
+                            "visible",
+                            &key,
+                            format!("instance_id={} geometry now renderable", id),
+                        );
+                        self.schedule_mesh_verification_screenshot(&key);
+                    }
+
+                    if let Some(instance_mut) = self.scene.get_instance_mut(id) {
+                        instance_mut.local_aabb = mesh.aabb;
+                        instance_mut.dirty_spatial = true;
+                    }
+                }
+            }
+        }
+        let metrics = self.scene.metrics_with_visibility(&visibility_list);
         let window = self.window.clone();
         let camera = self.camera;
         let live_visual = next_live_visual_snapshot;
@@ -5822,13 +6286,14 @@ impl AppState {
             .live_visual_state
             .startup_status
             .to_ux_status(&self.live_visual_state.chat_connection);
-        let chat_state = &mut self.chat_state;
-        let social_state = &mut self.social_state;
         let world_avatars = &self.world_avatars;
         let world_sim_name = self.world_sim_name.clone();
         let world_self_location = self.world_self_location;
-        let profile_state = &mut self.profile_state;
         let profile_image_bytes = &self.profile_image_bytes;
+        let ui = &mut self.ui;
+        let chat_state = &mut self.chat_state;
+        let social_state = &mut self.social_state;
+        let profile_state = &mut self.profile_state;
         let mut pending_chat_send: Option<String> = None;
         let mut pending_direct_im_send: Option<(String, String)> = None;
         let mut pending_profile_open: Option<String> = None;
@@ -5839,71 +6304,6 @@ impl AppState {
         let mut pending_retry_continuity_probe = false;
         let mut pending_refresh_visible_assets = false;
         let mut pending_clear_recovery_banner = false;
-
-        // Prepare dynamic geometry
-        for &id in &visibility_list {
-            if let Some(instance) = self.scene.instances.get(&id)
-                && !self.renderer.has_dynamic_geometry(&instance.geometry)
-            {
-                let mesh = match &instance.geometry {
-                    GeometrySource::Procedural(params, detail) => {
-                        Some(self.geometry_cache.get_procedural(params, *detail))
-                    }
-                    GeometrySource::Sculpt(uuid, sculpt_type) => {
-                        let dummy_pixels = vec![128u8; 32 * 32 * 3]; // Neutral gray sculpt
-                        Some(self.geometry_cache.get_sculpt(
-                            uuid,
-                            *sculpt_type,
-                            &dummy_pixels,
-                            32,
-                            32,
-                        ))
-                    }
-                    GeometrySource::Mesh(uuid, lod) => {
-                        Some(self.geometry_cache.get_mesh(uuid, *lod, &[]))
-                    }
-                    _ => None,
-                };
-
-                if let Some(mesh) = mesh {
-                    if mesh.vertices.is_empty() || mesh.submeshes.is_empty() {
-                        continue;
-                    }
-                    let mut submeshes = Vec::new();
-                    let mut index_start = 0;
-                    let mut all_indices = Vec::new();
-                    for sm in &mesh.submeshes {
-                        if sm.indices.is_empty() {
-                            continue;
-                        }
-                        let count = sm.indices.len() as u32;
-                        submeshes.push(viewer_render::SubMeshRange {
-                            face_id: sm.face_id,
-                            index_start,
-                            index_count: count,
-                        });
-                        all_indices.extend_from_slice(&sm.indices);
-                        index_start += count;
-                    }
-                    if !all_indices.is_empty() && !submeshes.is_empty() {
-                        self.renderer.upsert_geometry(
-                            instance.geometry.clone(),
-                            bytemuck::cast_slice(&mesh.vertices),
-                            bytemuck::cast_slice(&all_indices),
-                            submeshes,
-                        );
-
-                        // Sync AABB to instance and mark for spatial update
-                        if let Some(instance_mut) = self.scene.get_instance_mut(id) {
-                            instance_mut.local_aabb = mesh.aabb;
-                            instance_mut.dirty_spatial = true;
-                        }
-                    }
-                }
-            }
-        }
-        let metrics = self.scene.metrics_with_visibility(&visibility_list);
-        let ui = &mut self.ui;
 
         let render_result = self.renderer.render_frame(
             &camera,
@@ -5977,17 +6377,17 @@ impl AppState {
                 viewer_core::RecoveryAction::RetryContinuityProbe,
                 now_unix_ms(),
             );
-            if result.code == viewer_core::RecoveryResultCode::Accepted {
-                if !self.live_visual_state.execute_continuity_probe() {
-                    self.probe_in_flight = false;
-                    self.last_probe_retry_ms = None;
-                    self.last_recovery_result = Some(viewer_core::RecoveryActionResult {
-                        action: viewer_core::RecoveryAction::RetryContinuityProbe,
-                        code: viewer_core::RecoveryResultCode::Unavailable,
-                        detail: Some(String::from("failed to queue continuity probe command")),
-                        cooldown_remaining_ms: None,
-                    });
-                }
+            if result.code == viewer_core::RecoveryResultCode::Accepted
+                && !self.live_visual_state.execute_continuity_probe()
+            {
+                self.probe_in_flight = false;
+                self.last_probe_retry_ms = None;
+                self.last_recovery_result = Some(viewer_core::RecoveryActionResult {
+                    action: viewer_core::RecoveryAction::RetryContinuityProbe,
+                    code: viewer_core::RecoveryResultCode::Unavailable,
+                    detail: Some(String::from("failed to queue continuity probe command")),
+                    cooldown_remaining_ms: None,
+                });
             }
         }
         if pending_refresh_visible_assets {
@@ -6054,6 +6454,17 @@ impl AppState {
 
         if let Some(path) = screenshot_path {
             tracing::info!("captured test screenshot: {}", path.display());
+            if self.mesh_verification.pending_screenshot.as_ref() == Some(&path) {
+                self.mesh_verification.captured_screenshot = Some(path.clone());
+                self.mesh_verification.pending_screenshot = None;
+                if let Some(target) = self.mesh_verification.selected_target.clone() {
+                    self.emit_mesh_verification_event(
+                        "screenshot_captured",
+                        &target,
+                        format!("path={}", path.display()),
+                    );
+                }
+            }
         }
 
         render_result
@@ -6061,6 +6472,17 @@ impl AppState {
 
     fn next_screenshot_path(&mut self) -> Result<Option<PathBuf>> {
         self.frame_counter = self.frame_counter.saturating_add(1);
+        if let Some(path) = self.mesh_verification.pending_screenshot.clone() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create mesh verification screenshot directory: {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            return Ok(Some(path));
+        }
         let Some(config) = &self.screenshot_config else {
             return Ok(None);
         };
@@ -6083,19 +6505,16 @@ impl AppState {
     }
 
     fn tick_scene_textures(&mut self, visibility_list: &[usize]) -> Result<()> {
-        if self.fixture_texture_ids.is_empty() {
-            return Ok(());
-        }
-
-        let mut ids_to_request = self.fixture_texture_ids.clone();
-
         // Also extract visible texture IDs from the scene (capped at 64)
         let visible_ids = extract_visible_texture_ids_from_scene(&self.scene, visibility_list, 64);
-        for id in &visible_ids {
-            if !ids_to_request.contains(id) {
-                ids_to_request.push(id.clone());
-            }
-        }
+        let decoded_object_texture_ids = self
+            .live_visual_state
+            .snapshot
+            .as_ref()
+            .map(|snapshot| extract_decoded_object_feed_texture_ids(snapshot, 64))
+            .unwrap_or_default();
+        let mut ids_to_request = merge_texture_request_ids(&self.fixture_texture_ids, &visible_ids);
+        ids_to_request = merge_texture_request_ids(&ids_to_request, &decoded_object_texture_ids);
 
         if ids_to_request.is_empty() {
             return Ok(());
@@ -6139,6 +6558,53 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    fn tick_scene_meshes(&mut self, _visibility_list: &[usize]) {
+        let Some(tx) = &self.live_visual_state.in_process_tx else {
+            return;
+        };
+
+        let mut mesh_keys = self
+            .fixture_mesh_ids
+            .iter()
+            .map(|id| (id.clone(), 0u32))
+            .collect::<Vec<_>>();
+        if let Some(snapshot) = &self.live_visual_state.snapshot {
+            for key in extract_decoded_object_feed_mesh_ids(snapshot, 64) {
+                if !mesh_keys.contains(&key) {
+                    mesh_keys.push(key);
+                }
+            }
+        }
+
+        for (id, lod) in mesh_keys {
+            if id.trim().is_empty() {
+                continue;
+            }
+            let key = (id.clone(), lod);
+            if matches!(
+                self.live_mesh_assets.get(&key),
+                Some(
+                    LiveMeshAssetState::Requested
+                        | LiveMeshAssetState::Fetched(_)
+                        | LiveMeshAssetState::Decoded { .. }
+                )
+            ) {
+                continue;
+            }
+
+            if tx
+                .send(LiveFeedCommand::RequestMesh {
+                    id: id.clone(),
+                    lod,
+                })
+                .is_ok()
+            {
+                self.live_mesh_assets
+                    .insert((id, lod), LiveMeshAssetState::Requested);
+            }
+        }
     }
 
     fn handle_input_event(&mut self, event: &WindowEvent) {
@@ -6249,7 +6715,96 @@ fn extract_visible_texture_ids_from_scene(
             }
         }
     }
-    ids.into_iter().collect()
+    ids.into_iter().take(cap).collect()
+}
+
+fn merge_texture_request_ids(fixture_ids: &[AssetID], visible_ids: &[AssetID]) -> Vec<AssetID> {
+    let mut ids_to_request = fixture_ids.to_vec();
+    for id in visible_ids {
+        if !ids_to_request.contains(id) {
+            ids_to_request.push(id.clone());
+        }
+    }
+    ids_to_request
+}
+
+fn extract_decoded_object_feed_mesh_ids(
+    snapshot: &LiveVisualSnapshot,
+    cap: usize,
+) -> Vec<(String, u32)> {
+    if cap == 0 {
+        return Vec::new();
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    for obj in &snapshot.decoded_object_feed_objects {
+        if let Some(mesh_id) = &obj.mesh_id {
+            let normalized = mesh_id.trim().to_ascii_lowercase();
+            let object_id_matches = obj
+                .object_id
+                .as_deref()
+                .map(|id| id.trim().eq_ignore_ascii_case(normalized.as_str()))
+                .unwrap_or(false);
+            if !normalized.is_empty() && !object_id_matches {
+                ids.insert((normalized, 0u32));
+            }
+        }
+    }
+    ids.into_iter().take(cap).collect()
+}
+
+fn extract_decoded_object_feed_texture_ids(
+    snapshot: &LiveVisualSnapshot,
+    cap: usize,
+) -> Vec<AssetID> {
+    if cap == 0 {
+        return Vec::new();
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    for obj in &snapshot.decoded_object_feed_objects {
+        if let Some(texture_id) = obj.texture_id.as_ref() {
+            let trimmed = texture_id.as_str().trim();
+            if !trimmed.is_empty() {
+                ids.insert(AssetID::new(trimmed));
+                if ids.len() >= cap {
+                    break;
+                }
+            }
+        }
+        if let Some(face) = obj.default_face_material.as_ref() {
+            insert_face_material_texture_ids(face, &mut ids, cap);
+            if ids.len() >= cap {
+                break;
+            }
+        }
+        for face in &obj.face_material_overrides {
+            insert_face_material_texture_ids(face, &mut ids, cap);
+            if ids.len() >= cap {
+                break;
+            }
+        }
+    }
+    ids.into_iter().take(cap).collect()
+}
+
+fn insert_face_material_texture_ids(
+    face: &viewer_core::DecodedWorldObjectFaceMaterial,
+    ids: &mut std::collections::BTreeSet<AssetID>,
+    cap: usize,
+) {
+    for texture_id in [&face.texture_id, &face.normal_id, &face.specular_id]
+        .into_iter()
+        .flatten()
+    {
+        let trimmed = texture_id.as_str().trim();
+        if !trimmed.is_empty() {
+            ids.insert(AssetID::new(trimmed));
+            if ids.len() >= cap {
+                return;
+            }
+        }
+    }
 }
 
 fn build_asset_priority_hints(
@@ -6494,6 +7049,114 @@ where
     })
 }
 
+fn mesh_verification_state_from_lookup<F>(lookup: F) -> MeshVerificationState
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let enabled = lookup("VIEWER_APP_MESH_VERIFY")
+        .as_deref()
+        .map(parse_bool_like)
+        .unwrap_or(false);
+    if !enabled {
+        return MeshVerificationState::default();
+    }
+
+    let target_mesh_id = lookup("VIEWER_APP_MESH_VERIFY_ID").and_then(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some((normalized, 0))
+        }
+    });
+    let log_path = lookup("VIEWER_APP_MESH_VERIFY_LOG_PATH")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("artifacts/logs/mesh_visibility_verify.jsonl"));
+    let screenshot_dir = lookup("VIEWER_APP_MESH_VERIFY_SCREENSHOT_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
+
+    MeshVerificationState {
+        config: Some(MeshVerificationConfig {
+            target_mesh_id,
+            log_path,
+            screenshot_dir,
+        }),
+        ..Default::default()
+    }
+}
+
+fn mesh_byte_signature(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::from("empty");
+    }
+    bytes
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn live_mesh_queue_counts(
+    assets: &BTreeMap<(String, u32), LiveMeshAssetState>,
+) -> (usize, usize, usize, usize) {
+    let mut requested = 0usize;
+    let mut fetched = 0usize;
+    let mut decoded = 0usize;
+    let mut failed = 0usize;
+
+    for state in assets.values() {
+        match state {
+            LiveMeshAssetState::Requested => requested += 1,
+            LiveMeshAssetState::Fetched(_) => fetched += 1,
+            LiveMeshAssetState::Decoded { .. } => decoded += 1,
+            LiveMeshAssetState::Failed { .. } => failed += 1,
+        }
+    }
+
+    (requested, fetched, decoded, failed)
+}
+
+fn live_mesh_asset_summary_line(assets: &BTreeMap<(String, u32), LiveMeshAssetState>) -> String {
+    let Some(((id, lod), state)) = assets.iter().next_back() else {
+        return String::from("mesh_last=none");
+    };
+    match state {
+        LiveMeshAssetState::Requested => format!("mesh_last=requested id={id} lod={lod}"),
+        LiveMeshAssetState::Fetched(asset) => format!(
+            "mesh_last=fetched id={id} lod={lod} bytes={} signature={} format_hint={:?}",
+            asset.byte_len, asset.byte_signature, asset.format_hint
+        ),
+        LiveMeshAssetState::Decoded {
+            asset,
+            format,
+            vertices,
+            submeshes,
+        } => format!(
+            "mesh_last=decoded id={id} lod={lod} bytes={} signature={} format={:?} vertices={} submeshes={}",
+            asset.byte_len, asset.byte_signature, format, vertices, submeshes
+        ),
+        LiveMeshAssetState::Failed {
+            reason,
+            detail,
+            byte_len,
+            byte_signature,
+            format,
+        } => format!(
+            "mesh_last=failed id={id} lod={lod} reason={:?} format={:?} bytes={} signature={} detail={}",
+            reason,
+            format,
+            byte_len
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| String::from("none")),
+            byte_signature.as_deref().unwrap_or("none"),
+            detail
+        ),
+    }
+}
+
 fn parse_positive_f32(value: &str, fallback: f32) -> f32 {
     let parsed = value.parse::<f32>().ok().unwrap_or(fallback);
     if parsed.is_finite() && parsed > 0.0 {
@@ -6630,16 +7293,43 @@ fn fixture_texture_ids_from_env() -> Vec<viewer_core::AssetID> {
         .collect()
 }
 
+fn fixture_mesh_ids_from_env() -> Vec<String> {
+    let raw = std::env::var("VIEWER_FIXTURE_MESHES").ok();
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "0" {
+        return Vec::new();
+    }
+
+    fixture_mesh_ids_from_csv(raw)
+}
+
+fn fixture_mesh_ids_from_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::fs;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use viewer_core::{
         AlphaMode, AssetID, GeometrySource, InstanceRole, MaterialDescriptor, MaterialSet,
         MeshKind, RenderableInstance, TextureEntry, Transform,
     };
-    use viewer_grid::{GridLoginError, GridLoginErrorClass};
+    use viewer_grid::{
+        GridLoginError, GridLoginErrorClass, LoginIntent, SecondLifeAdapter, StartLocation,
+        StartLocationIntent,
+    };
 
     #[test]
     fn in_process_config_requires_endpoint_username_and_password() {
@@ -6674,6 +7364,24 @@ mod tests {
             String::from("9"),
         );
         vars.insert(
+            String::from("VIEWER_APP_EVENT_QUEUE_CAP_NOT_FOUND_BEFORE_RECONNECT"),
+            String::from("4"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_CAPABILITY_PROBES_REQUIRE_EVENT_QUEUE_OK"),
+            String::from("false"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_LANE_PROBE_ASSET_IDS"),
+            String::from(
+                "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222",
+            ),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_OBJECT_UUID_FOCUS"),
+            String::from("10930d3b-1821-c584-a0c7-28a34999800d"),
+        );
+        vars.insert(
             String::from("VIEWER_APP_WORKER_TICK_MS"),
             String::from("25"),
         );
@@ -6688,6 +7396,22 @@ mod tests {
         vars.insert(
             String::from("VIEWER_APP_REGION_OBJECTS_REPROBE_DELAY_TICKS"),
             String::from("99"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_LLUDP_STARTUP_PARITY_BUNDLE"),
+            String::from("true"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_REQUIRE_REGION_HANDSHAKE_REPLY"),
+            String::from("true"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_AGENT_UPDATE_FAR"),
+            String::from("222.5"),
+        );
+        vars.insert(
+            String::from("VIEWER_APP_AGENT_UPDATE_KEEPALIVE_TICKS"),
+            String::from("7"),
         );
         vars.insert(String::from("VIEWER_LOGIN_AGREE_TOS"), String::from("true"));
         vars.insert(
@@ -6708,6 +7432,13 @@ mod tests {
         assert_eq!(cfg.receive_max_packets, 16);
         assert!(!cfg.run_probe);
         assert_eq!(cfg.event_queue_failures_before_reconnect, 9);
+        assert_eq!(cfg.event_queue_cap_not_found_before_reconnect, 4);
+        assert!(!cfg.capability_probes_require_event_queue_ok);
+        assert_eq!(cfg.lane_probe_asset_ids.len(), 2);
+        assert_eq!(
+            cfg.object_uuid_focus.as_deref(),
+            Some("10930d3b-1821-c584-a0c7-28a34999800d")
+        );
         assert_eq!(cfg.worker_tick_ms, 25);
         assert_eq!(
             cfg.auto_teleport_slurl.as_deref(),
@@ -6715,6 +7446,10 @@ mod tests {
         );
         assert_eq!(cfg.auto_teleport_delay_ticks, 77);
         assert_eq!(cfg.region_objects_reprobe_delay_ticks, 99);
+        assert!(cfg.lludp_startup_parity_bundle);
+        assert!(cfg.require_region_handshake_reply);
+        assert_eq!(cfg.agent_update_far, 222.5);
+        assert_eq!(cfg.agent_update_keepalive_ticks_override, Some(7));
         assert!(cfg.agree_to_tos);
         assert!(!cfg.read_critical);
         assert_eq!(cfg.mfa_token.as_deref(), Some("token123"));
@@ -6734,6 +7469,12 @@ mod tests {
             ..sample_in_process_config()
         };
         assert_eq!(agent_update_keepalive_interval_ticks(&fast_config), 4);
+
+        let override_config = InProcessLiveFeedConfig {
+            agent_update_keepalive_ticks_override: Some(3),
+            ..sample_in_process_config()
+        };
+        assert_eq!(agent_update_keepalive_interval_ticks(&override_config), 3);
     }
 
     #[test]
@@ -6742,6 +7483,28 @@ mod tests {
         assert!(!should_send_agent_update_keepalive(4, Some(0), 5));
         assert!(should_send_agent_update_keepalive(5, Some(0), 5));
         assert!(should_send_agent_update_keepalive(10, Some(5), 0));
+    }
+
+    #[test]
+    fn stress_test_mode_parses_single_live_texture_center_aliases() {
+        assert_eq!(
+            StressTestMode::from_value(Some("live_texture")),
+            StressTestMode::SingleLiveTextureCenter
+        );
+        assert_eq!(
+            StressTestMode::from_value(Some("single_live_texture")),
+            StressTestMode::SingleLiveTextureCenter
+        );
+        assert_eq!(
+            StressTestMode::from_value(Some("7")),
+            StressTestMode::SingleLiveTextureCenter
+        );
+    }
+
+    #[test]
+    fn fixture_mesh_ids_from_csv_normalizes_and_filters() {
+        let parsed = fixture_mesh_ids_from_csv(" abc ,DEF,, 123 ");
+        assert_eq!(parsed, vec!["abc", "def", "123"]);
     }
 
     #[test]
@@ -6796,6 +7559,146 @@ mod tests {
     }
 
     #[test]
+    fn summarize_non_baseline_caps_by_host_excludes_object_ingress_baseline() {
+        let entries = BTreeMap::from([
+            (
+                String::from("EventQueueGet"),
+                String::from("https://simhost-aaa.agni.secondlife.io:12043/cap/event"),
+            ),
+            (
+                String::from("RegionObjects"),
+                String::from("https://simhost-aaa.agni.secondlife.io:12043/cap/regionobjects"),
+            ),
+            (
+                String::from("GetDisplayNames"),
+                String::from("https://simhost-aaa.agni.secondlife.io:12043/cap/displaynames"),
+            ),
+            (
+                String::from("GetTexture"),
+                String::from("http://asset-cdn.glb.agni.lindenlab.com/?texture_id=test"),
+            ),
+            (
+                String::from("ViewerAsset"),
+                String::from("http://asset-cdn.glb.agni.lindenlab.com/cap/viewerasset"),
+            ),
+        ]);
+
+        let summary = summarize_non_baseline_caps_by_host(&entries, 16);
+        assert!(summary.contains("simhost-aaa:count=1"));
+        assert!(summary.contains("names=GetDisplayNames"));
+        assert!(summary.contains("asset-cdn:count=2"));
+        assert!(summary.contains("GetTexture"));
+        assert!(summary.contains("ViewerAsset"));
+        assert!(!summary.contains("EventQueueGet"));
+        assert!(!summary.contains("RegionObjects"));
+    }
+
+    #[test]
+    fn extract_enable_simulator_endpoint_prefers_sim_ip_and_port() {
+        let target = viewer_net::EventQueueSimulatorTarget {
+            message: String::from("EnableSimulator"),
+            sim_ip_and_port: Some(String::from("16.144.39.130:13001")),
+            ip: Some(String::from("1.2.3.4")),
+            port: Some(String::from("1234")),
+            ..Default::default()
+        };
+        let endpoint = extract_enable_simulator_endpoint(&target)
+            .expect("endpoint should decode from sim_ip_and_port");
+        assert_eq!(
+            endpoint,
+            EnableSimulatorEndpoint::IpPort {
+                sim_ip: String::from("16.144.39.130"),
+                port: 13001,
+                source: "sim_ip_and_port",
+            }
+        );
+    }
+
+    #[test]
+    fn extract_enable_simulator_endpoint_falls_back_to_port_only() {
+        let target = viewer_net::EventQueueSimulatorTarget {
+            message: String::from("EnableSimulator"),
+            port: Some(String::from("13028")),
+            ..Default::default()
+        };
+        let endpoint = extract_enable_simulator_endpoint(&target)
+            .expect("endpoint should decode from port fallback");
+        assert_eq!(endpoint, EnableSimulatorEndpoint::PortOnly { port: 13028 });
+    }
+
+    #[test]
+    fn extract_enable_simulator_endpoint_uses_viewer_net_decoded_endpoint() {
+        let target = viewer_net::EventQueueSimulatorTarget {
+            message: String::from("EnableSimulator"),
+            endpoint_ip: Some(String::from("16.144.39.130")),
+            endpoint_port: Some(13001),
+            endpoint_source: Some(String::from("simulatorinfo_binary_ip_port")),
+            ..Default::default()
+        };
+        let endpoint = extract_enable_simulator_endpoint(&target)
+            .expect("endpoint should use viewer_net decoded endpoint");
+        assert_eq!(
+            endpoint,
+            EnableSimulatorEndpoint::IpPort {
+                sim_ip: String::from("16.144.39.130"),
+                port: 13001,
+                source: "simulatorinfo_binary_ip_port",
+            }
+        );
+    }
+
+    #[test]
+    fn build_lane_probe_shape_matrix_splits_immediate_and_gated_tasks() {
+        let entries = BTreeMap::from([
+            (
+                String::from("SimulatorFeatures"),
+                String::from("https://simhost-aaa.agni.secondlife.io:12043/cap/simfeatures"),
+            ),
+            (
+                String::from("InterestList"),
+                String::from("https://simhost-aaa.agni.secondlife.io:12043/cap/interest"),
+            ),
+            (
+                String::from("UntrustedSimulatorMessage"),
+                String::from("https://simhost-aaa.agni.secondlife.io:12043/cap/untrusted"),
+            ),
+            (
+                String::from("ViewerAsset"),
+                String::from("http://asset-cdn.glb.agni.lindenlab.com/cap/viewerasset"),
+            ),
+        ]);
+        let mut cfg = sample_in_process_config();
+        cfg.lane_probe_asset_ids = vec![
+            String::from("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            String::from("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        ];
+
+        let (immediate, gated) = build_lane_probe_shape_matrix(&entries, &cfg);
+        assert!(!immediate.is_empty());
+        assert!(!gated.is_empty());
+        assert!(
+            immediate
+                .iter()
+                .all(|task| task.capability_name == "ViewerAsset")
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|task| task.capability_name == "SimulatorFeatures")
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|task| task.capability_name == "InterestList")
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|task| task.capability_name == "UntrustedSimulatorMessage")
+        );
+    }
+
+    #[test]
     fn summarize_region_objects_inspection_includes_typed_sample_summary() {
         let mut inspection = RegionObjectsInspection::default();
         inspection
@@ -6811,6 +7714,8 @@ mod tests {
                 walkability_coefficients: Some([100, 100, 100, 100]),
                 landimpact: Some(2),
             });
+        inspection.candidate_mesh_asset_ids =
+            vec![String::from("947d4505-eb76-2ef5-c049-e7882881d689")];
 
         let summary = summarize_region_objects_inspection(&inspection);
         assert!(summary.contains("typed_sample="));
@@ -6819,6 +7724,7 @@ mod tests {
         assert!(summary.contains("walkability=100/100/100/100"));
         assert!(summary.contains("description_shape=free_text"));
         assert!(summary.contains("landimpact=2"));
+        assert!(summary.contains("mesh_candidates=947d4505-eb76-2ef5-c049-e7882881d689"));
     }
 
     fn sample_in_process_config() -> InProcessLiveFeedConfig {
@@ -6841,11 +7747,19 @@ mod tests {
             auto_teleport_slurl: None,
             auto_teleport_delay_ticks: 40,
             region_objects_reprobe_delay_ticks: 80,
+            lludp_startup_parity_bundle: false,
+            require_region_handshake_reply: false,
+            agent_update_far: DEFAULT_AGENT_UPDATE_FAR,
+            agent_update_keepalive_ticks_override: None,
             run_probe: true,
             worker_tick_ms: 60,
             event_queue_poll_timeout_ms: 45_000,
             event_queue_poll_every_ticks: 10,
             event_queue_failures_before_reconnect: 0,
+            event_queue_cap_not_found_before_reconnect: 3,
+            capability_probes_require_event_queue_ok: true,
+            lane_probe_asset_ids: Vec::new(),
+            object_uuid_focus: None,
             social_poll_timeout_ms: 35,
             social_poll_max_packets: 4,
             nearby_poll_timeout_ms: 40,
@@ -6864,6 +7778,177 @@ mod tests {
         assert!(parse_bool_like("YES"));
         assert!(!parse_bool_like("false"));
         assert!(!parse_bool_like("0"));
+    }
+
+    #[test]
+    fn canonical_uuid_like_validator_is_strict() {
+        assert!(is_canonical_uuid_like(
+            "10930d3b-1821-c584-a0c7-28a34999800d"
+        ));
+        assert!(!is_canonical_uuid_like("10930d3b1821c584a0c728a34999800d"));
+        assert!(!is_canonical_uuid_like("not-a-uuid"));
+    }
+
+    #[test]
+    fn focus_filter_keeps_only_matching_object_id() {
+        let mut cfg = sample_in_process_config();
+        cfg.object_uuid_focus = Some(String::from("10930d3b-1821-c584-a0c7-28a34999800d"));
+        let mut objects = vec![
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 1,
+                scale_centi: Some([100, 100, 100]),
+                position_centi: None,
+                mesh_id: None,
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: Some(String::from("10930d3b-1821-c584-a0c7-28a34999800d")),
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 2,
+                scale_centi: Some([100, 100, 100]),
+                position_centi: None,
+                mesh_id: None,
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: Some(String::from("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")),
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 3,
+                scale_centi: Some([100, 100, 100]),
+                position_centi: None,
+                mesh_id: None,
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+        ];
+
+        filter_object_feed_objects_by_focus(&mut objects, &cfg);
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects[0].object_id.as_deref(),
+            Some("10930d3b-1821-c584-a0c7-28a34999800d")
+        );
+    }
+
+    #[test]
+    fn event_queue_cap_not_found_detection_is_bounded() {
+        assert!(is_event_queue_cap_not_found_error(
+            "http status 404 Not Found: cap not found: 'abc'"
+        ));
+        assert!(!is_event_queue_cap_not_found_error(
+            "transport error: timeout waiting for response"
+        ));
+    }
+
+    #[test]
+    fn lludp_gate_line_reports_fail_without_object_update_evidence() {
+        let timeline = viewer_net::FirstSimulatorStartupTimelineSummary {
+            first_object_update_index: None,
+            ..Default::default()
+        };
+        let decoded = viewer_net::SimulatorPayloadDecodeSummary {
+            object_feed_update_messages: 0,
+            object_feed_total_objects: 0,
+            object_feed_objects: Vec::new(),
+            ..Default::default()
+        };
+        let line = format_lludp_startup_object_gate_line("startup", &timeline, &decoded);
+        assert!(line.contains("verdict=FAIL"));
+        assert!(line.contains("object_update=none"));
+        assert!(line.contains("local_ids=none"));
+    }
+
+    #[test]
+    fn lludp_gate_line_reports_pass_with_object_update_and_local_ids() {
+        let timeline = viewer_net::FirstSimulatorStartupTimelineSummary {
+            first_object_update_index: Some(12),
+            ..Default::default()
+        };
+        let decoded = viewer_net::SimulatorPayloadDecodeSummary {
+            object_feed_update_messages: 3,
+            object_feed_total_objects: 2,
+            object_feed_objects: vec![
+                viewer_net::DecodedObjectFeedObject {
+                    local_id: 20,
+                    scale_centi: None,
+                    position_centi: None,
+                    mesh_id: None,
+                    texture_id: None,
+                    default_face_material: None,
+                    face_material_overrides: Vec::new(),
+                    object_id: None,
+                },
+                viewer_net::DecodedObjectFeedObject {
+                    local_id: 10,
+                    scale_centi: None,
+                    position_centi: None,
+                    mesh_id: None,
+                    texture_id: None,
+                    default_face_material: None,
+                    face_material_overrides: Vec::new(),
+                    object_id: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let line = format_lludp_startup_object_gate_line("startup", &timeline, &decoded);
+        assert!(line.contains("verdict=PASS"));
+        assert!(line.contains("object_update=12"));
+        assert!(line.contains("local_ids=10,20"));
+    }
+
+    #[test]
+    fn startup_interest_gate_line_reports_missing_requirements() {
+        let gate = viewer_net::FirstSimulatorStartupInterestGateSummary {
+            passed: false,
+            required: vec![viewer_net::FirstSimulatorStartupInterestSendEvidence {
+                message: String::from("AgentThrottle"),
+                order_index: 1,
+                packet_id: 12,
+            }],
+            missing: vec![
+                String::from("AgentUpdate"),
+                String::from("AgentHeightWidth"),
+            ],
+        };
+        let line = format_startup_interest_gate_line("startup", &gate);
+        assert!(line.contains("startup_interest_gate: verdict=FAIL"));
+        assert!(line.contains("required=AgentThrottle@1#12"));
+        assert!(line.contains("missing=AgentUpdate,AgentHeightWidth"));
+        assert!(line.contains("classification=startup_send_path_defect"));
+    }
+
+    #[test]
+    fn classify_session_residency_is_degraded_when_event_queue_is_failing() {
+        let timeline = viewer_net::FirstSimulatorStartupTimelineSummary {
+            first_agent_movement_complete_index: Some(2),
+            first_region_handshake_index: Some(3),
+            ..Default::default()
+        };
+        let region = viewer_net::RegionTransitionControlSummary::default();
+        let residency = classify_session_residency(&timeline, &region, true, 2, 1, 0, 0);
+        assert_eq!(residency.state, "degraded");
+    }
+
+    #[test]
+    fn classify_session_residency_is_child_likely_when_enable_simulator_is_seen() {
+        let timeline = viewer_net::FirstSimulatorStartupTimelineSummary {
+            first_agent_movement_complete_index: Some(2),
+            ..Default::default()
+        };
+        let region = viewer_net::RegionTransitionControlSummary {
+            observations: 1,
+            crossed_region: 0,
+            confirm_enable_simulator: 0,
+            not_seen_in_run: false,
+        };
+        let residency = classify_session_residency(&timeline, &region, true, 0, 0, 4, 1);
+        assert_eq!(residency.state, "child_likely");
     }
 
     #[test]
@@ -6991,6 +8076,66 @@ mod tests {
         assert_eq!(enabled.output_dir, PathBuf::from("tmp/shots"));
         assert_eq!(enabled.every_n_frames, 8);
         assert_eq!(enabled.max_frames, 3);
+    }
+
+    #[test]
+    fn mesh_verification_state_parses_defaults_and_target() {
+        let vars = HashMap::<String, String>::from([
+            (String::from("VIEWER_APP_MESH_VERIFY"), String::from("true")),
+            (
+                String::from("VIEWER_APP_MESH_VERIFY_ID"),
+                String::from("947d4505-eb76-2ef5-c049-e7882881d689"),
+            ),
+            (
+                String::from("VIEWER_APP_MESH_VERIFY_LOG_PATH"),
+                String::from("artifacts/logs/custom_mesh_verify.jsonl"),
+            ),
+            (
+                String::from("VIEWER_APP_MESH_VERIFY_SCREENSHOT_DIR"),
+                String::from("artifacts/screenshots_mesh_verify"),
+            ),
+        ]);
+
+        let state = mesh_verification_state_from_lookup(|k| vars.get(k).cloned());
+        let config = state.config.expect("mesh verification should be enabled");
+        assert_eq!(
+            config.target_mesh_id,
+            Some((String::from("947d4505-eb76-2ef5-c049-e7882881d689"), 0))
+        );
+        assert_eq!(
+            config.log_path,
+            PathBuf::from("artifacts/logs/custom_mesh_verify.jsonl")
+        );
+        assert_eq!(
+            config.screenshot_dir,
+            Some(PathBuf::from("artifacts/screenshots_mesh_verify"))
+        );
+    }
+
+    #[test]
+    fn live_mesh_asset_summary_reports_decoded_state_details() {
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            (String::from("mesh-a"), 0),
+            LiveMeshAssetState::Decoded {
+                asset: LiveMeshAssetBytes {
+                    bytes: vec![0x7b, 0x00, 0x00],
+                    byte_len: 3,
+                    byte_signature: String::from("7b0000"),
+                    format_hint: viewer_asset::MeshSourceFormat::SecondLifeMesh,
+                },
+                format: viewer_asset::MeshSourceFormat::SecondLifeMesh,
+                vertices: 12,
+                submeshes: 2,
+            },
+        );
+
+        assert_eq!(live_mesh_queue_counts(&assets), (0, 0, 1, 0));
+        let line = live_mesh_asset_summary_line(&assets);
+        assert!(line.contains("mesh_last=decoded"));
+        assert!(line.contains("bytes=3"));
+        assert!(line.contains("vertices=12"));
+        assert!(line.contains("submeshes=2"));
     }
 
     #[test]
@@ -7616,6 +8761,178 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_texture_request_ids_keeps_visible_when_fixture_empty() {
+        let fixture_ids = Vec::<AssetID>::new();
+        let visible_ids = vec![AssetID::new("tex_visible_a"), AssetID::new("tex_visible_b")];
+        let merged = merge_texture_request_ids(&fixture_ids, &visible_ids);
+        assert_eq!(
+            merged,
+            vec![AssetID::new("tex_visible_a"), AssetID::new("tex_visible_b")]
+        );
+    }
+
+    #[test]
+    fn test_extract_decoded_object_feed_mesh_ids_is_deterministic_and_capped() {
+        let mut snapshot = offline_snapshot();
+        snapshot.decoded_object_feed_objects = vec![
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 1,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("BBB")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 2,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("aaa")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 3,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("bbb")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 4,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("   ")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 5,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("cccccccc-cccc-cccc-cccc-cccccccccccc")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: Some(String::from("cccccccc-cccc-cccc-cccc-cccccccccccc")),
+            },
+        ];
+
+        let ids = extract_decoded_object_feed_mesh_ids(&snapshot, 10);
+        assert_eq!(
+            ids,
+            vec![(String::from("aaa"), 0), (String::from("bbb"), 0)]
+        );
+
+        let ids_capped = extract_decoded_object_feed_mesh_ids(&snapshot, 1);
+        assert_eq!(ids_capped, vec![(String::from("aaa"), 0)]);
+    }
+
+    #[test]
+    fn test_extract_decoded_object_feed_texture_ids_is_deterministic_and_capped() {
+        let mut snapshot = offline_snapshot();
+        snapshot.decoded_object_feed_objects = vec![
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 1,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: None,
+                texture_id: Some(AssetID::new("bbb")),
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 2,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: None,
+                texture_id: Some(AssetID::new("aaa")),
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 3,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: None,
+                texture_id: Some(AssetID::new("bbb")),
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 4,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: None,
+                texture_id: Some(AssetID::new("   ")),
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+        ];
+
+        let ids = extract_decoded_object_feed_texture_ids(&snapshot, 10);
+        assert_eq!(ids, vec![AssetID::new("aaa"), AssetID::new("bbb")]);
+
+        let ids_capped = extract_decoded_object_feed_texture_ids(&snapshot, 1);
+        assert_eq!(ids_capped, vec![AssetID::new("bbb")]);
+    }
+
+    #[test]
+    fn test_extract_decoded_object_feed_texture_ids_includes_face_material_ids() {
+        let mut snapshot = offline_snapshot();
+        snapshot.decoded_object_feed_objects = vec![viewer_core::DecodedWorldObjectFeedObject {
+            local_id: 9,
+            scale_centi: None,
+            position_centi: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: Some(viewer_core::DecodedWorldObjectFaceMaterial {
+                face_id: 0,
+                texture_id: Some(AssetID::new("face_default")),
+                normal_id: Some(AssetID::new("face_normal")),
+                specular_id: Some(AssetID::new("face_specular")),
+                material_id: None,
+                rgba: [255, 255, 255, 255],
+                offset_s: 0,
+                offset_t: 0,
+                scale_s: 10_000,
+                scale_t: 10_000,
+                rotation: 0,
+                bump: 0,
+                fullbright: false,
+                shiny: 0,
+                media_flags: 0,
+                glow: 0,
+            }),
+            face_material_overrides: vec![],
+            object_id: None,
+        }];
+
+        let ids = extract_decoded_object_feed_texture_ids(&snapshot, 10);
+        assert_eq!(
+            ids,
+            vec![
+                AssetID::new("face_default"),
+                AssetID::new("face_normal"),
+                AssetID::new("face_specular"),
+            ]
+        );
+    }
+
+    #[test]
     fn continuity_priority_mapping_assigns_active_previous_neighbor() {
         let ids = vec![
             AssetID::new("a"),
@@ -7851,5 +9168,280 @@ mod tests {
             Some("continuity probe already in flight")
         );
         assert_eq!(new_probe, Some(1_000));
+    }
+
+    #[test]
+    fn live_texture_retry_policy_is_bounded_and_reason_aware() {
+        assert!(should_retry_live_texture_failure(
+            viewer_asset::AssetFetchFailureReason::Transport,
+            1
+        ));
+        assert!(should_retry_live_texture_failure(
+            viewer_asset::AssetFetchFailureReason::Timeout,
+            2
+        ));
+        assert!(!should_retry_live_texture_failure(
+            viewer_asset::AssetFetchFailureReason::MissingCapability,
+            1
+        ));
+        assert!(!should_retry_live_texture_failure(
+            viewer_asset::AssetFetchFailureReason::Transport,
+            LIVE_TEXTURE_FETCH_MAX_ATTEMPTS
+        ));
+    }
+
+    #[test]
+    fn live_texture_retry_backoff_grows_monotonically() {
+        let first = live_texture_retry_backoff_ticks(1);
+        let second = live_texture_retry_backoff_ticks(2);
+        let third = live_texture_retry_backoff_ticks(3);
+        assert!(first >= LIVE_TEXTURE_FETCH_RETRY_BASE_TICKS);
+        assert!(second >= first);
+        assert!(third >= second);
+    }
+
+    #[test]
+    fn non_retryable_texture_http_status_is_bounded() {
+        assert!(non_retryable_texture_http_status(401));
+        assert!(non_retryable_texture_http_status(403));
+        assert!(non_retryable_texture_http_status(404));
+        assert!(!non_retryable_texture_http_status(429));
+        assert!(!non_retryable_texture_http_status(500));
+    }
+
+    #[test]
+    fn classify_mesh_403_bucket_detects_access_denied() {
+        let err = ConnectionError::HttpStatus {
+            status: "403".parse().expect("valid status code"),
+            body: String::from("<Error><Code>AccessDenied</Code></Error>"),
+        };
+        assert_eq!(classify_mesh_403_bucket(&err), Some("AccessDenied"));
+    }
+
+    #[test]
+    fn classify_mesh_403_bucket_returns_none_for_non_403() {
+        let err = ConnectionError::HttpStatus {
+            status: "404".parse().expect("valid status code"),
+            body: String::from("<Error><Code>NoSuchKey</Code></Error>"),
+        };
+        assert_eq!(classify_mesh_403_bucket(&err), None);
+    }
+
+    #[test]
+    fn summarize_decoded_object_feed_mesh_ids_reports_count_and_sorted_sample() {
+        let mut snapshot = offline_snapshot();
+        snapshot.decoded_object_feed_objects = vec![
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 1,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("bbb")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 2,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("aaa")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 3,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("ccc")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+        ];
+
+        let (count, sample) = summarize_decoded_object_feed_mesh_ids(&snapshot, 2);
+        assert_eq!(count, 3);
+        assert_eq!(sample, "aaa,bbb");
+    }
+
+    #[test]
+    fn format_object_feed_message_family_counts_reports_selected_families() {
+        let summary = viewer_net::SimulatorPayloadDecodeSummary {
+            object_feed_object_update_messages: 2,
+            object_feed_object_update_compressed_messages: 3,
+            object_feed_object_extra_params_messages: 4,
+            object_feed_improved_terse_messages: 5,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_object_feed_message_family_counts(&summary),
+            "ObjectUpdate:2,ObjectUpdateCompressed:3,ObjectExtraParams:4,ImprovedTerseObjectUpdate:5"
+        );
+    }
+
+    #[test]
+    fn format_object_feed_mesh_hit_counts_reports_selected_families() {
+        let summary = viewer_net::SimulatorPayloadDecodeSummary {
+            object_feed_object_update_mesh_hits: 6,
+            object_feed_object_update_compressed_mesh_hits: 7,
+            object_feed_object_extra_params_mesh_hits: 8,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_object_feed_mesh_hit_counts(&summary),
+            "ObjectUpdate:6,ObjectUpdateCompressed:7,ObjectExtraParams:8"
+        );
+    }
+
+    #[test]
+    fn format_object_feed_state_export_counts_reports_raw_and_export_views() {
+        let mut snapshot = offline_snapshot();
+        snapshot.decoded_object_feed_total_objects = 129;
+        snapshot.decoded_object_feed_export_truncated = true;
+        snapshot.decoded_object_feed_objects = vec![
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 1,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: Some(String::from("aaa")),
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            viewer_core::DecodedWorldObjectFeedObject {
+                local_id: 2,
+                scale_centi: None,
+                position_centi: None,
+                mesh_id: None,
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+        ];
+        let summary = viewer_net::SimulatorPayloadDecodeSummary {
+            object_feed_state_mesh_objects: 7,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_object_feed_state_export_counts(&snapshot, &summary),
+            "state_total_objects=129 export_objects=2 state_mesh_objects=7 export_mesh_objects=1 export_truncated=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_live_visual_from_connection_preserves_transport_total_object_count() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let listener_addr = listener.local_addr().expect("listener addr should exist");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("request should arrive");
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await.expect("request should read");
+            let body = serde_json::json!({
+                "login": true,
+                "reason": "connect",
+                "agent_id": "11111111-1111-1111-1111-111111111111",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "secure_session_id": "33333333-3333-3333-3333-333333333333",
+                "circuit_code": 424242,
+                "sim_ip": "127.0.0.1",
+                "sim_port": 13001,
+                "region_x": 1000,
+                "region_y": 1001,
+                "seed_capability": "https://seed-cap.example.invalid"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response should write");
+        });
+
+        let mut connection = viewer_net::Connection::new(viewer_net::ConnectionConfig {
+            endpoint: format!("http://{}/login", listener_addr),
+            connect_timeout: Duration::from_secs(5),
+            wire_format: LoginWireFormat::Json,
+        });
+        connection.connect().await.expect("connect should succeed");
+        connection
+            .login_with_adapter(
+                &SecondLifeAdapter,
+                LoginIntent {
+                    username: String::from("user"),
+                    password: String::from("pass"),
+                    start_location: StartLocationIntent::Saved(StartLocation::Last),
+                    agree_to_tos: false,
+                    read_critical: true,
+                    mfa_token: None,
+                },
+            )
+            .await
+            .expect("login should succeed");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.push(129);
+        for local_id in 1u32..=129 {
+            body.extend_from_slice(&local_id.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let mut payload = vec![
+            0x00, // flags
+            0x00, 0x00, 0x00, 0x01, // packet sequence
+            0x00, // extra header offset
+            0x0E, // ObjectUpdateCached high-frequency id
+        ];
+        payload.extend_from_slice(&body);
+
+        connection
+            .observe_first_simulator_inbound_payload(&payload)
+            .expect("cached update should be observed");
+
+        let mut snapshot = offline_snapshot();
+        update_live_visual_from_connection(&mut snapshot, &connection, &sample_in_process_config());
+
+        assert_eq!(snapshot.decoded_object_feed_total_objects, 129);
+        assert_eq!(snapshot.decoded_object_feed_objects.len(), 128);
+        assert!(snapshot.decoded_object_feed_export_truncated);
+    }
+
+    #[test]
+    fn format_mesh_fetch_attempt_line_includes_cap_variant_status_and_bucket() {
+        let candidate = viewer_grid::MeshCapabilityRequestCandidate {
+            capability_name: String::from("ViewerAsset"),
+            url_variant: String::from("v1"),
+            url: String::from("https://asset-cdn.example.com/viewerasset/?mesh_id=test-mesh"),
+        };
+        let attempt = viewer_net::AssetFetchAttempt {
+            url: candidate.url.clone(),
+            range_header: Some(String::from("bytes=0-")),
+            status: Some(403),
+            error: None,
+            response_body: Some(String::from("<Error><Code>AccessDenied</Code></Error>")),
+        };
+
+        let line = format_mesh_fetch_attempt_line("test-mesh", 0, Some(&candidate), &attempt);
+        assert!(line.contains("id=test-mesh"));
+        assert!(line.contains("cap=ViewerAsset"));
+        assert!(line.contains("url_variant=v1"));
+        assert!(line.contains("status=403"));
+        assert!(line.contains("bucket=AccessDenied"));
     }
 }
