@@ -126,6 +126,14 @@ const STARTUP_AGENT_HEIGHT: u16 = 720;
 const STARTUP_AGENT_WIDTH: u16 = 1280;
 const STARTUP_AGENT_UPDATE_FAR: f32 = 96.0;
 const STARTUP_AGENT_ANIMATION_ID: &str = "efcf670c-2d18-8128-973a-034ebc806b67";
+
+fn object_feed_export_cap() -> usize {
+    std::env::var("VIEWER_OBJECT_FEED_EXPORT_MAX")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(32, MAX_OBJECT_FEED_OBJECTS))
+        .unwrap_or(MAX_OBJECT_FEED_EXPORT_OBJECTS)
+}
 // Firestorm sends viewer capability bits here (not echoed simulator RegionFlags).
 // OpenSim gates initial data on bit 0x1000 in RegionHandshakeReply.
 const REGION_HANDSHAKE_REPLY_FLAG_SUPPORTS_SELF_APPEARANCE: u32 = 0x0000_1000;
@@ -874,6 +882,7 @@ pub struct DecodedObjectFaceMaterial {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedObjectFeedObject {
     pub local_id: u32,
+    pub parent_local_id: Option<u32>,
     pub scale_centi: Option<[u16; 3]>,
     pub position_centi: Option<[i32; 3]>,
     pub rotation_quat_i16: Option<[i16; 4]>,
@@ -1449,6 +1458,7 @@ impl ObjectFaceMaterialState {
 #[derive(Debug, Clone, Default)]
 struct ObjectFeedObjectState {
     last_seen_tick: u64,
+    parent_local_id: Option<u32>,
     scale_centi: Option<[u16; 3]>,
     position_centi: Option<[i32; 3]>,
     rotation_quat_i16: Option<[i16; 4]>,
@@ -1462,6 +1472,7 @@ struct ObjectFeedObjectState {
 #[derive(Debug, Clone, Default)]
 struct DecodedObjectFeedIngressObject {
     local_id: u32,
+    parent_local_id: Option<u32>,
     scale_centi: Option<[u16; 3]>,
     position_centi: Option<[i32; 3]>,
     rotation_quat_i16: Option<[i16; 4]>,
@@ -1940,6 +1951,7 @@ impl Connection {
     fn object_feed_upsert(
         &mut self,
         local_id: u32,
+        parent_local_id: Option<u32>,
         scale_centi: Option<[u16; 3]>,
         position_centi: Option<[i32; 3]>,
         rotation_quat_i16: Option<[i16; 4]>,
@@ -1955,6 +1967,11 @@ impl Connection {
         self.object_feed_tick = self.object_feed_tick.saturating_add(1);
         let entry = self.object_feed_objects.entry(local_id).or_default();
         entry.last_seen_tick = self.object_feed_tick;
+        if let Some(parent_local_id) = parent_local_id
+            && parent_local_id != 0
+        {
+            entry.parent_local_id = Some(parent_local_id);
+        }
         if let Some(scale) = scale_centi {
             entry.scale_centi = Some(scale);
         }
@@ -2009,6 +2026,7 @@ impl Connection {
     }
 
     fn refresh_object_feed_summary_export(&mut self) {
+        let export_cap = object_feed_export_cap();
         self.simulator_payload_decode_summary
             .object_feed_total_objects = self.object_feed_objects.len();
         self.simulator_payload_decode_summary
@@ -2022,8 +2040,7 @@ impl Connection {
             })
             .count();
         self.simulator_payload_decode_summary
-            .object_feed_export_truncated =
-            self.object_feed_objects.len() > MAX_OBJECT_FEED_EXPORT_OBJECTS;
+            .object_feed_export_truncated = self.object_feed_objects.len() > export_cap;
         let export_truncated = self
             .simulator_payload_decode_summary
             .object_feed_export_truncated;
@@ -2034,21 +2051,102 @@ impl Connection {
             .map(|(id, state)| (*id, state.clone()))
             .collect();
         if export_truncated {
-            entries.sort_by(|a, b| {
+            let mut roots: Vec<(u32, ObjectFeedObjectState)> = Vec::new();
+            let mut children: Vec<(u32, ObjectFeedObjectState)> = Vec::new();
+            for entry in entries {
+                if entry.1.parent_local_id.is_some() {
+                    children.push(entry);
+                } else {
+                    roots.push(entry);
+                }
+            }
+            let referenced_parent_ids: BTreeSet<u32> = children
+                .iter()
+                .filter_map(|(_, state)| state.parent_local_id)
+                .collect();
+            let order = |a: &(u32, ObjectFeedObjectState), b: &(u32, ObjectFeedObjectState)| {
                 b.1.mesh_id_bytes
                     .is_some_and(|id| !is_null_uuid_bytes(id))
                     .cmp(&a.1.mesh_id_bytes.is_some_and(|id| !is_null_uuid_bytes(id)))
                     .then_with(|| b.1.last_seen_tick.cmp(&a.1.last_seen_tick))
                     .then_with(|| a.0.cmp(&b.0))
+            };
+            roots.sort_by(|a, b| {
+                referenced_parent_ids
+                    .contains(&b.0)
+                    .cmp(&referenced_parent_ids.contains(&a.0))
+                    .then_with(|| order(a, b))
             });
+            children.sort_by(order);
+
+            let child_quota = children.len().min(export_cap / 2);
+            let initial_root_budget = export_cap.saturating_sub(child_quota);
+            let mut selected: Vec<(u32, ObjectFeedObjectState)> = Vec::with_capacity(export_cap);
+            let mut selected_root_ids = BTreeSet::<u32>::new();
+
+            let mut roots_iter = roots.into_iter();
+            for _ in 0..initial_root_budget {
+                let Some((id, state)) = roots_iter.next() else {
+                    break;
+                };
+                selected_root_ids.insert(id);
+                selected.push((id, state));
+            }
+
+            let mut deferred_children: Vec<(u32, ObjectFeedObjectState)> = Vec::new();
+            for (id, state) in children {
+                if selected.len() >= export_cap {
+                    break;
+                }
+                if state
+                    .parent_local_id
+                    .is_some_and(|parent| selected_root_ids.contains(&parent))
+                {
+                    selected.push((id, state));
+                } else {
+                    deferred_children.push((id, state));
+                }
+            }
+
+            while selected.len() < export_cap {
+                let Some((id, state)) = roots_iter.next() else {
+                    break;
+                };
+                selected_root_ids.insert(id);
+                selected.push((id, state));
+            }
+
+            let mut remaining_children: Vec<(u32, ObjectFeedObjectState)> = Vec::new();
+            for (id, state) in deferred_children {
+                if selected.len() >= export_cap {
+                    break;
+                }
+                if state
+                    .parent_local_id
+                    .is_some_and(|parent| selected_root_ids.contains(&parent))
+                {
+                    selected.push((id, state));
+                } else {
+                    remaining_children.push((id, state));
+                }
+            }
+
+            for (id, state) in remaining_children {
+                if selected.len() >= export_cap {
+                    break;
+                }
+                selected.push((id, state));
+            }
+            entries = selected;
         } else {
             entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries.truncate(export_cap);
         }
-        entries.truncate(MAX_OBJECT_FEED_EXPORT_OBJECTS);
         let export: Vec<DecodedObjectFeedObject> = entries
             .into_iter()
             .map(|(local_id, state)| DecodedObjectFeedObject {
                 local_id,
+                parent_local_id: state.parent_local_id.filter(|id| *id != 0),
                 scale_centi: state.scale_centi,
                 position_centi: state.position_centi,
                 rotation_quat_i16: state.rotation_quat_i16,
@@ -2667,6 +2765,7 @@ impl Connection {
                         for obj in objects {
                             self.object_feed_upsert(
                                 obj.local_id,
+                                obj.parent_local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
                                 obj.rotation_quat_i16,
@@ -2697,6 +2796,7 @@ impl Connection {
                         for obj in objects {
                             self.object_feed_upsert(
                                 obj.local_id,
+                                obj.parent_local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
                                 obj.rotation_quat_i16,
@@ -2728,6 +2828,7 @@ impl Connection {
                                 None,
                                 None,
                                 None,
+                                None,
                                 &[],
                                 None,
                             );
@@ -2748,6 +2849,7 @@ impl Connection {
                         for obj in objects {
                             self.object_feed_upsert(
                                 obj.local_id,
+                                obj.parent_local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
                                 obj.rotation_quat_i16,
@@ -2778,6 +2880,7 @@ impl Connection {
                         for obj in objects {
                             self.object_feed_upsert(
                                 obj.local_id,
+                                obj.parent_local_id,
                                 obj.scale_centi,
                                 obj.position_centi,
                                 obj.rotation_quat_i16,
@@ -9362,7 +9465,7 @@ mod tests {
     use tokio::time::timeout;
     use viewer_grid::{GridLoginResult, SecondLifeAdapter, StartLocation, StartLocationIntent};
     use wiremock::matchers::{
-        body_partial_json, body_string_contains, header, method, path, query_param,
+        body_partial_json, body_string_contains, header, header_exists, method, path, query_param,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -9466,6 +9569,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/cap/"))
             .and(query_param("texture_id", "test-id"))
+            .and(header_exists("accept"))
+            .and(header_exists("user-agent"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
             .expect(1)
             .mount(&server)
@@ -9480,6 +9585,42 @@ mod tests {
             .expect("texture fetch should succeed");
 
         assert_eq!(bytes, b"ok");
+    }
+
+    #[tokio::test]
+    async fn fetch_texture_asset_bytes_reuses_set_cookie_between_attempts() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cap/"))
+            .and(query_param("texture_id", "test-id"))
+            .and(header_exists("accept"))
+            .and(header_exists("user-agent"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("set-cookie", "TexAuth=abc123; Path=/")
+                    .set_body_string("denied first"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cap"))
+            .and(query_param("texture_id", "test-id"))
+            .and(header("cookie", "TexAuth=abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok-cookie".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let urls = viewer_grid::AssetCapabilityPolicy::texture_url_candidates_from_base(
+            &format!("{}/cap", server.uri()),
+            "test-id",
+        );
+        let bytes = fetch_texture_asset_bytes(&urls, Duration::from_secs(1))
+            .await
+            .expect("texture fetch should reuse texture auth cookie");
+
+        assert_eq!(bytes, b"ok-cookie");
     }
 
     #[tokio::test]
@@ -12571,6 +12712,43 @@ mod tests {
     }
 
     #[test]
+    fn decode_object_update_compressed_extracts_parent_local_id_when_flagged() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u64.to_le_bytes()); // RegionHandle
+        body.extend_from_slice(&0u16.to_le_bytes()); // TimeDilation
+        body.push(1); // object count
+        body.extend_from_slice(&0u32.to_le_bytes()); // UpdateFlags
+        let mut data = vec![0u8; 16]; // UUID
+        data.extend_from_slice(&77u32.to_le_bytes()); // LocalID
+        data.push(9); // PCode
+        data.push(0); // State
+        data.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        data.push(0); // Material
+        data.push(0); // ClickAction
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale X = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Y = 1.0
+        data.extend_from_slice(&[0, 0, 128, 63]); // Scale Z = 1.0
+        data.extend_from_slice(&[0, 0, 0, 65]); // Pos X = 8.0
+        data.extend_from_slice(&[0, 0, 128, 65]); // Pos Y = 16.0
+        data.extend_from_slice(&[0, 0, 192, 64]); // Pos Z = 6.0
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot X
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot Y
+        data.extend_from_slice(&[0, 0, 0, 0]); // Rot Z
+        data.extend_from_slice(&0x20u32.to_le_bytes()); // CompressedFlags HAS_PARENT
+        data.extend_from_slice(&[0u8; 16]); // OwnerID
+        data.extend_from_slice(&11u32.to_le_bytes()); // ParentID
+        data.push(0); // ExtraParams count
+        let data_len = u16::try_from(data.len()).expect("len fits u16");
+        body.extend_from_slice(&data_len.to_le_bytes());
+        body.extend_from_slice(&data);
+        let payload =
+            make_high_frequency_packet_with_body(LLUDP_OBJECT_UPDATE_COMPRESSED_HIGH_ID, &body);
+        let objects = decode_object_update_compressed_objects(&payload)
+            .expect("compressed update should decode");
+        assert_eq!(objects[0].parent_local_id, Some(11));
+    }
+
+    #[test]
     fn decode_object_update_compressed_extracts_mesh_id_from_extra_params() {
         let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
 
@@ -12693,6 +12871,7 @@ mod tests {
             parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
         connection.object_feed_upsert(
             77,
+            None,
             Some([100, 120, 80]),
             None,
             None,
@@ -12833,6 +13012,7 @@ mod tests {
         let mesh_id = parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").expect("uuid bytes");
         connection.object_feed_upsert(
             77,
+            None,
             Some([100, 120, 80]),
             None,
             None,
@@ -12880,8 +13060,12 @@ mod tests {
         te.push(0); // texture overrides terminator
         te.extend_from_slice(&[255, 255, 255, 255]); // default rgba
         te.push(0); // rgba overrides terminator
-        for _ in 0..5 {
-            te.extend_from_slice(&10_000i16.to_le_bytes()); // default scale/offset/rot
+        te.extend_from_slice(&1.0f32.to_le_bytes()); // default scale_s
+        te.push(0); // no scale_s overrides
+        te.extend_from_slice(&1.0f32.to_le_bytes()); // default scale_t
+        te.push(0); // no scale_t overrides
+        for _ in 0..3 {
+            te.extend_from_slice(&0i16.to_le_bytes()); // default offset_s/offset_t/rot
             te.push(0); // no overrides
         }
         te.push(0); // default material byte
@@ -12936,6 +13120,7 @@ mod tests {
             parse_uuid_bytes("947d4505-eb76-2ef5-c049-e7882881d689").expect("uuid bytes");
         connection.object_feed_upsert(
             77,
+            None,
             Some([100, 120, 80]),
             None,
             None,
@@ -12968,6 +13153,7 @@ mod tests {
         assert_eq!(objects.len(), 2);
         assert_eq!(objects[0].local_id, 1063635314);
         assert_eq!(objects[0].mesh_id_bytes, None);
+        assert!(objects[0].rotation_quat_i16.is_some());
         assert_eq!(objects[1].local_id, 1063635315);
         assert_eq!(
             objects[1].mesh_id_bytes,
@@ -13052,6 +13238,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(mesh_id),
             None,
             None,
@@ -13059,7 +13246,18 @@ mod tests {
             None,
         );
         for local_id in 2..=129 {
-            connection.object_feed_upsert(local_id, None, None, None, None, None, None, &[], None);
+            connection.object_feed_upsert(
+                local_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            );
         }
         connection.refresh_object_feed_summary_export();
 
@@ -13079,6 +13277,101 @@ mod tests {
                 .iter()
                 .any(|obj| obj.local_id == mesh_local_id && obj.mesh_id.is_some()),
             "mesh-bearing object should survive truncation"
+        );
+    }
+
+    #[test]
+    fn object_feed_export_truncated_keeps_root_objects_for_parent_resolution() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        let root_id = 1u32;
+        connection.object_feed_upsert(
+            root_id,
+            None,
+            Some([100, 100, 100]),
+            Some([12_800, 12_800, 220]),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        );
+        for local_id in 2..=129 {
+            connection.object_feed_upsert(
+                local_id,
+                Some(root_id),
+                Some([100, 100, 100]),
+                Some([100, 0, 0]),
+                None,
+                parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").ok(),
+                None,
+                None,
+                &[],
+                None,
+            );
+        }
+        connection.refresh_object_feed_summary_export();
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert!(summary.object_feed_export_truncated);
+        assert!(
+            summary
+                .object_feed_objects
+                .iter()
+                .any(|obj| obj.local_id == root_id),
+            "at least one root object must remain in truncated export set"
+        );
+    }
+
+    #[test]
+    fn object_feed_export_truncated_balances_roots_and_parented_children() {
+        let mut connection = Connection::new(ConnectionConfig::default());
+        for local_id in 1..=180u32 {
+            connection.object_feed_upsert(
+                local_id,
+                None,
+                Some([100, 100, 100]),
+                Some([12_800, 12_800, 220]),
+                None,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            );
+        }
+        for local_id in 200..=280u32 {
+            connection.object_feed_upsert(
+                local_id,
+                Some(1),
+                Some([100, 100, 100]),
+                Some([100, 0, 0]),
+                None,
+                parse_uuid_bytes("10930d3b-1821-c584-a0c7-28a34999800d").ok(),
+                None,
+                None,
+                &[],
+                None,
+            );
+        }
+        connection.refresh_object_feed_summary_export();
+
+        let summary = connection.simulator_payload_decode_summary();
+        assert!(summary.object_feed_export_truncated);
+        let root_count = summary
+            .object_feed_objects
+            .iter()
+            .filter(|obj| obj.parent_local_id.is_none())
+            .count();
+        let parented_count = summary
+            .object_feed_objects
+            .iter()
+            .filter(|obj| obj.parent_local_id.is_some())
+            .count();
+        assert!(root_count > 0, "truncated export should include roots");
+        assert!(
+            parented_count > 0,
+            "truncated export should include some parented children"
         );
     }
 

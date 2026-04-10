@@ -21,8 +21,17 @@ pub async fn fetch_texture_asset_bytes(
             "GetTexture/ViewerAsset",
         )));
     }
-    fetch_bytes_from_candidate_urls(urls, timeout, Some(TEXTURE_FETCH_ACCEPT_HEADER), None, None)
-        .await
+    let (result, _) = fetch_bytes_from_candidate_urls_with_cookie_state(
+        urls,
+        timeout,
+        Some(TEXTURE_FETCH_ACCEPT_HEADER),
+        None,
+        Some(FIRESTORM_USER_AGENT_HEADER),
+        None,
+        None,
+    )
+    .await;
+    result
 }
 
 pub async fn fetch_mesh_asset_bytes(

@@ -119,12 +119,14 @@ struct AppState {
     transition_visual_state: viewer_core::TransitionVisualState,
     network_debug: NetworkDebugState,
     mesh_verification: MeshVerificationState,
+    render_proof: RenderProofState,
+    last_texture_coverage_emit_ms: Option<u64>,
 }
 
 const RECOVERY_PROBE_COOLDOWN_MS: u64 = 15_000;
 const RECOVERY_ASSET_REFRESH_COOLDOWN_MS: u64 = 5_000;
 const NETWORK_DEBUG_SECTION_MAX_LINES: usize = 8;
-const LIVE_TEXTURE_FETCH_MAX_INFLIGHT: usize = 4;
+const LIVE_TEXTURE_FETCH_MAX_INFLIGHT: usize = 48;
 const LIVE_TEXTURE_FETCH_MAX_ATTEMPTS: u8 = 3;
 const LIVE_TEXTURE_FETCH_RETRY_BASE_TICKS: u64 = 4;
 
@@ -353,6 +355,33 @@ struct MeshVerificationState {
     emitted_events: BTreeSet<String>,
     pending_screenshot: Option<PathBuf>,
     captured_screenshot: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderProofConfig {
+    window_secs: u64,
+    min_sample_ticks: u64,
+    min_proxy_count: usize,
+    min_stable_reuses: u64,
+    max_drift_events: u64,
+    min_texture_decoded: u64,
+    log_path: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct RenderProofState {
+    config: Option<RenderProofConfig>,
+    started_at: Option<Instant>,
+    emitted_final: bool,
+    sample_ticks: u64,
+    max_proxy_count: usize,
+    missing_position_observations: u64,
+    stable_reuses: u64,
+    drift_events: u64,
+    texture_decoded: u64,
+    texture_decode_failed: u64,
+    texture_fetch_failed: u64,
+    last_position_by_local_id: BTreeMap<u32, [f32; 3]>,
 }
 
 impl LiveMeshAssetState {
@@ -1958,6 +1987,8 @@ async fn run_in_process_live_feed(
                     .min(in_flight.first_enqueued_tick);
                 match task_result.outcome {
                     TextureFetchTaskOutcome::Ready(bytes) => {
+                        let byte_len = bytes.len();
+                        let byte_signature = mesh_byte_signature(&bytes);
                         let _ = tx.send(LiveFeedUpdate::TextureAsset {
                             id: id_str.clone(),
                             bytes,
@@ -1967,8 +1998,12 @@ async fn run_in_process_live_feed(
                             RuntimeRelayLevel::Info,
                             "texture_fetch",
                             &format!(
-                                "ready id={} attempt={} priority={:?}",
-                                id_str, task_result.attempt, effective_priority
+                                "ready id={} attempt={} priority={:?} bytes={} signature={}",
+                                id_str,
+                                task_result.attempt,
+                                effective_priority,
+                                byte_len,
+                                byte_signature
                             ),
                         );
                     }
@@ -3757,6 +3792,7 @@ fn update_live_visual_from_connection(
         .iter()
         .map(|obj| viewer_core::DecodedWorldObjectFeedObject {
             local_id: obj.local_id,
+            parent_local_id: obj.parent_local_id,
             scale_centi: obj.scale_centi,
             position_centi: obj.position_centi,
             rotation_quat_i16: obj.rotation_quat_i16,
@@ -5322,6 +5358,7 @@ impl ViewerApp {
         let screenshot_config =
             screenshot_config_from_lookup(|key| std::env::var(key).ok(), stress_test_mode);
         let mesh_verification = mesh_verification_state_from_lookup(|key| std::env::var(key).ok());
+        let render_proof = render_proof_state_from_lookup(|key| std::env::var(key).ok());
 
         let live_visual_state = LiveVisualState::from_env();
         let asset_source_mode =
@@ -5392,6 +5429,8 @@ impl ViewerApp {
                 },
             },
             mesh_verification,
+            render_proof,
+            last_texture_coverage_emit_ms: None,
         };
 
         match state.stress_test_mode {
@@ -5584,6 +5623,250 @@ impl AppState {
                 append_network_debug_line(&mut self.network_debug, "Network", line);
             }
         }
+    }
+
+    fn tick_render_proof(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
+        let Some(config) = self.render_proof.config.clone() else {
+            return;
+        };
+        if self.render_proof.emitted_final {
+            return;
+        }
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        if !snapshot.logged_in {
+            return;
+        }
+
+        let started_at = *self
+            .render_proof
+            .started_at
+            .get_or_insert_with(Instant::now);
+        self.render_proof.sample_ticks = self.render_proof.sample_ticks.saturating_add(1);
+        self.render_proof.max_proxy_count = self
+            .render_proof
+            .max_proxy_count
+            .max(self.scene.world_object_feed_map.len());
+
+        let mut missing_position_local_ids = BTreeSet::<u32>::new();
+        for obj in &snapshot.decoded_object_feed_objects {
+            if obj.position_centi.is_none() {
+                missing_position_local_ids.insert(obj.local_id);
+            }
+        }
+
+        for local_id in missing_position_local_ids {
+            let Some(instance_id) = self.scene.world_object_feed_map.get(&local_id).copied() else {
+                continue;
+            };
+            let Some(instance) = self.scene.instances.get(&instance_id) else {
+                continue;
+            };
+            let current_position = instance.transform.position;
+            self.render_proof.missing_position_observations = self
+                .render_proof
+                .missing_position_observations
+                .saturating_add(1);
+            if let Some(previous) = self
+                .render_proof
+                .last_position_by_local_id
+                .insert(local_id, current_position)
+            {
+                let dx = current_position[0] - previous[0];
+                let dy = current_position[1] - previous[1];
+                let dz = current_position[2] - previous[2];
+                let drift = (dx * dx + dy * dy + dz * dz).sqrt();
+                if drift <= 0.001 {
+                    self.render_proof.stable_reuses =
+                        self.render_proof.stable_reuses.saturating_add(1);
+                } else {
+                    self.render_proof.drift_events =
+                        self.render_proof.drift_events.saturating_add(1);
+                }
+            }
+        }
+
+        if started_at.elapsed().as_secs() < config.window_secs {
+            return;
+        }
+
+        let stable_requirement_met = if self.render_proof.missing_position_observations == 0 {
+            true
+        } else {
+            self.render_proof.stable_reuses >= config.min_stable_reuses
+        };
+        let pass = self.render_proof.sample_ticks >= config.min_sample_ticks
+            && self.render_proof.max_proxy_count >= config.min_proxy_count
+            && stable_requirement_met
+            && self.render_proof.drift_events <= config.max_drift_events
+            && self.render_proof.texture_decoded >= config.min_texture_decoded;
+        let verdict = if pass { "PASS" } else { "FAIL" };
+        let detail = format!(
+            "samples={} proxies_max={} missing_pos_obs={} stable_reuse={} drift={} tex_decoded={} tex_decode_failed={} tex_fetch_failed={} thresholds(min_samples={} min_proxies={} min_stable={} max_drift={} min_tex_decoded={})",
+            self.render_proof.sample_ticks,
+            self.render_proof.max_proxy_count,
+            self.render_proof.missing_position_observations,
+            self.render_proof.stable_reuses,
+            self.render_proof.drift_events,
+            self.render_proof.texture_decoded,
+            self.render_proof.texture_decode_failed,
+            self.render_proof.texture_fetch_failed,
+            config.min_sample_ticks,
+            config.min_proxy_count,
+            config.min_stable_reuses,
+            config.max_drift_events,
+            config.min_texture_decoded
+        );
+
+        if let Some(parent) = config.log_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config.log_path)
+        {
+            let escaped_detail = detail.replace('\\', "\\\\").replace('\"', "\\\"");
+            let line = format!(
+                "{{\"ts\":{},\"verdict\":\"{}\",\"sample_ticks\":{},\"proxy_count_max\":{},\"missing_position_observations\":{},\"stable_reuses\":{},\"drift_events\":{},\"texture_decoded\":{},\"texture_decode_failed\":{},\"texture_fetch_failed\":{},\"detail\":\"{}\"}}\n",
+                now_unix_ms(),
+                verdict,
+                self.render_proof.sample_ticks,
+                self.render_proof.max_proxy_count,
+                self.render_proof.missing_position_observations,
+                self.render_proof.stable_reuses,
+                self.render_proof.drift_events,
+                self.render_proof.texture_decoded,
+                self.render_proof.texture_decode_failed,
+                self.render_proof.texture_fetch_failed,
+                escaped_detail
+            );
+            let _ = file.write_all(line.as_bytes());
+        }
+
+        self.push_local_relay(
+            if pass {
+                RuntimeRelayLevel::Info
+            } else {
+                RuntimeRelayLevel::Warn
+            },
+            "render_proof",
+            format!(
+                "{} {} log_path={}",
+                verdict,
+                detail,
+                config.log_path.display()
+            ),
+        );
+        self.render_proof.emitted_final = true;
+    }
+
+    fn maybe_emit_texture_coverage_summary(&mut self, snapshot: Option<&LiveVisualSnapshot>) {
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        if !snapshot.logged_in {
+            return;
+        }
+        let now_ms = now_unix_ms();
+        if let Some(last_emit_ms) = self.last_texture_coverage_emit_ms
+            && now_ms.saturating_sub(last_emit_ms) < 3_000
+        {
+            return;
+        }
+        self.last_texture_coverage_emit_ms = Some(now_ms);
+
+        let texture_ids = extract_decoded_object_feed_texture_ids(snapshot, 256);
+        if texture_ids.is_empty() {
+            self.push_local_relay(
+                RuntimeRelayLevel::Info,
+                "texture_bind",
+                String::from("coverage: exported_texture_ids=0"),
+            );
+            return;
+        }
+
+        let mut ready = 0usize;
+        let mut loading = 0usize;
+        let mut missing = 0usize;
+        let mut unresolved = 0usize;
+        let mut failures = 0usize;
+        let mut fail_transport = 0usize;
+        let mut fail_decode = 0usize;
+        let mut fail_timeout = 0usize;
+        let mut fail_other = 0usize;
+        let mut sample_unresolved: Vec<String> = Vec::new();
+        let results = self.live_texture_results.lock().unwrap();
+        for id in &texture_ids {
+            if self.renderer.has_texture(id) {
+                ready = ready.saturating_add(1);
+                continue;
+            }
+            match results.get(id) {
+                Some(outcome) => {
+                    if let Some(reason) = outcome.failure {
+                        failures = failures.saturating_add(1);
+                        match reason {
+                            viewer_asset::AssetFetchFailureReason::Transport => {
+                                fail_transport = fail_transport.saturating_add(1)
+                            }
+                            viewer_asset::AssetFetchFailureReason::Decode => {
+                                fail_decode = fail_decode.saturating_add(1)
+                            }
+                            viewer_asset::AssetFetchFailureReason::Timeout => {
+                                fail_timeout = fail_timeout.saturating_add(1)
+                            }
+                            _ => fail_other = fail_other.saturating_add(1),
+                        }
+                    }
+                    match &outcome.status {
+                        viewer_asset::AssetStatus::Ready(_) => ready = ready.saturating_add(1),
+                        viewer_asset::AssetStatus::Loading => {
+                            loading = loading.saturating_add(1);
+                            if sample_unresolved.len() < 6 {
+                                sample_unresolved.push(id.to_string());
+                            }
+                        }
+                        viewer_asset::AssetStatus::Missing => {
+                            missing = missing.saturating_add(1);
+                            if sample_unresolved.len() < 6 {
+                                sample_unresolved.push(id.to_string());
+                            }
+                        }
+                    }
+                }
+                None => {
+                    unresolved = unresolved.saturating_add(1);
+                    if sample_unresolved.len() < 6 {
+                        sample_unresolved.push(id.to_string());
+                    }
+                }
+            }
+        }
+        drop(results);
+        self.push_local_relay(
+            RuntimeRelayLevel::Info,
+            "texture_bind",
+            format!(
+                "coverage: exported_texture_ids={} ready={} loading={} missing={} unresolved={} failures={} fail_transport={} fail_decode={} fail_timeout={} fail_other={} unresolved_sample={}",
+                texture_ids.len(),
+                ready,
+                loading,
+                missing,
+                unresolved,
+                failures,
+                fail_transport,
+                fail_decode,
+                fail_timeout,
+                fail_other,
+                if sample_unresolved.is_empty() {
+                    String::from("none")
+                } else {
+                    sample_unresolved.join(",")
+                }
+            ),
+        );
     }
 
     fn dispatch_recovery_action(
@@ -6174,9 +6457,14 @@ impl AppState {
                 }
                 LiveFeedUpdate::TextureAsset { id, bytes } => {
                     let id = AssetID::new(id);
+                    let id_str = id.to_string();
+                    let byte_len = bytes.len();
+                    let byte_signature = mesh_byte_signature(&bytes);
                     let mut results = self.live_texture_results.lock().unwrap();
                     match viewer_asset::decode_texture_rgba8(&bytes) {
                         Ok(img) => {
+                            let decoded_width = img.width;
+                            let decoded_height = img.height;
                             results.insert(
                                 id,
                                 viewer_asset::AssetFetchOutcome {
@@ -6185,8 +6473,19 @@ impl AppState {
                                     failure: None,
                                 },
                             );
+                            drop(results);
+                            self.push_local_relay(
+                                RuntimeRelayLevel::Info,
+                                "texture_asset",
+                                format!(
+                                    "decoded id={} bytes={} signature={} size={}x{}",
+                                    id_str, byte_len, byte_signature, decoded_width, decoded_height
+                                ),
+                            );
+                            self.render_proof.texture_decoded =
+                                self.render_proof.texture_decoded.saturating_add(1);
                         }
-                        Err(_) => {
+                        Err(err) => {
                             results.insert(
                                 id,
                                 viewer_asset::AssetFetchOutcome {
@@ -6195,6 +6494,17 @@ impl AppState {
                                     failure: Some(viewer_asset::AssetFetchFailureReason::Decode),
                                 },
                             );
+                            drop(results);
+                            self.push_local_relay(
+                                RuntimeRelayLevel::Warn,
+                                "texture_asset",
+                                format!(
+                                    "decode_failed id={} bytes={} signature={} reason={}",
+                                    id_str, byte_len, byte_signature, err
+                                ),
+                            );
+                            self.render_proof.texture_decode_failed =
+                                self.render_proof.texture_decode_failed.saturating_add(1);
                         }
                     }
                 }
@@ -6209,6 +6519,8 @@ impl AppState {
                             failure: Some(reason),
                         },
                     );
+                    self.render_proof.texture_fetch_failed =
+                        self.render_proof.texture_fetch_failed.saturating_add(1);
                 }
                 LiveFeedUpdate::MeshAsset { id, lod, bytes } => {
                     let key = (id, lod);
@@ -6308,6 +6620,8 @@ impl AppState {
         self.tick_scene_textures(&visibility_list)?;
         self.tick_scene_meshes(&visibility_list);
         self.maybe_emit_mesh_discovered_event();
+        self.tick_render_proof(next_live_visual_snapshot.as_ref());
+        self.maybe_emit_texture_coverage_summary(next_live_visual_snapshot.as_ref());
         self.refresh_network_debug_snapshot_section();
 
         // Prepare dynamic geometry
@@ -6716,21 +7030,25 @@ impl AppState {
 
     fn tick_scene_textures(&mut self, visibility_list: &[usize]) -> Result<()> {
         // Also extract visible texture IDs from the scene (capped at 64)
-        let visible_ids = extract_visible_texture_ids_from_scene(&self.scene, visibility_list, 64);
+        let visible_ids = extract_visible_texture_ids_from_scene(&self.scene, visibility_list, 256);
         let decoded_object_texture_ids = self
             .live_visual_state
             .snapshot
             .as_ref()
-            .map(|snapshot| extract_decoded_object_feed_texture_ids(snapshot, 64))
+            .map(|snapshot| extract_decoded_object_feed_texture_ids(snapshot, 256))
             .unwrap_or_default();
-        let mut ids_to_request = merge_texture_request_ids(&self.fixture_texture_ids, &visible_ids);
-        ids_to_request = merge_texture_request_ids(&ids_to_request, &decoded_object_texture_ids);
+        // Prioritize currently visible materials first, then decoded feed IDs, then optional fixtures.
+        let mut ids_to_request =
+            merge_texture_request_ids(&visible_ids, &decoded_object_texture_ids);
+        ids_to_request = merge_texture_request_ids(&ids_to_request, &self.fixture_texture_ids);
 
         if ids_to_request.is_empty() {
             return Ok(());
         }
 
-        let _attempted = self.fixture_texture_cache.poll_png_rgba8(2)?;
+        let _attempted = self
+            .fixture_texture_cache
+            .poll_png_rgba8(viewer_asset::texture_fixture::A10_REQUESTS_PER_TICK_CAP)?;
 
         let continuity = self
             .live_visual_state
@@ -7292,6 +7610,63 @@ where
             target_mesh_id,
             log_path,
             screenshot_dir,
+        }),
+        ..Default::default()
+    }
+}
+
+fn render_proof_state_from_lookup<F>(lookup: F) -> RenderProofState
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let enabled = lookup("VIEWER_APP_RENDER_PROOF")
+        .as_deref()
+        .map(parse_bool_like)
+        .unwrap_or(false);
+    if !enabled {
+        return RenderProofState::default();
+    }
+
+    let window_secs = lookup("VIEWER_APP_RENDER_PROOF_WINDOW_SECS")
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(45)
+        .clamp(10, 600);
+    let min_sample_ticks = lookup("VIEWER_APP_RENDER_PROOF_MIN_SAMPLE_TICKS")
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(40)
+        .max(1);
+    let min_proxy_count = lookup("VIEWER_APP_RENDER_PROOF_MIN_PROXY_COUNT")
+        .as_deref()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(48);
+    let min_stable_reuses = lookup("VIEWER_APP_RENDER_PROOF_MIN_STABLE_REUSES")
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(24);
+    let max_drift_events = lookup("VIEWER_APP_RENDER_PROOF_MAX_DRIFT_EVENTS")
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let min_texture_decoded = lookup("VIEWER_APP_RENDER_PROOF_MIN_TEXTURE_DECODED")
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(16);
+    let log_path = lookup("VIEWER_APP_RENDER_PROOF_LOG_PATH")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("artifacts/logs/render_live_proof.jsonl"));
+
+    RenderProofState {
+        config: Some(RenderProofConfig {
+            window_secs,
+            min_sample_ticks,
+            min_proxy_count,
+            min_stable_reuses,
+            max_drift_events,
+            min_texture_decoded,
+            log_path,
         }),
         ..Default::default()
     }
@@ -8006,6 +8381,7 @@ mod tests {
         let mut objects = vec![
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 1,
+                parent_local_id: None,
                 scale_centi: Some([100, 100, 100]),
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -8017,6 +8393,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 2,
+                parent_local_id: None,
                 scale_centi: Some([100, 100, 100]),
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -8028,6 +8405,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 3,
+                parent_local_id: None,
                 scale_centi: Some([100, 100, 100]),
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -8173,6 +8551,7 @@ mod tests {
             object_feed_objects: vec![
                 viewer_net::DecodedObjectFeedObject {
                     local_id: 20,
+                    parent_local_id: None,
                     scale_centi: None,
                     position_centi: None,
                     rotation_quat_i16: None,
@@ -8184,6 +8563,7 @@ mod tests {
                 },
                 viewer_net::DecodedObjectFeedObject {
                     local_id: 10,
+                    parent_local_id: None,
                     scale_centi: None,
                     position_centi: None,
                     rotation_quat_i16: None,
@@ -8409,6 +8789,57 @@ mod tests {
         assert_eq!(
             config.screenshot_dir,
             Some(PathBuf::from("artifacts/screenshots_mesh_verify"))
+        );
+    }
+
+    #[test]
+    fn render_proof_state_parses_thresholds_and_path() {
+        let vars = HashMap::<String, String>::from([
+            (
+                String::from("VIEWER_APP_RENDER_PROOF"),
+                String::from("true"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_WINDOW_SECS"),
+                String::from("90"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_MIN_SAMPLE_TICKS"),
+                String::from("33"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_MIN_PROXY_COUNT"),
+                String::from("64"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_MIN_STABLE_REUSES"),
+                String::from("20"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_MAX_DRIFT_EVENTS"),
+                String::from("2"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_MIN_TEXTURE_DECODED"),
+                String::from("18"),
+            ),
+            (
+                String::from("VIEWER_APP_RENDER_PROOF_LOG_PATH"),
+                String::from("artifacts/logs/render_proof_custom.jsonl"),
+            ),
+        ]);
+
+        let state = render_proof_state_from_lookup(|k| vars.get(k).cloned());
+        let config = state.config.expect("render proof should be enabled");
+        assert_eq!(config.window_secs, 90);
+        assert_eq!(config.min_sample_ticks, 33);
+        assert_eq!(config.min_proxy_count, 64);
+        assert_eq!(config.min_stable_reuses, 20);
+        assert_eq!(config.max_drift_events, 2);
+        assert_eq!(config.min_texture_decoded, 18);
+        assert_eq!(
+            config.log_path,
+            PathBuf::from("artifacts/logs/render_proof_custom.jsonl")
         );
     }
 
@@ -9072,11 +9503,32 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_texture_request_ids_preserves_left_priority_order() {
+        let left = vec![AssetID::new("visible_a"), AssetID::new("visible_b")];
+        let right = vec![
+            AssetID::new("visible_b"),
+            AssetID::new("decoded_c"),
+            AssetID::new("decoded_d"),
+        ];
+        let merged = merge_texture_request_ids(&left, &right);
+        assert_eq!(
+            merged,
+            vec![
+                AssetID::new("visible_a"),
+                AssetID::new("visible_b"),
+                AssetID::new("decoded_c"),
+                AssetID::new("decoded_d")
+            ]
+        );
+    }
+
+    #[test]
     fn test_extract_decoded_object_feed_mesh_ids_is_deterministic_and_capped() {
         let mut snapshot = offline_snapshot();
         snapshot.decoded_object_feed_objects = vec![
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 1,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9088,6 +9540,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 2,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9099,6 +9552,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 3,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9110,6 +9564,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 4,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9121,6 +9576,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 5,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9148,6 +9604,7 @@ mod tests {
         snapshot.decoded_object_feed_objects = vec![
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 1,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9159,6 +9616,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 2,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9170,6 +9628,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 3,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9181,6 +9640,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 4,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9204,6 +9664,7 @@ mod tests {
         let mut snapshot = offline_snapshot();
         snapshot.decoded_object_feed_objects = vec![viewer_core::DecodedWorldObjectFeedObject {
             local_id: 9,
+            parent_local_id: None,
             scale_centi: None,
             position_centi: None,
             rotation_quat_i16: None,
@@ -9543,6 +10004,7 @@ mod tests {
         snapshot.decoded_object_feed_objects = vec![
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 1,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9554,6 +10016,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 2,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9565,6 +10028,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 3,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9620,6 +10084,7 @@ mod tests {
         snapshot.decoded_object_feed_objects = vec![
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 1,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
@@ -9631,6 +10096,7 @@ mod tests {
             },
             viewer_core::DecodedWorldObjectFeedObject {
                 local_id: 2,
+                parent_local_id: None,
                 scale_centi: None,
                 position_centi: None,
                 rotation_quat_i16: None,
