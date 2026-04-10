@@ -1,37 +1,38 @@
-# HANDOFF: Object Rotation Ingestion + EventQueue Verify Pass (2026-04-09)
+# HANDOFF: Texture Throughput + Fetch Parity Hardening (2026-04-10)
 
 ## What Changed
-- Added object-feed rotation support from transport decode through scene transform mapping:
-  - `viewer_net` decodes compressed object-update packed quaternion xyz and exports optional `rotation_quat_i16` on object feed objects.
-  - `viewer_app` bridges `rotation_quat_i16` into `viewer_core::DecodedWorldObjectFeedObject`.
-  - `viewer_core` applies decoded object rotation in `world_object_feed_proxy_transform(...)` with axis mapping and identity fallback.
-- Retained previously implemented EventQueue seed-session refresh hardening and ran a fresh bounded live verification capture.
+- `viewer_app` texture streaming throughput increased:
+  - `LIVE_TEXTURE_FETCH_MAX_INFLIGHT` raised `16 -> 48`
+  - `tick_scene_textures(...)` now polls texture cache with `A10_REQUESTS_PER_TICK_CAP` (64) instead of fixed `16`
+- `viewer_net` texture fetch path now uses Firestorm-style user-agent and cookie-aware candidate traversal for texture asset requests.
+- Added texture fetch regression tests for:
+  - candidate-first fetch success
+  - Set-Cookie reuse between candidate attempts
 
 ## Validation Run
 - `cargo fmt --all`
-- `cargo check -p viewer_net -p viewer_app -p viewer_core`
-- `cargo test -p viewer_net decode_object_update_compressed_extracts_local_ids -- --nocapture`
-- `cargo test -p viewer_net decode_object_update_compressed_extracts_nonzero_rotation_quaternion -- --nocapture`
-- `cargo test -p viewer_core scene_world_object_feed_maps_decoded_rotation_quaternion_to_scene_axes -- --nocapture`
-- `cargo test -p viewer_net`
-- `cargo test -p viewer_core`
-- Bounded live run:
-  - env:
-    - `VIEWER_APP_LIVE_STARTUP=on`
-    - `VIEWER_APP_LLUDP_STARTUP_PARITY_BUNDLE=on`
-    - `VIEWER_APP_CAPABILITY_PROBES_REQUIRE_EVENT_QUEUE_OK=true`
-    - `VIEWER_APP_EVENT_QUEUE_CAP_NOT_FOUND_BEFORE_RECONNECT=3`
-    - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_event_queue_rotation_gap_closure_2026-04-09.jsonl`
-  - command: `cargo run -p viewer_app` (timeout-bounded by harness)
+- `cargo check -p viewer_net -p viewer_app`
+- `cargo test -p viewer_net fetch_texture_asset_bytes_uses_firestorm_style_candidate_first_with_accept_header -- --nocapture`
+- `cargo test -p viewer_net fetch_texture_asset_bytes_reuses_set_cookie_between_attempts -- --nocapture`
+- bounded live run (`cargo run -p viewer_app`, timeout-bounded) with:
+  - `VIEWER_APP_LIVE_STARTUP=on`
+  - `VIEWER_APP_RENDER_PROOF=on`
+  - `VIEWER_APP_RENDER_PROOF_WINDOW_SECS=25`
+  - `VIEWER_APP_RENDER_PROOF_LOG_PATH=artifacts/logs/render_live_proof_2026-04-10_texburst1.jsonl`
+  - `VIEWER_NETWORK_DEBUG_LOG_PATH=artifacts/logs/network_debug_render_live_proof_2026-04-10_texburst1.jsonl`
+  - `VIEWER_OBJECT_FEED_EXPORT_MAX=512`
 
 ## Exact Current State
-- Object render transform correctness is improved: decoded object-feed rotation is now carried and applied (when available) instead of forcing identity rotation.
-- EventQueue startup/probe gate remains healthy in latest bounded run (`EventQueueGet:ok` observed).
-- In this bounded capture window, cap-rotation `404` did not reoccur, so cap-reprime behavior under active cap invalidation was not re-exercised in this run.
+- Live proof artifact: `artifacts/logs/render_live_proof_2026-04-10_texburst1.jsonl` => `PASS`.
+- In-window texture coverage reached `exported_texture_ids=98 ready=86 unresolved=12`.
+- Prior bounded runs were significantly lower (`ready=22/100` to `ready=36/108`).
+- Some texture IDs still fail with capability `403` and remain unresolved.
 
 ## Exact Next Step
-1. Re-run bounded live captures (same env knobs) until cap-rotation `404` is observed, then verify whether current seed-session + fallback improvements recover without reconnect more often than baseline.
+1. Add focused texture-failure bucket diagnostics for 403 bodies (auth expired vs missing key) on texture fetches, mirroring existing mesh bucket clarity.
+2. Run another bounded live capture with the same proof window and compare unresolved sample churn over 2 windows.
+3. If unresolved remains high, add bounded retry policy for specific retryable texture error buckets only (not blanket retries).
 
 ## Blockers / Risks
-- Cap invalidation timing is simulator/session dependent and may not appear in short bounded runs.
-- If all known seed URLs invalidate together, reconnect fallback remains expected behavior.
+- Capability-denied texture IDs (`403`) may be truly inaccessible and can still leave surfaces fallback-colored.
+- Object-feed export truncation still limits total active coverage in very dense regions unless `VIEWER_OBJECT_FEED_EXPORT_MAX` is raised.

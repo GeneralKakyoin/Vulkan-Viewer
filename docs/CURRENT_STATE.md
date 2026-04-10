@@ -1,11 +1,146 @@
 # Current State: Vulkan-Viewer
 
+## Latest Notable Changes (Texture Throughput + Fetch Parity Hardening) (2026-04-10)
+- `viewer_app` live texture streaming throughput increased:
+  - `LIVE_TEXTURE_FETCH_MAX_INFLIGHT`: `16 -> 48`
+  - texture cache poll budget in `tick_scene_textures(...)`: `16 -> A10_REQUESTS_PER_TICK_CAP (64)`
+- `viewer_net` texture fetch path now uses Firestorm-style user-agent plus cookie-aware candidate traversal for texture requests.
+- Added `viewer_net` coverage for texture fetch candidate success + Set-Cookie reuse between attempts.
+- Bounded live proof artifact:
+  - `artifacts/logs/render_live_proof_2026-04-10_texburst1.jsonl` -> `PASS`
+  - `artifacts/logs/network_debug_render_live_proof_2026-04-10_texburst1.jsonl`
+  - `artifacts/logs/live_texburst1_stdout.log`
+- Live evidence highlights:
+  - texture coverage improved in-window to `exported_texture_ids=98 ready=86 unresolved=12`
+  - compared with prior bounded windows around `ready=22/100` to `ready=36/108`.
+  - subset of texture IDs still fail with capability `403` and remain unresolved.
+## Latest Notable Changes (Truncated Feed Retention + Texture Bind Truthfulness) (2026-04-10)
+- `viewer_core` object-feed seam retention now retains against currently exported IDs even when export is truncated.
+  - prevents unbounded stale proxy accumulation under truncated windows.
+- `viewer_app` texture coverage relay now treats renderer-bound textures as `ready` before checking transient live fetch maps.
+  - coverage now reflects actual bound texture state instead of false unresolved-only output.
+- Updated core retention regression to assert deterministic truncated behavior with positioned fixtures.
+- Bounded live verification artifacts:
+  - `artifacts/logs/render_live_proof_2026-04-10_truncfix1.jsonl` -> `PASS`
+  - `artifacts/logs/network_debug_render_live_proof_2026-04-10_truncfix1.jsonl`
+  - `artifacts/logs/live_truncfix1_stdout.log`
+- Live evidence highlights:
+  - object-feed still balanced in truncated windows (`root_objects=64 parented_objects=64`)
+  - texture coverage shifts to non-zero ready counts after decode/bind (`ready=20` then `ready=11` in sampled windows)
+
+## Latest Notable Changes (Truncated Export Root+Child Balance + Texture Coverage Relay) (2026-04-10)
+- Updated `viewer_net` truncated object-feed export selection to balance roots and parented children (instead of root-only domination under cap):
+  - roots referenced by parented children are prioritized
+  - capped export now preserves parent anchors while retaining child detail candidates
+- Added live texture coverage relay in `viewer_app` (`texture_bind` category) for exported object-feed texture IDs:
+  - reports exported count and ready/loading/missing/unresolved/failure buckets with sample unresolved IDs
+  - provides direct evidence path for "white object" diagnosis
+- Added bounded material fallback in `viewer_core` object-feed material mapping:
+  - when default material has no primary texture and face overrides do, first override texture is promoted to default fallback
+  - mitigates fully-white output when face-id mapping is incomplete/misaligned
+- New regression coverage:
+  - `viewer_net`: `object_feed_export_truncated_balances_roots_and_parented_children`
+  - `viewer_core`: `scene_world_object_feed_promotes_face_override_texture_to_default_fallback`
+- Latest bounded live artifacts:
+  - `artifacts/logs/render_live_proof_2026-04-10_texturemix2.jsonl` -> `PASS`
+  - `artifacts/logs/network_debug_render_live_proof_2026-04-10_texturemix2.jsonl` -> `tick parenting: root_objects=64 parented_objects=64`
+  - `artifacts/logs/live_texturemix2_stdout.log` -> `texture_bind` coverage lines show exported texture IDs still unresolved in this run
+## Latest Notable Changes (Object Feed Parent Placement + Truncated Export Root Preservation) (2026-04-10)
+- Added `parent_local_id` propagation across object-feed decode and ingest path:
+  - `viewer_net::DecodedObjectFeedObject.parent_local_id`
+  - `viewer_core::DecodedWorldObjectFeedObject.parent_local_id`
+  - seam payload field `WorldObjectIngestionItem.decoded_object_parent_local_id`
+- `viewer_core` scene placement now treats parented child positions as parent-relative offsets when parent transform is known.
+- First-sighting parented children are now skipped when parent transform is unavailable, preventing fallback-anchor clumps.
+- `viewer_net` truncated object-feed export ordering now prioritizes root objects (`parent_local_id=None`) ahead of parented entries so parent anchors remain available in capped exports.
+- Added object-feed parenting diagnostics in `viewer_app` relay (`startup/tick parenting: root_objects=... parented_objects=...`).
+- Render proof now avoids false failure on stable-reuse threshold when no missing-position observations were present in-window.
+- New/updated regression coverage:
+  - `viewer_net`: `decode_object_update_compressed_extracts_parent_local_id_when_flagged`
+  - `viewer_net`: `object_feed_export_truncated_keeps_root_objects_for_parent_resolution`
+  - `viewer_core`: `scene_world_object_feed_parented_child_uses_parent_relative_position`
+  - `viewer_core`: `scene_world_object_feed_skips_first_sighting_parented_child_without_parent`
+- Live bounded run artifact after patch:
+  - `artifacts/logs/render_live_proof_2026-04-10_parentfix2.jsonl` -> `PASS`
+  - `artifacts/logs/network_debug_render_live_proof_2026-04-10_parentfix2.jsonl` includes parenting relay samples (`root_objects=128 parented_objects=0` in truncated export windows).
+## Latest Notable Changes (Render Object Texture/Placement Stabilization) (2026-04-10)
+- Stabilized world-object-feed placement for partial/no-position updates in `viewer_core`:
+  - removed local-id ring scatter fallback for first-sighting positionless objects (anchor fallback)
+  - reuses prior transform position/scale/rotation when later updates omit those fields
+- Corrected SL-to-scene axis conversion in object/mesh render paths to a right-handed mapping:
+  - `(x, y, z) -> (x, z, -y)`
+  - applied in `viewer_asset::sl_mesh_loader` (positions/normals) and `viewer_core` object-feed position/rotation mapping
+- Improved live texture application throughput and observability in `viewer_app`:
+  - `LIVE_TEXTURE_FETCH_MAX_INFLIGHT` increased `4 -> 16`
+  - `texture_fetch: ready` relay now includes bytes/signature
+  - `texture_asset` decode-stage relay now reports decode success/failure with bytes/signature and decoded dimensions
+- Added/updated regression coverage:
+  - `viewer_core`: `scene_world_object_feed_positionless_update_retains_existing_position`
+  - `viewer_core`: updated `scene_world_object_feed_maps_decoded_rotation_quaternion_to_scene_axes`
+  - `viewer_asset`: updated `sl_to_scene_axis_maps_z_up_to_y_up`
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_asset -p viewer_core -p viewer_app`
+  - targeted tests for updated placement/axis/texture merge paths
+  - offline screenshot smoke: `artifacts/screenshots_render_object_texture_placement_2026-04-10_b/viewer_test_0001.png`
+## Latest Notable Changes (Render Live Proof Flag + Agent-Run Live PASS Evidence) (2026-04-10)
+- Added live proof mode in `viewer_app` controlled by `VIEWER_APP_RENDER_PROOF=on`.
+- New proof-mode thresholds and artifact controls:
+  - `VIEWER_APP_RENDER_PROOF_WINDOW_SECS`
+  - `VIEWER_APP_RENDER_PROOF_MIN_SAMPLE_TICKS`
+  - `VIEWER_APP_RENDER_PROOF_MIN_PROXY_COUNT`
+  - `VIEWER_APP_RENDER_PROOF_MIN_STABLE_REUSES`
+  - `VIEWER_APP_RENDER_PROOF_MAX_DRIFT_EVENTS`
+  - `VIEWER_APP_RENDER_PROOF_MIN_TEXTURE_DECODED`
+  - `VIEWER_APP_RENDER_PROOF_LOG_PATH`
+- Proof technique:
+  - tracks object-feed local IDs with `position_centi=None`
+  - verifies scene proxy world-position reuse stability per local ID (drift vs stable counts)
+  - tracks texture decode/fetch-failure counts during same window
+  - emits one bounded JSON summary with pass/fail + thresholds + observed metrics
+- Agent executed a real live run and produced PASS artifact:
+  - `artifacts/logs/render_live_proof_2026-04-10.jsonl`
+  - verdict: `PASS`
+  - `sample_ticks=3512`, `proxy_count_max=318`, `stable_reuses=19800`, `drift_events=0`, `texture_decoded=24`
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_app`
+  - `cargo test -p viewer_app render_proof_state_parses_thresholds_and_path -- --nocapture`
+  - bounded live `cargo run -p viewer_app` with proof-mode env flags and artifact inspection
 ## Overview
 The Vulkan-Viewer is a high-performance Second Life compatible viewer built in Rust. It currently supports basic region and avatar presence, nearby chat, direct IM, avatar profiles, and a robust diagnostics shell.
 
+## Latest Notable Changes (Render Alpha Mode Tuning For Object Feed) (2026-04-09)
+- Updated object-feed alpha policy in `viewer_core` to classify near-opaque alpha values as `AlphaTest` instead of forcing `Blend` for all sub-0.995 alpha.
+- New bounded classification:
+  - `Opaque` for `alpha >= 0.995`
+  - `AlphaTest { cutoff: 0.5 }` for `0.90 <= alpha < 0.995`
+  - `Blend` for `alpha < 0.90`
+- Added regression test: `world_object_feed_alpha_mode_classifies_near_opaque_as_alpha_test`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_core -p viewer_app -p viewer_render`
+  - `cargo test -p viewer_core scene_world_object_feed_applies_face_override_materials_and_alpha_mode -- --nocapture`
+  - `cargo test -p viewer_core world_object_feed_alpha_mode_classifies_near_opaque_as_alpha_test -- --nocapture`
+## Latest Notable Changes (Render White Fallback + Full ObjectUpdate Rotation Decode) (2026-04-09)
+- `viewer_net` now decodes ObjectData rotation from full `ObjectUpdate` payloads (not only compressed updates), improving orientation correctness under mixed update traffic.
+- `viewer_render` now uses a neutral white fallback texture for intentionally empty texture slots instead of magenta missing fallback.
+- `viewer_render` now clamps `AlphaMode::AlphaTest { cutoff }` to `[0,1]` before uploading shader uniforms, with regression coverage for out-of-range values.
+- Produced/reviewed deterministic screenshot artifacts:
+  - baseline: `artifacts/screenshots_render_baseline_2026-04-09/viewer_test_0001.png`
+  - after: `artifacts/screenshots_render_after_white_fallback_2026-04-09/viewer_test_0001.png`
+  - screenshot diff confirms expected visual change (`mean_abs_error=15.413169`).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p viewer_net -p viewer_app -p viewer_core`
+  - `cargo check -p viewer_render -p viewer_app`
+  - `cargo test -p viewer_render`
+  - `cargo test -p viewer_net decode_real_firestorm_object_update_extracts_mesh_id_from_extra_params -- --nocapture`
+  - `cargo test -p viewer_net decode_object_update_compressed_extracts_nonzero_rotation_quaternion -- --nocapture`
 ## Latest Notable Changes (Object Rotation Ingestion + EventQueue Live Verify Pass) (2026-04-09)
 - Closed a render-correctness gap where world object-feed proxies ignored decoded object rotation:
   - `viewer_net` now decodes compressed object-update packed quaternion xyz, reconstructs a bounded quaternion, and exports it as optional quantized rotation payload.
+  - `viewer_net` now also decodes full `ObjectUpdate` packed ObjectData rotation payload into the same quantized rotation field.
   - `viewer_app` now maps this rotation payload into `viewer_core` decoded object-feed snapshot objects.
   - `viewer_core` now applies decoded object rotation in `world_object_feed_proxy_transform(...)` with scene-axis mapping and identity fallback when unavailable.
 - Added/updated regression coverage:
@@ -1703,6 +1838,15 @@ Focus: Wrap U14 workflow resilience and move dynamically forwards (the transitio
 - `viewer_net`/`viewer_grid`: Protocol and asset transport layers.
 
 - **Verification Status**: `cargo fmt --all`, `cargo check --workspace`, targeted crate tests, `cargo test --workspace`, and offline screenshot smoke all pass on the current R08 baseline.
+
+
+
+
+
+
+
+
+
 
 
 
