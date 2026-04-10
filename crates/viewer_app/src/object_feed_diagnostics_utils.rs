@@ -60,6 +60,27 @@ pub(super) fn summarize_decoded_object_feed_mesh_ids(
     (mesh_ids.len(), sample)
 }
 
+pub(super) fn summarize_decoded_object_feed_texture_ids(
+    snapshot: &LiveVisualSnapshot,
+    sample_cap: usize,
+) -> (usize, String) {
+    let texture_ids = extract_decoded_object_feed_texture_ids(
+        snapshot,
+        snapshot.decoded_object_feed_objects.len(),
+    );
+    let sample = if texture_ids.is_empty() {
+        String::from("none")
+    } else {
+        texture_ids
+            .iter()
+            .take(sample_cap)
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    (texture_ids.len(), sample)
+}
+
 pub(super) fn count_exported_object_feed_mesh_objects(snapshot: &LiveVisualSnapshot) -> usize {
     snapshot
         .decoded_object_feed_objects
@@ -84,6 +105,21 @@ pub(super) fn summarize_decoded_object_feed_face_materials(
         }
     }
     (objects_with_default, objects_with_overrides, override_faces)
+}
+
+pub(super) fn summarize_decoded_object_feed_parenting(
+    snapshot: &LiveVisualSnapshot,
+) -> (usize, usize) {
+    let parented = snapshot
+        .decoded_object_feed_objects
+        .iter()
+        .filter(|obj| obj.parent_local_id.is_some())
+        .count();
+    let root = snapshot
+        .decoded_object_feed_objects
+        .len()
+        .saturating_sub(parented);
+    (root, parented)
 }
 
 pub(super) fn format_object_feed_state_export_counts(
@@ -131,8 +167,10 @@ pub(super) fn emit_object_feed_startup_summary(
 ) {
     let decode = connection.simulator_payload_decode_summary();
     let (mesh_id_count, mesh_sample) = summarize_decoded_object_feed_mesh_ids(snapshot, 6);
+    let (texture_id_count, texture_sample) = summarize_decoded_object_feed_texture_ids(snapshot, 6);
     let (objects_with_default, objects_with_overrides, override_faces) =
         summarize_decoded_object_feed_face_materials(snapshot);
+    let (root_objects, parented_objects) = summarize_decoded_object_feed_parenting(snapshot);
     emit_relay(
         tx,
         RuntimeRelayLevel::Info,
@@ -151,8 +189,26 @@ pub(super) fn emit_object_feed_startup_summary(
         RuntimeRelayLevel::Info,
         "object_feed",
         &format!(
+            "startup textures: texture_id_count={} sample_texture_ids={}",
+            texture_id_count, texture_sample
+        ),
+    );
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "object_feed",
+        &format!(
             "startup face_materials: objects_with_default={} objects_with_overrides={} override_faces={}",
             objects_with_default, objects_with_overrides, override_faces
+        ),
+    );
+    emit_relay(
+        tx,
+        RuntimeRelayLevel::Info,
+        "object_feed",
+        &format!(
+            "startup parenting: root_objects={} parented_objects={}",
+            root_objects, parented_objects
         ),
     );
     persist_object_face_checklist_candidates(snapshot);
@@ -167,6 +223,8 @@ pub(super) fn emit_object_feed_tick_summary(
     let (objects_with_default, objects_with_overrides, override_faces) =
         summarize_decoded_object_feed_face_materials(snapshot);
     let (mesh_id_count, mesh_sample) = summarize_decoded_object_feed_mesh_ids(snapshot, 6);
+    let (texture_id_count, texture_sample) = summarize_decoded_object_feed_texture_ids(snapshot, 6);
+    let (root_objects, parented_objects) = summarize_decoded_object_feed_parenting(snapshot);
     let level = RuntimeRelayLevel::Info;
     emit_relay(
         tx,
@@ -186,8 +244,26 @@ pub(super) fn emit_object_feed_tick_summary(
         level,
         "object_feed",
         &format!(
+            "tick textures: texture_id_count={} sample_texture_ids={}",
+            texture_id_count, texture_sample
+        ),
+    );
+    emit_relay(
+        tx,
+        level,
+        "object_feed",
+        &format!(
             "tick face_materials: objects_with_default={} objects_with_overrides={} override_faces={}",
             objects_with_default, objects_with_overrides, override_faces
+        ),
+    );
+    emit_relay(
+        tx,
+        level,
+        "object_feed",
+        &format!(
+            "tick parenting: root_objects={} parented_objects={}",
+            root_objects, parented_objects
         ),
     );
     persist_object_face_checklist_candidates(snapshot);

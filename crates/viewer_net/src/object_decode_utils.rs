@@ -242,10 +242,11 @@ pub(super) fn decode_object_update_ids_and_scales(
         let object_data_len = read_u8(&body, &mut offset)? as usize;
         let object_data = body.get(offset..offset.checked_add(object_data_len)?)?;
         let position_centi = decode_object_update_object_data_position_centi(object_data);
+        let rotation_quat_i16 = decode_object_update_object_data_rotation_quat_i16(object_data);
         offset = offset.checked_add(object_data_len)?;
 
         // ParentID, UpdateFlags
-        offset += 4;
+        let parent_local_id = read_u32_le(&body, &mut offset).filter(|id| *id != 0);
         offset += 4;
 
         // Path/Profile params (fixed sizes)
@@ -317,9 +318,10 @@ pub(super) fn decode_object_update_ids_and_scales(
         };
         out.push(DecodedObjectFeedIngressObject {
             local_id,
+            parent_local_id,
             scale_centi,
             position_centi,
-            rotation_quat_i16: None,
+            rotation_quat_i16,
             mesh_id_bytes,
             texture_id_bytes,
             default_face_material: decoded_texture_material
@@ -436,7 +438,7 @@ pub(super) fn decode_texture_entry_material_data(
     ) {
         return finalize_texture_entry_decode(default_face, by_face);
     }
-    if !parse_texture_entry_i16_exceptions(
+    if !parse_texture_entry_f32_scale_exceptions(
         texture_entry,
         &mut offset,
         |mat| &mut mat.scale_s,
@@ -445,7 +447,7 @@ pub(super) fn decode_texture_entry_material_data(
     ) {
         return finalize_texture_entry_decode(default_face, by_face);
     }
-    if !parse_texture_entry_i16_exceptions(
+    if !parse_texture_entry_f32_scale_exceptions(
         texture_entry,
         &mut offset,
         |mat| &mut mat.scale_t,
@@ -652,6 +654,35 @@ pub(super) fn parse_texture_entry_i16_exceptions(
     true
 }
 
+pub(super) fn parse_texture_entry_f32_scale_exceptions(
+    texture_entry: &[u8],
+    offset: &mut usize,
+    field: impl Fn(&mut ObjectFaceMaterialState) -> &mut i16,
+    default_face: &mut ObjectFaceMaterialState,
+    by_face: &mut BTreeMap<u8, ObjectFaceMaterialState>,
+) -> bool {
+    let Some(default_value) = read_f32_le(texture_entry, offset) else {
+        return false;
+    };
+    *field(default_face) = quantize_texture_scale(default_value);
+    loop {
+        let Some(face_bits) = read_texture_entry_face_bitfield(texture_entry, offset) else {
+            return false;
+        };
+        if face_bits == 0 {
+            break;
+        }
+        let Some(value) = read_f32_le(texture_entry, offset) else {
+            return false;
+        };
+        let quantized = quantize_texture_scale(value);
+        apply_texture_entry_face_bits(face_bits, default_face, by_face, |mat| {
+            *field(mat) = quantized;
+        });
+    }
+    true
+}
+
 pub(super) fn parse_texture_entry_u8_exceptions(
     texture_entry: &[u8],
     offset: &mut usize,
@@ -747,6 +778,14 @@ pub(super) fn apply_material_byte(mat: &mut ObjectFaceMaterialState, value: u8) 
     mat.bump = value & 0x1f;
     mat.fullbright = (value & 0x20) != 0;
     mat.shiny = (value >> 6) & 0x03;
+}
+
+pub(super) fn quantize_texture_scale(value: f32) -> i16 {
+    if !value.is_finite() {
+        return 10_000;
+    }
+    let scaled = (value * 10_000.0).round();
+    scaled.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
 }
 
 pub(super) fn format_object_face_material_with_face(
@@ -962,6 +1001,21 @@ pub(super) fn decode_object_update_object_data_position_centi(
     quantize_vector3_signed_centi(pos)
 }
 
+pub(super) fn decode_object_update_object_data_rotation_quat_i16(
+    object_data: &[u8],
+) -> Option<[i16; 4]> {
+    let pos_offset = match object_data.len() {
+        len if len >= 140 => 16,
+        len if len >= 124 => 0,
+        len if len >= 76 => 16,
+        len if len >= 60 => 0,
+        _ => return None,
+    };
+    let mut offset = pos_offset + 36; // position + velocity + acceleration
+    let rot_xyz = read_vector3f(object_data, &mut offset)?;
+    decode_packed_unit_quaternion_xyz(rot_xyz).and_then(quantize_quat_i16)
+}
+
 pub(super) fn parse_compressed_object_update_data(
     data: &[u8],
 ) -> Option<DecodedObjectFeedIngressObject> {
@@ -978,13 +1032,14 @@ pub(super) fn parse_compressed_object_update_data(
     let rotation_xyz = read_vector3f(data, &mut offset)?;
     let rotation_quat_i16 =
         decode_packed_unit_quaternion_xyz(rotation_xyz).and_then(quantize_quat_i16);
+    let mut parent_local_id = None;
     let compressed_flags = read_u32_le(data, &mut offset)?;
     offset += 16; // OwnerID (present; may be zeroed)
     if compressed_flags & COMPRESSED_FLAG_HAS_ANGULAR_VELOCITY != 0 {
         offset += 12;
     }
     if compressed_flags & COMPRESSED_FLAG_HAS_PARENT != 0 {
-        offset += 4;
+        parent_local_id = read_u32_le(data, &mut offset).filter(|id| *id != 0);
     }
     if compressed_flags & COMPRESSED_FLAG_HAS_TEXT != 0 {
         skip_c_string(data, &mut offset)?;
@@ -1001,6 +1056,7 @@ pub(super) fn parse_compressed_object_update_data(
 
     Some(DecodedObjectFeedIngressObject {
         local_id,
+        parent_local_id,
         scale_centi: quantize_vector3_centi(scale),
         position_centi: quantize_vector3_signed_centi(position),
         rotation_quat_i16,

@@ -48,6 +48,7 @@ pub struct RenderBackend {
     environment_buffer: Buffer,
     environment_bind_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
+    white_view: wgpu::TextureView,
     loading_view: wgpu::TextureView,
     missing_view: wgpu::TextureView,
     object_uniform_stride: u64,
@@ -82,6 +83,14 @@ pub struct SubMeshRange {
     pub face_id: u16,
     pub index_start: u32,
     pub index_count: u32,
+}
+
+fn alpha_mode_uniform_fields(alpha_mode: AlphaMode) -> (u32, f32) {
+    match alpha_mode {
+        AlphaMode::Opaque => (0u32, 0.0f32),
+        AlphaMode::AlphaTest { cutoff } => (1u32, cutoff.clamp(0.0, 1.0)),
+        AlphaMode::Blend => (2u32, 0.0f32),
+    }
 }
 
 impl RenderBackend {
@@ -553,6 +562,7 @@ impl RenderBackend {
             ..Default::default()
         });
 
+        let white_view = create_fallback_texture(&device, &queue, "white", [1.0, 1.0, 1.0, 1.0]); // White
         let loading_view =
             create_fallback_texture(&device, &queue, "loading", [1.0, 1.0, 0.0, 1.0]); // Yellow
         let missing_view =
@@ -620,6 +630,7 @@ impl RenderBackend {
             environment_buffer,
             environment_bind_group,
             sampler,
+            white_view,
             loading_view,
             missing_view,
             object_uniform_stride,
@@ -1172,7 +1183,7 @@ impl RenderBackend {
         let (base, normal, mr, emissive) = match mat {
             MaterialDescriptor::Legacy(entry) => {
                 let view = if entry.texture_id.is_empty() {
-                    Arc::new(self.missing_view.clone())
+                    Arc::new(self.white_view.clone())
                 } else {
                     match self.texture_provider.get_texture(&entry.texture_id) {
                         PendingTexture::Ready(v) => v,
@@ -1182,15 +1193,15 @@ impl RenderBackend {
                 };
                 (
                     view.clone(),
-                    Arc::new(self.missing_view.clone()),
-                    Arc::new(self.missing_view.clone()),
-                    Arc::new(self.missing_view.clone()),
+                    Arc::new(self.white_view.clone()),
+                    Arc::new(self.white_view.clone()),
+                    Arc::new(self.white_view.clone()),
                 )
             }
             MaterialDescriptor::Pbr(pbr) => {
                 let get_v = |id: &AssetID| {
                     if id.is_empty() {
-                        Arc::new(self.missing_view.clone())
+                        Arc::new(self.white_view.clone())
                     } else {
                         match self.texture_provider.get_texture(id) {
                             PendingTexture::Ready(v) => v,
@@ -1244,11 +1255,7 @@ impl RenderBackend {
         uv_matrix: [[f32; 3]; 3],
         alpha_mode: AlphaMode,
     ) {
-        let (mode_index, cutoff) = match alpha_mode {
-            AlphaMode::Opaque => (0u32, 0.0f32),
-            AlphaMode::AlphaTest { cutoff } => (1u32, cutoff),
-            AlphaMode::Blend => (2u32, 0.0f32),
-        };
+        let (mode_index, cutoff) = alpha_mode_uniform_fields(alpha_mode);
         let flat = flatten_mat4(model);
         // mat3x3 in WGSL is 3 columns of vec4 (16 byte alignment per column)
         let m = uv_matrix;
@@ -1568,6 +1575,22 @@ mod tests {
         assert_eq!(
             blend_clear_color_from_environment(&env),
             [0.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn alpha_mode_uniform_fields_clamp_alpha_test_cutoff() {
+        assert_eq!(
+            alpha_mode_uniform_fields(AlphaMode::AlphaTest { cutoff: -2.0 }),
+            (1, 0.0)
+        );
+        assert_eq!(
+            alpha_mode_uniform_fields(AlphaMode::AlphaTest { cutoff: 5.0 }),
+            (1, 1.0)
+        );
+        assert_eq!(
+            alpha_mode_uniform_fields(AlphaMode::AlphaTest { cutoff: 0.42 }),
+            (1, 0.42)
         );
     }
 }

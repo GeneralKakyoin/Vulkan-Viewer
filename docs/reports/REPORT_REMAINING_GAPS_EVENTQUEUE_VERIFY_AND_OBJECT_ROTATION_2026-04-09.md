@@ -3,6 +3,7 @@
 ## Summary of Implemented Work
 - Implemented object-feed rotation propagation across crates:
   - decoded compressed object-update quaternion payload in `viewer_net`
+  - decoded full `ObjectUpdate` packed ObjectData rotation payload in `viewer_net`
   - stored/exported optional quantized quaternion on object feed objects
   - bridged rotation payload through `viewer_app` snapshot mapping
   - applied decoded rotation in `viewer_core` world object-feed transform mapping with scene-axis conversion and identity fallback
@@ -22,6 +23,7 @@
 - `cargo check -p viewer_net -p viewer_app -p viewer_core` (passed)
 - `cargo test -p viewer_net decode_object_update_compressed_extracts_local_ids -- --nocapture` (passed)
 - `cargo test -p viewer_net decode_object_update_compressed_extracts_nonzero_rotation_quaternion -- --nocapture` (passed)
+- `cargo test -p viewer_net decode_real_firestorm_object_update_extracts_mesh_id_from_extra_params -- --nocapture` (passed)
 - `cargo test -p viewer_core scene_world_object_feed_maps_decoded_rotation_quaternion_to_scene_axes -- --nocapture` (passed)
 - `cargo test -p viewer_net` (passed, 141 tests)
 - `cargo test -p viewer_core` (passed, 66 tests)

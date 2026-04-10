@@ -785,6 +785,7 @@ pub struct DecodedWorldObjectFaceMaterial {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodedWorldObjectFeedObject {
     pub local_id: u32,
+    pub parent_local_id: Option<u32>,
     pub scale_centi: Option<[u16; 3]>,
     pub position_centi: Option<[i32; 3]>,
     pub rotation_quat_i16: Option<[i16; 4]>,
@@ -1992,6 +1993,7 @@ pub struct WorldObjectIngestionItem {
     pub decoded_object_feed_total_objects: Option<u32>,
     pub decoded_object_feed_export_truncated: bool,
     pub decoded_object_local_id: Option<u32>,
+    pub decoded_object_parent_local_id: Option<u32>,
     pub decoded_object_scale_centi: Option<[u16; 3]>,
     pub decoded_object_position_centi: Option<[i32; 3]>,
     pub decoded_object_rotation_quat_i16: Option<[i16; 4]>,
@@ -2036,6 +2038,7 @@ impl WorldObjectIngestionSeam {
             decoded_object_feed_total_objects: None,
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
+            decoded_object_parent_local_id: None,
             decoded_object_scale_centi: None,
             decoded_object_position_centi: None,
             decoded_object_rotation_quat_i16: None,
@@ -2069,6 +2072,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_total_objects: None,
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
+                decoded_object_parent_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
                 decoded_object_rotation_quat_i16: None,
@@ -2131,6 +2135,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_total_objects: None,
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
+                decoded_object_parent_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
                 decoded_object_rotation_quat_i16: None,
@@ -2203,6 +2208,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_total_objects: None,
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
+                decoded_object_parent_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
                 decoded_object_rotation_quat_i16: None,
@@ -2236,6 +2242,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_total_objects: None,
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
+                    decoded_object_parent_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
                     decoded_object_rotation_quat_i16: None,
@@ -2289,6 +2296,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_total_objects: None,
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
+                decoded_object_parent_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
                 decoded_object_rotation_quat_i16: None,
@@ -2341,6 +2349,7 @@ impl WorldObjectIngestionSeam {
                 decoded_object_feed_total_objects: None,
                 decoded_object_feed_export_truncated: false,
                 decoded_object_local_id: None,
+                decoded_object_parent_local_id: None,
                 decoded_object_scale_centi: None,
                 decoded_object_position_centi: None,
                 decoded_object_rotation_quat_i16: None,
@@ -2394,6 +2403,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_export_truncated: state
                         .decoded_object_feed_export_truncated,
                     decoded_object_local_id: None,
+                    decoded_object_parent_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
                     decoded_object_rotation_quat_i16: None,
@@ -2429,6 +2439,7 @@ impl WorldObjectIngestionSeam {
                         decoded_object_feed_export_truncated: state
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(obj.local_id),
+                        decoded_object_parent_local_id: obj.parent_local_id,
                         decoded_object_scale_centi: obj.scale_centi,
                         decoded_object_position_centi: obj.position_centi,
                         decoded_object_rotation_quat_i16: obj.rotation_quat_i16,
@@ -2465,6 +2476,7 @@ impl WorldObjectIngestionSeam {
                         decoded_object_feed_export_truncated: state
                             .decoded_object_feed_export_truncated,
                         decoded_object_local_id: Some(*local_id),
+                        decoded_object_parent_local_id: None,
                         decoded_object_scale_centi: None,
                         decoded_object_position_centi: None,
                         decoded_object_rotation_quat_i16: None,
@@ -2538,6 +2550,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_total_objects: None,
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
+                    decoded_object_parent_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
                     decoded_object_rotation_quat_i16: None,
@@ -2584,6 +2597,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_total_objects: None,
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
+                    decoded_object_parent_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
                     decoded_object_rotation_quat_i16: None,
@@ -2619,6 +2633,7 @@ impl WorldObjectIngestionSeam {
                     decoded_object_feed_total_objects: None,
                     decoded_object_feed_export_truncated: false,
                     decoded_object_local_id: None,
+                    decoded_object_parent_local_id: None,
                     decoded_object_scale_centi: None,
                     decoded_object_position_centi: None,
                     decoded_object_rotation_quat_i16: None,
@@ -2813,13 +2828,37 @@ impl Scene {
             return;
         }
 
-        let transform = world_object_feed_proxy_transform(item, coarse_anchor_pos);
+        let existing_instance_id = self.world_object_feed_map.get(&local_id).copied();
+        let previous_transform = existing_instance_id.and_then(|instance_id| {
+            self.instances
+                .get(&instance_id)
+                .map(|instance| instance.transform)
+        });
+        let parent_transform = item
+            .decoded_object_parent_local_id
+            .and_then(|parent_local_id| self.world_object_feed_map.get(&parent_local_id))
+            .and_then(|parent_instance_id| self.instances.get(parent_instance_id))
+            .map(|instance| instance.transform);
+        if existing_instance_id.is_none() {
+            if item.decoded_object_position_centi.is_none() {
+                return;
+            }
+            if item.decoded_object_parent_local_id.is_some() && parent_transform.is_none() {
+                return;
+            }
+        }
+        let transform = world_object_feed_proxy_transform(
+            item,
+            coarse_anchor_pos,
+            previous_transform,
+            parent_transform,
+        );
         let color = world_object_feed_proxy_color(local_id);
         let geometry = world_object_feed_geometry(item);
         let materials = world_object_feed_materials(item);
         let alpha_mode = world_object_feed_alpha_mode(&materials);
 
-        if let Some(&instance_id) = self.world_object_feed_map.get(&local_id)
+        if let Some(instance_id) = existing_instance_id
             && let Some(instance) = self.instances.get_mut(&instance_id)
         {
             if instance.transform != transform
@@ -3244,12 +3283,7 @@ impl Scene {
                 }
             }
 
-            let truncated = object_feed_summary
-                .map(|summary| summary.decoded_object_feed_export_truncated)
-                .unwrap_or(false);
-            if !truncated {
-                self.retain_world_object_feed(&present_ids);
-            }
+            self.retain_world_object_feed(&present_ids);
         }
 
         let coarse_item = seam
@@ -3967,32 +4001,38 @@ fn world_ingestion_decoded_viewer_time_color(item: &WorldObjectIngestionItem) ->
 fn world_object_feed_proxy_transform(
     item: &WorldObjectIngestionItem,
     coarse_anchor_pos: Option<[f32; 3]>,
+    previous_transform: Option<Transform>,
+    parent_transform: Option<Transform>,
 ) -> Transform {
-    let local_id = item.decoded_object_local_id.unwrap_or(0);
     let [base_x, base_z] = world_cluster_base(item.region_coords);
     let anchor = coarse_anchor_pos.unwrap_or([base_x + 0.25, 0.22, base_z - 0.15]);
 
     let (px, py, pz) = if let Some([x, y, z]) = item.decoded_object_position_centi {
-        // Map decoded SL-style local position (X,Y,Z) to scene-space (X,Z,Y) meters.
-        // Region-local coordinates are centered around 128m to stay aligned with the region anchor cluster.
         let x_m = x as f32 / 100.0;
         let y_m = y as f32 / 100.0;
         let z_m = z as f32 / 100.0;
+        if let Some(parent) = parent_transform {
+            (
+                parent.position[0] + x_m,
+                (parent.position[1] + z_m).clamp(0.01, 64.0),
+                parent.position[2] - y_m,
+            )
+        } else {
+            // Map decoded SL-style region local position (X,Y,Z) to scene-space (X,Z,-Y) meters.
+            (
+                base_x + (x_m - 128.0),
+                z_m.clamp(0.01, 64.0),
+                base_z - (y_m - 128.0),
+            )
+        }
+    } else if let Some(previous) = previous_transform {
         (
-            base_x + (x_m - 128.0),
-            z_m.clamp(0.01, 64.0),
-            base_z + (y_m - 128.0),
+            previous.position[0],
+            previous.position[1],
+            previous.position[2],
         )
     } else {
-        let bucket = (local_id % 64) as f32;
-        let ring = ((local_id / 64) % 8) as f32;
-        let heading = (bucket / 64.0) * core::f32::consts::TAU + ring * 0.17;
-        let radius = 0.55 + ring * 0.22;
-        (
-            anchor[0] + heading.cos() * radius,
-            (anchor[1] + 0.08 + ring * 0.03).clamp(0.05, 3.0),
-            anchor[2] + heading.sin() * radius,
-        )
+        (anchor[0], anchor[1], anchor[2])
     };
 
     let scale = item
@@ -4004,18 +4044,20 @@ fn world_object_feed_proxy_transform(
                 (y as f32 / 100.0).clamp(0.01, 64.0),
             ]
         })
+        .or_else(|| previous_transform.map(|previous| previous.scale))
         .unwrap_or([0.18, 0.18, 0.18]);
     let rotation = item
         .decoded_object_rotation_quat_i16
         .map(|[x, y, z, w]| {
-            // Map decoded SL quaternion (X,Y,Z,W) into scene-space axis convention (X,Z,Y,W).
+            // Map decoded SL quaternion (X,Y,Z,W) into scene-space axis convention (X,Z,-Y,W).
             [
                 f32::from(x) / 32_767.0,
                 f32::from(z) / 32_767.0,
-                f32::from(y) / 32_767.0,
+                -(f32::from(y) / 32_767.0),
                 f32::from(w) / 32_767.0,
             ]
         })
+        .or_else(|| previous_transform.map(|previous| previous.rotation))
         .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
     Transform {
@@ -4036,18 +4078,20 @@ fn world_object_feed_geometry(item: &WorldObjectIngestionItem) -> GeometrySource
 }
 
 fn world_object_feed_materials(item: &WorldObjectIngestionItem) -> MaterialSet {
+    let default_texture_fallback = AssetID::new("5748decc-f629-461c-9a36-a35a221fe21f");
     let mut default_material = item
         .decoded_object_default_face_material
         .as_ref()
         .map(face_material_payload_to_descriptor);
 
-    if default_material.is_none()
-        && let Some(texture_id) = item.decoded_object_texture_id.clone()
-    {
-        default_material = Some(MaterialDescriptor::Legacy(TextureEntry {
-            texture_id,
-            ..TextureEntry::default()
-        }));
+    if let Some(texture_id) = item.decoded_object_texture_id.clone() {
+        default_material = Some(match default_material {
+            Some(material) => material_with_default_texture_fallback(material, texture_id),
+            None => MaterialDescriptor::Legacy(TextureEntry {
+                texture_id,
+                ..TextureEntry::default()
+            }),
+        });
     }
 
     let mut by_face = BTreeMap::new();
@@ -4055,9 +4099,73 @@ fn world_object_feed_materials(item: &WorldObjectIngestionItem) -> MaterialSet {
         by_face.insert(face.face_id, face_material_payload_to_descriptor(face));
     }
 
+    let default_needs_texture = match default_material.as_ref() {
+        None => true,
+        Some(material) => material_has_empty_primary_texture(material),
+    };
+    if default_needs_texture {
+        let fallback_from_override = by_face.values().find_map(material_primary_texture_id);
+        if let Some(fallback_texture_id) = fallback_from_override {
+            default_material = Some(match default_material {
+                Some(material) => {
+                    material_with_default_texture_fallback(material, fallback_texture_id)
+                }
+                None => MaterialDescriptor::Legacy(TextureEntry {
+                    texture_id: fallback_texture_id,
+                    ..TextureEntry::default()
+                }),
+            });
+        } else {
+            default_material = Some(match default_material {
+                Some(material) => {
+                    material_with_default_texture_fallback(material, default_texture_fallback)
+                }
+                None => MaterialDescriptor::Legacy(TextureEntry {
+                    texture_id: default_texture_fallback,
+                    ..TextureEntry::default()
+                }),
+            });
+        }
+    }
+
     MaterialSet {
         default: default_material.unwrap_or_default(),
         by_face,
+    }
+}
+
+fn material_primary_texture_id(material: &MaterialDescriptor) -> Option<AssetID> {
+    match material {
+        MaterialDescriptor::Legacy(entry) => {
+            (!entry.texture_id.is_empty()).then(|| entry.texture_id.clone())
+        }
+        MaterialDescriptor::Pbr(pbr) => {
+            (!pbr.base_color_id.is_empty()).then(|| pbr.base_color_id.clone())
+        }
+    }
+}
+
+fn material_has_empty_primary_texture(material: &MaterialDescriptor) -> bool {
+    material_primary_texture_id(material).is_none()
+}
+
+fn material_with_default_texture_fallback(
+    material: MaterialDescriptor,
+    fallback_texture_id: AssetID,
+) -> MaterialDescriptor {
+    match material {
+        MaterialDescriptor::Legacy(mut entry) => {
+            if entry.texture_id.is_empty() {
+                entry.texture_id = fallback_texture_id;
+            }
+            MaterialDescriptor::Legacy(entry)
+        }
+        MaterialDescriptor::Pbr(mut pbr) => {
+            if pbr.base_color_id.is_empty() {
+                pbr.base_color_id = fallback_texture_id;
+            }
+            MaterialDescriptor::Pbr(pbr)
+        }
     }
 }
 
@@ -4091,7 +4199,7 @@ fn face_material_payload_to_descriptor(
         offset_t: f32::from(face.offset_t) / 32767.0,
         scale_s: f32::from(face.scale_s) / 10_000.0,
         scale_t: f32::from(face.scale_t) / 10_000.0,
-        rotation: f32::from(face.rotation) / 32767.0,
+        rotation: (f32::from(face.rotation) / 32_768.0) * core::f32::consts::TAU,
         bump: face.bump,
         fullbright: face.fullbright,
         shiny: face.shiny,
@@ -4101,15 +4209,19 @@ fn face_material_payload_to_descriptor(
 
 fn world_object_feed_alpha_mode(materials: &MaterialSet) -> AlphaMode {
     let default_alpha = material_alpha(&materials.default);
-    if default_alpha < 0.995 {
-        return AlphaMode::Blend;
+    let mut mode = classify_material_alpha_mode(default_alpha);
+    if matches!(mode, AlphaMode::Blend) {
+        return mode;
     }
     for material in materials.by_face.values() {
-        if material_alpha(material) < 0.995 {
-            return AlphaMode::Blend;
+        let next = classify_material_alpha_mode(material_alpha(material));
+        match next {
+            AlphaMode::Blend => return AlphaMode::Blend,
+            AlphaMode::AlphaTest { .. } => mode = next,
+            AlphaMode::Opaque => {}
         }
     }
-    AlphaMode::Opaque
+    mode
 }
 
 fn material_alpha(material: &MaterialDescriptor) -> f32 {
@@ -4119,12 +4231,19 @@ fn material_alpha(material: &MaterialDescriptor) -> f32 {
     }
 }
 
+fn classify_material_alpha_mode(alpha: f32) -> AlphaMode {
+    if alpha >= 0.995 {
+        AlphaMode::Opaque
+    } else if alpha >= 0.90 {
+        AlphaMode::AlphaTest { cutoff: 0.5 }
+    } else {
+        AlphaMode::Blend
+    }
+}
+
 fn world_object_feed_proxy_color(local_id: u32) -> [f32; 4] {
-    let hash = local_id.wrapping_mul(2_654_435_761);
-    let r = ((hash & 0xFF) as f32) / 255.0;
-    let g = (((hash >> 8) & 0xFF) as f32) / 255.0;
-    let b = (((hash >> 16) & 0xFF) as f32) / 255.0;
-    [0.30 + r * 0.55, 0.30 + g * 0.55, 0.30 + b * 0.55, 1.0]
+    let _ = local_id;
+    [1.0, 1.0, 1.0, 1.0]
 }
 
 fn world_ingestion_decoded_composite_transform(
@@ -6091,8 +6210,9 @@ mod tests {
         snapshot.decoded_object_feed_objects = vec![
             DecodedWorldObjectFeedObject {
                 local_id: 42,
+                parent_local_id: None,
                 scale_centi: Some([20, 30, 40]),
-                position_centi: None,
+                position_centi: Some([12_800, 12_800, 120]),
                 rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
@@ -6102,8 +6222,9 @@ mod tests {
             },
             DecodedWorldObjectFeedObject {
                 local_id: 99,
+                parent_local_id: None,
                 scale_centi: None,
-                position_centi: None,
+                position_centi: Some([12_900, 12_700, 120]),
                 rotation_quat_i16: None,
                 mesh_id: None,
                 texture_id: None,
@@ -6128,8 +6249,9 @@ mod tests {
         truncated.decoded_object_feed_export_truncated = true;
         truncated.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
+            parent_local_id: None,
             scale_centi: Some([20, 30, 40]),
-            position_centi: None,
+            position_centi: Some([12_800, 12_800, 120]),
             rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
@@ -6145,7 +6267,7 @@ mod tests {
                 .values()
                 .filter(|i| i.role == InstanceRole::WorldObjectFeedProxy)
                 .count(),
-            2
+            1
         );
 
         let mut remove_one = snapshot;
@@ -6153,8 +6275,9 @@ mod tests {
         remove_one.decoded_object_feed_export_truncated = false;
         remove_one.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
+            parent_local_id: None,
             scale_centi: Some([20, 30, 40]),
-            position_centi: None,
+            position_centi: Some([12_800, 12_800, 120]),
             rotation_quat_i16: None,
             mesh_id: None,
             texture_id: None,
@@ -6182,6 +6305,7 @@ mod tests {
         snapshot.decoded_object_feed_export_truncated = false;
         snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
+            parent_local_id: None,
             scale_centi: Some([120, 340, 560]),
             position_centi: Some([13000, 12550, 250]),
             rotation_quat_i16: None,
@@ -6212,6 +6336,7 @@ mod tests {
         snapshot.decoded_object_feed_export_truncated = false;
         snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
+            parent_local_id: None,
             scale_centi: None,
             position_centi: None,
             rotation_quat_i16: None,
@@ -6240,6 +6365,7 @@ mod tests {
         snapshot.decoded_object_feed_export_truncated = false;
         snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 77,
+            parent_local_id: None,
             scale_centi: Some([100, 100, 100]),
             position_centi: Some([12800, 12800, 100]),
             rotation_quat_i16: Some([0, 23_170, 0, 23_170]),
@@ -6256,7 +6382,7 @@ mod tests {
             .values()
             .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
             .expect("world object feed proxy should exist");
-        let expected = [0.0, 0.0, 23_170.0 / 32_767.0, 23_170.0 / 32_767.0];
+        let expected = [0.0, 0.0, -(23_170.0 / 32_767.0), 23_170.0 / 32_767.0];
         for (actual, expected_component) in proxy.transform.rotation.iter().zip(expected) {
             assert!((actual - expected_component).abs() <= 0.0005);
         }
@@ -6270,6 +6396,7 @@ mod tests {
         snapshot.decoded_object_feed_export_truncated = false;
         snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
+            parent_local_id: None,
             scale_centi: Some([20, 30, 40]),
             position_centi: None,
             rotation_quat_i16: None,
@@ -6312,8 +6439,9 @@ mod tests {
         snapshot.decoded_object_feed_export_truncated = false;
         snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 42,
+            parent_local_id: None,
             scale_centi: Some([20, 30, 40]),
-            position_centi: None,
+            position_centi: Some([12_800, 12_800, 120]),
             rotation_quat_i16: None,
             mesh_id: Some(String::from("947D4505-EB76-2EF5-C049-E7882881D689")),
             texture_id: Some(AssetID::new("10930d3b-1821-c584-a0c7-28a34999800d")),
@@ -6345,6 +6473,7 @@ mod tests {
         snapshot.decoded_object_feed_export_truncated = false;
         snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
             local_id: 4242,
+            parent_local_id: None,
             scale_centi: Some([100, 100, 100]),
             position_centi: None,
             rotation_quat_i16: None,
@@ -6398,6 +6527,279 @@ mod tests {
         assert_eq!(proxy.alpha_mode, AlphaMode::Blend);
         let face_3_ids = proxy.materials.material_for_face(3).texture_ids();
         assert_eq!(face_3_ids, vec![AssetID::new("tex_face_3")]);
+    }
+
+    #[test]
+    fn scene_world_object_feed_fills_empty_default_face_texture_from_object_fallback() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 5150,
+            parent_local_id: None,
+            scale_centi: None,
+            position_centi: None,
+            rotation_quat_i16: None,
+            mesh_id: None,
+            texture_id: Some(AssetID::new("fallback_tex")),
+            default_face_material: Some(DecodedWorldObjectFaceMaterial {
+                face_id: 0,
+                texture_id: None,
+                normal_id: None,
+                specular_id: None,
+                material_id: Some(AssetID::new("material_only_default")),
+                rgba: [255, 255, 255, 255],
+                offset_s: 0,
+                offset_t: 0,
+                scale_s: 10_000,
+                scale_t: 10_000,
+                rotation: 0,
+                bump: 0,
+                fullbright: false,
+                shiny: 0,
+                media_flags: 0,
+                glow: 0,
+            }),
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+        let default_ids = proxy.materials.default.texture_ids();
+        assert_eq!(default_ids, vec![AssetID::new("fallback_tex")]);
+    }
+
+    #[test]
+    fn scene_world_object_feed_promotes_face_override_texture_to_default_fallback() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 5252,
+            parent_local_id: None,
+            scale_centi: None,
+            position_centi: Some([12_800, 12_800, 220]),
+            rotation_quat_i16: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: vec![DecodedWorldObjectFaceMaterial {
+                face_id: 3,
+                texture_id: Some(AssetID::new("tex_face_only")),
+                normal_id: None,
+                specular_id: None,
+                material_id: None,
+                rgba: [255, 255, 255, 255],
+                offset_s: 0,
+                offset_t: 0,
+                scale_s: 10_000,
+                scale_t: 10_000,
+                rotation: 0,
+                bump: 0,
+                fullbright: false,
+                shiny: 0,
+                media_flags: 0,
+                glow: 0,
+            }],
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let proxy = scene
+            .instances
+            .values()
+            .find(|i| i.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist");
+        let default_ids = proxy.materials.default.texture_ids();
+        assert_eq!(default_ids, vec![AssetID::new("tex_face_only")]);
+    }
+
+    #[test]
+    fn scene_world_object_feed_positionless_update_retains_existing_position() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 991,
+            parent_local_id: None,
+            scale_centi: Some([100, 100, 100]),
+            position_centi: Some([12_900, 13_100, 220]),
+            rotation_quat_i16: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let first_pos = scene
+            .instances
+            .values()
+            .find(|instance| instance.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should exist")
+            .transform
+            .position;
+
+        snapshot.decoded_object_feed_objects[0].position_centi = None;
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let second_pos = scene
+            .instances
+            .values()
+            .find(|instance| instance.role == InstanceRole::WorldObjectFeedProxy)
+            .expect("world object feed proxy should still exist")
+            .transform
+            .position;
+
+        assert!((first_pos[0] - second_pos[0]).abs() < 0.0001);
+        assert!((first_pos[1] - second_pos[1]).abs() < 0.0001);
+        assert!((first_pos[2] - second_pos[2]).abs() < 0.0001);
+    }
+
+    #[test]
+    fn scene_world_object_feed_skips_first_sighting_without_position() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 8801,
+            parent_local_id: None,
+            scale_centi: Some([100, 100, 100]),
+            position_centi: None,
+            rotation_quat_i16: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene
+                .instances
+                .values()
+                .all(|instance| instance.role != InstanceRole::WorldObjectFeedProxy)
+        );
+
+        snapshot.decoded_object_feed_objects[0].position_centi = Some([12_800, 12_800, 220]);
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene
+                .instances
+                .values()
+                .any(|instance| instance.role == InstanceRole::WorldObjectFeedProxy)
+        );
+    }
+
+    #[test]
+    fn scene_world_object_feed_parented_child_uses_parent_relative_position() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 2;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![
+            DecodedWorldObjectFeedObject {
+                local_id: 100,
+                parent_local_id: None,
+                scale_centi: Some([100, 100, 100]),
+                position_centi: Some([12_800, 12_800, 220]),
+                rotation_quat_i16: None,
+                mesh_id: None,
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+            DecodedWorldObjectFeedObject {
+                local_id: 101,
+                parent_local_id: Some(100),
+                scale_centi: Some([100, 100, 100]),
+                position_centi: Some([100, 0, 0]),
+                rotation_quat_i16: None,
+                mesh_id: None,
+                texture_id: None,
+                default_face_material: None,
+                face_material_overrides: Vec::new(),
+                object_id: None,
+            },
+        ];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+
+        let parent_id = scene
+            .world_object_feed_map
+            .get(&100)
+            .copied()
+            .expect("parent proxy should exist");
+        let child_id = scene
+            .world_object_feed_map
+            .get(&101)
+            .copied()
+            .expect("child proxy should exist");
+        let parent_pos = scene
+            .instances
+            .get(&parent_id)
+            .expect("parent instance should exist")
+            .transform
+            .position;
+        let child_pos = scene
+            .instances
+            .get(&child_id)
+            .expect("child instance should exist")
+            .transform
+            .position;
+        assert!((child_pos[0] - (parent_pos[0] + 1.0)).abs() < 0.0001);
+        assert!((child_pos[1] - parent_pos[1]).abs() < 0.0001);
+        assert!((child_pos[2] - parent_pos[2]).abs() < 0.0001);
+    }
+
+    #[test]
+    fn scene_world_object_feed_skips_first_sighting_parented_child_without_parent() {
+        let mut scene = Scene::prototype();
+        let mut snapshot = sample_snapshot(true, true);
+        snapshot.decoded_object_feed_total_objects = 1;
+        snapshot.decoded_object_feed_export_truncated = false;
+        snapshot.decoded_object_feed_objects = vec![DecodedWorldObjectFeedObject {
+            local_id: 8802,
+            parent_local_id: Some(7000),
+            scale_centi: Some([100, 100, 100]),
+            position_centi: Some([100, 0, 0]),
+            rotation_quat_i16: None,
+            mesh_id: None,
+            texture_id: None,
+            default_face_material: None,
+            face_material_overrides: Vec::new(),
+            object_id: None,
+        }];
+        apply_scene_from_snapshot(&mut scene, Some(&snapshot));
+        assert!(
+            scene.world_object_feed_map.get(&8802).is_none(),
+            "unresolved parented child should not be spawned at fallback anchor"
+        );
+    }
+
+    #[test]
+    fn world_object_feed_alpha_mode_classifies_near_opaque_as_alpha_test() {
+        let materials = MaterialSet {
+            default: MaterialDescriptor::Legacy(TextureEntry {
+                rgba: [1.0, 1.0, 1.0, 0.95],
+                ..TextureEntry::default()
+            }),
+            by_face: BTreeMap::new(),
+        };
+        assert_eq!(
+            world_object_feed_alpha_mode(&materials),
+            AlphaMode::AlphaTest { cutoff: 0.5 }
+        );
     }
 
     #[test]
@@ -6506,6 +6908,7 @@ mod tests {
             decoded_object_feed_total_objects: None,
             decoded_object_feed_export_truncated: false,
             decoded_object_local_id: None,
+            decoded_object_parent_local_id: None,
             decoded_object_scale_centi: None,
             decoded_object_position_centi: None,
             decoded_object_rotation_quat_i16: None,

@@ -310,9 +310,11 @@ fn decode_lod_mesh(value: BinaryLlsdValue) -> Result<ProcessedMesh> {
 
         let base_index = vertices.len() as u32;
         for idx in 0..decoded_positions.len() {
+            let position = sl_to_scene_axis(decoded_positions[idx]);
+            let normal = sl_to_scene_axis(decoded_normals[idx]);
             vertices.push(Vertex {
-                position: decoded_positions[idx],
-                normal: decoded_normals[idx],
+                position,
+                normal,
                 tex_coord: decoded_texcoords[idx],
             });
         }
@@ -340,6 +342,12 @@ fn decode_lod_mesh(value: BinaryLlsdValue) -> Result<ProcessedMesh> {
         submeshes,
         aabb,
     })
+}
+
+fn sl_to_scene_axis(v: [f32; 3]) -> [f32; 3] {
+    // SL/object payloads are Z-up. Our renderer scene is Y-up.
+    // Use a right-handed basis conversion: (x, y, z) -> (x, z, -y).
+    [v[0], v[2], -v[1]]
 }
 
 fn decode_position_stream(bytes: &[u8], min: [f32; 3], max: [f32; 3]) -> Result<Vec<[f32; 3]>> {
@@ -853,6 +861,11 @@ pub(crate) mod tests {
             .expect("fallback LOD should decode");
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.submeshes.len(), 1);
+    }
+
+    #[test]
+    fn sl_to_scene_axis_maps_z_up_to_y_up() {
+        assert_eq!(sl_to_scene_axis([1.0, 2.0, 3.0]), [1.0, 3.0, -2.0]);
     }
 
     #[test]
